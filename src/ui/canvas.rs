@@ -59,6 +59,31 @@ impl AnnotationCanvas {
         self.imp().current_tool.get()
     }
 
+    /// Render with a transparent background when no base image is loaded. The annotation editor
+    /// keeps the default (dark fill) so an unloaded canvas is visible, but the live overlay
+    /// flips this on so clicks/strokes appear directly on top of the desktop.
+    pub fn set_transparent(&self, transparent: bool) {
+        self.imp().transparent_background.set(transparent);
+        self.queue_draw();
+    }
+
+    /// Replace the current document with an empty one of the given logical size. Used by the
+    /// live overlay to spin up a canvas sized to a monitor without owning any pixels.
+    pub fn set_empty(&self, size: (u32, u32)) {
+        self.set_document(Document::empty(size));
+    }
+
+    /// Drop every committed layer (used by the overlay's "clear" shortcut).
+    pub fn clear_layers(&self) {
+        if let Some(doc_rc) = self.imp().doc.borrow().clone() {
+            let mut doc = doc_rc.borrow_mut();
+            doc.layers.clear();
+            doc.crop = None;
+            drop(doc);
+            self.queue_draw();
+        }
+    }
+
     /// Pop the most recently committed layer, if any. Falls back to clearing an active crop when
     /// there are no layers left — otherwise crops would be undoable only by closing the editor.
     pub fn undo(&self) -> bool {
@@ -327,6 +352,9 @@ mod imp {
         pub pending: RefCell<Option<PendingStroke>>,
         /// Auto-increment counter used by the Number tool. Resets when a new document is loaded.
         pub next_number: Cell<u32>,
+        /// When true, baseless documents render with a transparent background instead of the
+        /// editor's dark fill — used by the live overlay so strokes float over the desktop.
+        pub transparent_background: Cell<bool>,
     }
 
     impl Default for AnnotationCanvas {
@@ -337,6 +365,7 @@ mod imp {
                 current_tool: Cell::new(ToolKind::Rect),
                 pending: RefCell::new(None),
                 next_number: Cell::new(1),
+                transparent_background: Cell::new(false),
             }
         }
     }
@@ -385,10 +414,14 @@ mod imp {
             let bounds = gtk4::graphene::Rect::new(0.0, 0.0, width, height);
 
             let cr = snapshot.append_cairo(&bounds);
-            // Neutral background for documents without a base image.
+            // Neutral background for documents without a base image, unless the host opted into
+            // a transparent canvas (live overlay) — in that case we leave the background alone
+            // so the desktop shows through.
             if doc.base.is_none() {
-                cr.set_source_rgba(0.1, 0.1, 0.12, 1.0);
-                cr.paint().ok();
+                if !self.transparent_background.get() {
+                    cr.set_source_rgba(0.1, 0.1, 0.12, 1.0);
+                    cr.paint().ok();
+                }
             } else if let Some(bs) = self.base_surface.borrow().as_ref() {
                 cr.set_source_surface(bs, 0.0, 0.0).ok();
                 cr.paint().ok();

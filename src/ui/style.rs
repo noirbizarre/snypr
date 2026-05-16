@@ -13,7 +13,10 @@ pub const CSS: &str = r#"
  * over the live desktop, not over GTK's default opaque window background. */
 window.hyprsnap-selector,
 window.hyprsnap-selector decoration,
-window.hyprsnap-selector > * {
+window.hyprsnap-selector > *,
+window.hyprsnap-overlay,
+window.hyprsnap-overlay decoration,
+window.hyprsnap-overlay > * {
     background: transparent;
     background-color: transparent;
     box-shadow: none;
