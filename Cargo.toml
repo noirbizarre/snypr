@@ -1,0 +1,117 @@
+[package]
+name = "hyprsnap"
+edition = "2024"
+version = "0.0.1"
+description = "A GTK-based snapshot and annotation tool for Hyprland"
+readme = "README.md"
+repository = "https://github.com/noirbizarre/hyprsnap"
+license = "MIT"
+
+[[bin]]
+name = "hyprsnap"
+path = "src/main.rs"
+
+[features]
+default = ["ui", "tray"]
+ui = [
+    "dep:gtk4",
+    "dep:gdk4",
+    "dep:gdk4-wayland",
+    "dep:gsk4",
+    "dep:gtk4-layer-shell",
+    "dep:glib",
+    "dep:cairo-rs",
+    "dep:pango",
+]
+tray = ["dep:ksni"]
+# Reserved for tests that require a live Wayland compositor.
+integration-wayland = []
+
+[dependencies]
+# Errors / logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+
+# Async runtime
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "sync",
+    "fs",
+    "io-util",
+    "time",
+    "signal",
+] }
+async-channel = "2"
+async-trait = "0.1"
+
+# Config / paths / serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+directories = "6"
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "clock",
+] }
+
+# Image
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+] }
+bytemuck = "1"
+
+# Wayland (capture)
+smithay-client-toolkit = "0.20"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+memmap2 = "0.9"
+
+# Clipboard
+wl-clipboard-rs = "0.9"
+
+# Hyprland IPC
+hyprland = "0.3"
+
+# GTK stack (optional via `ui` feature)
+gtk4 = { version = "0.11", features = ["v4_14"], optional = true }
+gdk4 = { version = "0.11", optional = true }
+gdk4-wayland = { version = "0.11", optional = true }
+gsk4 = { version = "0.11", optional = true }
+gtk4-layer-shell = { version = "0.8", optional = true }
+glib = { version = "0.22", optional = true }
+cairo-rs = { version = "0.22", optional = true }
+pango = { version = "0.22", optional = true }
+
+# Tray (optional)
+ksni = { version = "0.3", optional = true }
+
+[dev-dependencies]
+rstest = "0.23"
+pretty_assertions = "1"
+tempfile = "3"
+
+# Image/compression crates dominate end-to-end screenshot time. Building them at -O3 even in
+# dev profile drops PNG encode for a 5760x3360 capture from ~18 s to well under 1 s.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.adler2]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
