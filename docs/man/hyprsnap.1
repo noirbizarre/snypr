@@ -1,0 +1,99 @@
+.TH HYPRSNAP 1 "2026" "hyprsnap" "User Commands"
+.SH NAME
+hyprsnap \- screenshot, annotation, and live-drawing tool for Hyprland
+.SH SYNOPSIS
+.B hyprsnap
+[\fIGLOBAL OPTIONS\fR] \fICOMMAND\fR [\fICOMMAND OPTIONS\fR]
+.SH DESCRIPTION
+.B hyprsnap
+is a GTK4-based screenshot, annotation, and live-drawing tool targeting
+.BR Hyprland (1)
+and other wlroots-based compositors. It captures pixels via the
+\fIzwlr_screencopy_manager_v1\fR Wayland protocol, renders selectors and overlays through
+\fIgtk4-layer-shell\fR, and draws annotations on a GTK4 canvas.
+.SH GLOBAL OPTIONS
+.TP
+.BR \-\-via-daemon
+Forward the command to a running \fBhyprsnap daemon\fR over its Unix socket instead of
+performing it locally. Only \fBscreenshot\fR is currently supported over IPC.
+.TP
+.BR \-\-config " " \fIPATH\fR
+Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR.
+.TP
+.BR \-v ", " \-\-verbose
+Increase log verbosity (repeatable).
+.SH COMMANDS
+.SS screenshot
+Capture pixels and pipe them to one or more sinks without opening the editor.
+.TP
+.BR \-\-full
+Stitch the bounding box covering every output into a single image.
+.TP
+.BR \-\-per\-output
+Produce one file per output. Requires a filename template containing \fB{output}\fR.
+.TP
+.BR \-\-focused
+Capture the currently focused window, queried over Hyprland's IPC.
+.TP
+.BR \-\-window " " \fIADDRESS\fR
+Capture a specific Hyprland window by address.
+.TP
+.BR \-\-output " " \fINAME\fR
+Capture a single output (\fIDP-1\fR, \fIeDP-1\fR, ...).
+.TP
+.BR \-\-region " " \fIX,Y,WxH\fR
+Capture an explicit logical-pixel region.
+.TP
+.BR \-\-interactive
+Open the selector overlay and let the user draw a region.
+.TP
+.BR \-\-to " " \fISINK\fR
+Add an output sink. May be passed multiple times. Recognised forms:
+\fBfile\fR (write to the configured directory), \fBfile=\fIPATH\fR (write to \fIPATH\fR),
+\fBclipboard\fR (copy via \fIwl-copy\fR).
+.TP
+.BR \-\-cursor
+Include the hardware cursor in the capture.
+.TP
+.BR \-\-delay " " \fIMS\fR
+Wait \fIMS\fR milliseconds before capturing.
+.SS capture
+Run the full pipeline: interactive selector \(-> wlr-screencopy \(-> annotation editor
+\(-> sinks. Sink flags match \fBscreenshot\fR.
+.SS annotate
+Open the annotation editor on an existing image:
+.RS
+.B hyprsnap annotate
+\fIIMAGE\fR
+.RE
+.SS draw
+Launch the live draw-on-screen overlay. Keys: \fBR\fR rectangle, \fBA\fR arrow,
+\fBH\fR highlight, \fBF\fR freehand, \fBN\fR numbered marker, \fBX\fR redact,
+\fBCtrl+Z\fR undo, \fBCtrl+L\fR clear all, \fBP\fR toggle pointer passthrough,
+\fBEsc\fR quit.
+.SS daemon
+Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. When
+\fI[tray].enabled = true\fR in the config, also registers a StatusNotifierItem with
+Screenshot / Capture / Draw / Quit menu items.
+.SH CONFIGURATION
+.B hyprsnap
+reads \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR. Every field is optional; see the
+sample in the project README. Filename template tokens: \fB{ts}\fR, \fB{date}\fR,
+\fB{time}\fR, \fB{output}\fR, \fB{selection}\fR.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/hyprsnap/config.toml
+User configuration.
+.TP
+.I $XDG_PICTURES_DIR/Screenshots/
+Default save directory.
+.TP
+.I $XDG_RUNTIME_DIR/hyprsnap.sock
+Daemon control socket.
+.SH SEE ALSO
+.BR grim (1),
+.BR slurp (1),
+.BR wl-copy (1),
+.BR Hyprland (1)
+.SH AUTHORS
+HyprSnap contributors. Source: https://github.com/anomalyco/hyprsnap

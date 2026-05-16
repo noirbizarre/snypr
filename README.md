@@ -12,15 +12,17 @@ Screen capture talks the `zwlr_screencopy_manager_v1` Wayland protocol directly;
 
 ## Status
 
-This is an early-stage project. The first vertical slice (capture → encode → file / clipboard) is implemented; full UI flows are landing incrementally per the plan in `.opencode/plans/`.
+The five subcommands are wired end-to-end. Tool work is feature-complete except for `Text`
+(needs a text-entry popover) and `Blur` (needs live region blur), which are deferred to a
+follow-up release.
 
-| Subcommand    | Status                                                              |
-| ------------- | ------------------------------------------------------------------- |
-| `screenshot`  | Capture pipeline + file/clipboard sinks implemented                 |
-| `annotate`    | Editor window opens and loads images; tool drawing in progress      |
-| `capture`     | Wired end-to-end; selector overlay pending                          |
-| `draw`        | Stub — live overlay pending                                         |
-| `daemon`      | IPC server running; handlers in progress                            |
+| Subcommand    | Status                                                                            |
+| ------------- | --------------------------------------------------------------------------------- |
+| `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`       |
+| `annotate`    | Editor with Rect / Arrow / Highlight / Freehand / Number / Redact / Crop tools    |
+| `capture`     | Selector → wlr-screencopy → editor (in-memory base) → sinks                       |
+| `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools    |
+| `daemon`      | IPC server: `Ping`, `Screenshot`; tray (StatusNotifierItem) when enabled in config|
 
 ## Build
 
@@ -48,23 +50,64 @@ hyprsnap screenshot --full --to file=/tmp/shot.png
 # the screenshot is written to $XDG_PICTURES_DIR/Screenshots/.
 hyprsnap screenshot --full
 
+# One file per output (uses {output} in the filename template).
+hyprsnap screenshot --full --per-output
+
 # Specific output by name, copied to the clipboard.
 hyprsnap screenshot --output DP-1 --to clipboard
 
-# Explicit region (logical pixels).
+# Focused window, queried over Hyprland IPC.
+hyprsnap screenshot --focused
+
+# Explicit region (logical pixels): X,Y,WxH.
 hyprsnap screenshot --region 100,200,800x600 --to file
+
+# Interactive region selector → annotation editor → sinks.
+hyprsnap capture --to clipboard --to file
+
+# Live draw-on-screen overlay (R/A/H/F/N/X tools, Ctrl+Z undo, P passthrough, Esc quit).
+hyprsnap draw
 
 # Open the annotation editor on an existing image.
 hyprsnap annotate ~/Pictures/shot.png
+
+# Run the daemon (StatusNotifierItem tray + IPC server).
+hyprsnap daemon
+
+# Take a screenshot via the running daemon instead of spawning a fresh process.
+hyprsnap --via-daemon screenshot --full
 ```
+
+### Editor & overlay keybinds
+
+| Key      | Action                       |
+| -------- | ---------------------------- |
+| `R`      | Rectangle tool               |
+| `A`      | Arrow tool                   |
+| `H`      | Highlight tool               |
+| `F`      | Freehand tool                |
+| `N`      | Numbered marker              |
+| `X`      | Redact (solid black)         |
+| `C`      | Crop (editor only)           |
+| `Ctrl+Z` | Undo last layer              |
+| `Ctrl+S` | Save (editor only)           |
+| `P`      | Toggle pointer passthrough (overlay only) |
+| `Ctrl+L` | Clear all layers (overlay only)           |
+| `Esc`    | Quit                         |
 
 ### Hyprland keybindings
 
+A ready-to-paste sample lives in [`docs/hyprland.conf.example`](docs/hyprland.conf.example):
+
 ```hyprlang
 # ~/.config/hypr/hyprland.conf
-bind = SUPER,        Print, exec, hyprsnap screenshot --interactive --to clipboard --to file
+bind = SUPER,        Print, exec, hyprsnap capture --to clipboard --to file
 bind = SUPER SHIFT,  Print, exec, hyprsnap screenshot --full --to file
+bind = SUPER CTRL,   Print, exec, hyprsnap screenshot --focused --to clipboard
 bind = SUPER ALT,    Print, exec, hyprsnap draw
+
+# Autostart the daemon (enables the tray and `--via-daemon`).
+exec-once = hyprsnap daemon
 ```
 
 ## Configuration

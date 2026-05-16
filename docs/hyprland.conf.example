@@ -1,0 +1,25 @@
+# HyprSnap — Hyprland keybinding sample
+#
+# Drop this into ~/.config/hypr/hyprland.conf (or `source =` it from there)
+# to get a complete set of screenshot / capture / draw shortcuts.
+
+# Interactive region selector, then annotation editor; saves to file AND clipboard.
+bind = SUPER,        Print, exec, hyprsnap capture --to clipboard --to file
+
+# Full desktop, stitched across every output, written to the configured directory.
+bind = SUPER SHIFT,  Print, exec, hyprsnap screenshot --full --to file
+
+# One PNG per monitor (uses {output} in the filename template).
+bind = SUPER SHIFT ALT, Print, exec, hyprsnap screenshot --full --per-output --to file
+
+# Currently focused window (queried over Hyprland IPC), copied to the clipboard.
+bind = SUPER CTRL,   Print, exec, hyprsnap screenshot --focused --to clipboard
+
+# Live draw-on-screen overlay — ideal for presentations / Google Meet.
+# Inside the overlay: R/A/H/F/N/X to pick tools, Ctrl+Z to undo, P to toggle
+# pointer passthrough, Ctrl+L to clear, Esc to quit.
+bind = SUPER ALT,    Print, exec, hyprsnap draw
+
+# Autostart the daemon so the StatusNotifierItem tray icon appears and
+# `hyprsnap --via-daemon ...` works.
+exec-once = hyprsnap daemon
