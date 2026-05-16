@@ -1,14 +1,17 @@
 //! Interactive region selector overlay.
 //!
-//! Renders one fullscreen `gtk4_layer_shell` window per monitor at `Layer::Overlay` with
-//! exclusive keyboard interactivity. The user drags a rectangle on any monitor; the first
-//! window to finalise (mouse release, Enter, or Esc on any surface) commits the result and
-//! tears down the rest.
+//! Renders one fullscreen `gtk4_layer_shell` window per monitor at `Layer::Overlay`. All
+//! overlays share a single selection state (current rectangle + owning monitor) so that
+//! starting a new drag on any monitor cancels the previous rectangle.
 //!
-//! The selection is returned in compositor logical coordinates (the same space Hyprland and
-//! `wlr-screencopy` report), so it can be plugged straight into `Selection::Region`.
+//! Workflow:
+//!   - Drag a rectangle on any monitor.
+//!   - Release the mouse: rectangle stays on screen.
+//!   - Drag again (same or different monitor): replaces the previous rectangle.
+//!   - Enter (or KP Enter): commit and return the rect in compositor logical coordinates.
+//!   - Esc: cancel.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -19,28 +22,43 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use crate::capture::region::Rect;
 use crate::context::Ctx;
 
-/// Show the selector and return the chosen region (in logical compositor coordinates).
-///
-/// Cancellation (`Esc`, window close, or an empty drag) surfaces as an error so callers can
-/// short-circuit the rest of the screenshot pipeline.
+/// Show the selector and return the chosen region (logical compositor coordinates).
 pub async fn pick_region(_ctx: Ctx) -> Result<Rect> {
     let (tx, rx) = mpsc::sync_channel::<Result<Rect>>(1);
     tokio::task::spawn_blocking(move || run_gtk(tx))
         .await
         .map_err(|e| anyhow!("selector task panicked: {e}"))??;
-    rx.recv()
-        .map_err(|e| anyhow!("selector channel closed without a result: {e}"))?
+    let result = rx
+        .recv()
+        .map_err(|e| anyhow!("selector channel closed without a result: {e}"))?;
+    if result.is_ok() {
+        // Overlays are destroyed + flushed synchronously inside `commit()`, but Hyprland still
+        // processes the unmap on its own event loop. A short grace window avoids the dimmed
+        // veil leaking into the wlr-screencopy frame.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    result
 }
 
-/// Per-overlay live selection state (widget-local pixels).
+/// Per-monitor descriptor needed by signal handlers. Only `index` is consulted at runtime
+/// (the logical x/y are looked up via `gdk::Monitor::geometry()` at commit time), but tracking
+/// them here makes the intent of the call sites explicit.
+#[derive(Clone, Copy, Debug)]
+struct MonitorInfo {
+    index: usize,
+}
+
+/// Shared selection state: which monitor owns the current rect, plus the local drag points
+/// expressed in that monitor's widget-local pixels.
 #[derive(Clone, Copy, Debug, Default)]
-struct LiveSelection {
+struct SharedSelection {
+    owner: Option<usize>,
     start: Option<(f64, f64)>,
     current: Option<(f64, f64)>,
 }
 
-impl LiveSelection {
-    fn rect(&self) -> Option<(f64, f64, f64, f64)> {
+impl SharedSelection {
+    fn rect_local(&self) -> Option<(f64, f64, f64, f64)> {
         let (sx, sy) = self.start?;
         let (cx, cy) = self.current?;
         let x = sx.min(cx);
@@ -55,14 +73,22 @@ impl LiveSelection {
     }
 }
 
-/// One-shot sender shared across all overlays so only the first finaliser wins.
+type SelectionCell = Rc<RefCell<SharedSelection>>;
 type Sender = Arc<Mutex<Option<mpsc::SyncSender<Result<Rect>>>>>;
+type AreaRegistry = Rc<RefCell<Vec<gtk4::DrawingArea>>>;
+type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 
 fn send_once(tx: &Sender, msg: Result<Rect>) {
     if let Ok(mut guard) = tx.lock()
         && let Some(sender) = guard.take()
     {
         let _ = sender.send(msg);
+    }
+}
+
+fn redraw_all(areas: &AreaRegistry) {
+    for area in areas.borrow().iter() {
+        area.queue_draw();
     }
 }
 
@@ -84,8 +110,6 @@ fn run_gtk(tx: mpsc::SyncSender<Result<Rect>>) -> Result<()> {
 
     let exit = app.run_with_args::<&str>(&[]);
     let code: i32 = exit.into();
-    // Make sure callers awaiting on the channel never block forever if GTK exited without a
-    // selection (e.g. compositor closed our surfaces).
     send_once(&tx, Err(anyhow!("selector closed without a selection")));
     if code != 0 {
         bail!("GTK exited with status {code}");
@@ -103,8 +127,14 @@ fn build_overlays(app: &gtk4::Application, tx: &Sender) -> Result<()> {
         bail!("no monitors reported by GDK");
     }
 
-    let finalised = Rc::new(Cell::new(false));
-    let app_weak = app.downgrade();
+    let shared = SharedState {
+        selection: Rc::new(RefCell::new(SharedSelection::default())),
+        finalised: Rc::new(RefCell::new(false)),
+        areas: Rc::new(RefCell::new(Vec::new())),
+        windows: Rc::new(RefCell::new(Vec::new())),
+        tx: tx.clone(),
+        app_weak: app.downgrade(),
+    };
 
     for i in 0..n {
         let Some(obj) = monitors_list.item(i) else {
@@ -113,7 +143,7 @@ fn build_overlays(app: &gtk4::Application, tx: &Sender) -> Result<()> {
         let Ok(monitor) = obj.downcast::<gdk4::Monitor>() else {
             continue;
         };
-        spawn_monitor_overlay(app, &monitor, tx, &finalised, &app_weak);
+        spawn_monitor_overlay(app, &monitor, MonitorInfo { index: i as usize }, &shared);
     }
     Ok(())
 }
@@ -121,119 +151,166 @@ fn build_overlays(app: &gtk4::Application, tx: &Sender) -> Result<()> {
 fn spawn_monitor_overlay(
     app: &gtk4::Application,
     monitor: &gdk4::Monitor,
-    tx: &Sender,
-    finalised: &Rc<Cell<bool>>,
-    app_weak: &glib::WeakRef<gtk4::Application>,
+    info: MonitorInfo,
+    shared: &SharedState,
 ) {
     let geo = monitor.geometry();
-    let geo_x = geo.x();
-    let geo_y = geo.y();
+    let mon_w = geo.width();
+    let mon_h = geo.height();
 
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
         .decorated(false)
         .resizable(false)
         .build();
+    window.add_css_class("hyprsnap-selector");
 
+    // Layer-shell setup. `init_layer_shell` must come first; the rest is order-insensitive
+    // before `present()` realizes the window.
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
-    window.set_keyboard_mode(KeyboardMode::Exclusive);
-    window.set_monitor(Some(monitor));
     window.set_namespace(Some("hyprsnap-selector"));
+    window.set_monitor(Some(monitor));
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         window.set_anchor(edge, true);
     }
     window.set_exclusive_zone(-1);
-    window.add_css_class("hyprsnap-selector");
+    // OnDemand (rather than Exclusive) avoids a multi-window keyboard tug-of-war on Hyprland:
+    // each surface only requests focus when the user interacts with it, so Enter/Esc reach
+    // whichever monitor the user actually used.
+    window.set_keyboard_mode(KeyboardMode::OnDemand);
+
+    // Size hint matching the monitor — required on some compositors for the layer-shell
+    // anchoring to produce a fullscreen surface; without it GTK reports a 200x200 minimum.
+    window.set_default_size(mon_w.max(1), mon_h.max(1));
 
     let area = gtk4::DrawingArea::new();
     area.set_hexpand(true);
     area.set_vexpand(true);
+    area.set_content_width(mon_w.max(1));
+    area.set_content_height(mon_h.max(1));
 
-    let selection: Rc<Cell<LiveSelection>> = Rc::new(Cell::new(LiveSelection::default()));
-
-    install_draw(&area, &selection);
-    install_drag(&area, &selection, tx, finalised, app_weak, geo_x, geo_y);
-    install_keys(&window, &selection, tx, finalised, app_weak, geo_x, geo_y);
+    install_draw(&area, &shared.selection, info.index);
+    install_drag(&area, &shared.selection, info.index, &shared.areas);
+    install_keys(
+        &window,
+        &shared.selection,
+        &shared.tx,
+        &shared.finalised,
+        &shared.windows,
+        &shared.app_weak,
+        info,
+    );
 
     window.set_child(Some(&area));
+    shared.areas.borrow_mut().push(area.clone());
+    shared.windows.borrow_mut().push(window.clone());
     window.present();
 }
 
-fn install_draw(area: &gtk4::DrawingArea, selection: &Rc<Cell<LiveSelection>>) {
+/// Lifetimes-shared bag of per-call state passed down through `spawn_monitor_overlay`.
+struct SharedState {
+    selection: SelectionCell,
+    finalised: Rc<RefCell<bool>>,
+    areas: AreaRegistry,
+    windows: WindowRegistry,
+    tx: Sender,
+    app_weak: glib::WeakRef<gtk4::Application>,
+}
+
+fn install_draw(area: &gtk4::DrawingArea, selection: &SelectionCell, monitor_index: usize) {
     let selection = selection.clone();
     area.set_draw_func(move |_area, cr, w, h| {
         let (w, h) = (w as f64, h as f64);
-        // Whole-surface dim.
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
-        cr.rectangle(0.0, 0.0, w, h);
-        let _ = cr.fill();
+        let state = *selection.borrow();
+        let rect_here = match state.owner {
+            Some(idx) if idx == monitor_index => state.rect_local(),
+            _ => None,
+        };
 
-        if let Some((rx, ry, rw, rh)) = selection.get().rect() {
-            // Cut out the selection (Clear operator) and stroke a thin highlight.
-            cr.set_operator(gtk4::cairo::Operator::Clear);
-            cr.rectangle(rx, ry, rw, rh);
+        if let Some((rx, ry, rw, rh)) = rect_here {
+            // Dim only outside the selection (four surrounding strips).
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+            cr.rectangle(0.0, 0.0, w, ry);
+            cr.rectangle(0.0, ry + rh, w, h - (ry + rh));
+            cr.rectangle(0.0, ry, rx, rh);
+            cr.rectangle(rx + rw, ry, w - (rx + rw), rh);
             let _ = cr.fill();
-            cr.set_operator(gtk4::cairo::Operator::Over);
 
+            // White outline around the selection.
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
             cr.set_line_width(1.5);
             cr.rectangle(rx + 0.5, ry + 0.5, rw - 1.0, rh - 1.0);
             let _ = cr.stroke();
+
+            let hint = format!(
+                "{} × {} — Enter to confirm, Esc to cancel",
+                rw as i32, rh as i32
+            );
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+            cr.select_font_face(
+                "Sans",
+                gtk4::cairo::FontSlant::Normal,
+                gtk4::cairo::FontWeight::Bold,
+            );
+            cr.set_font_size(14.0);
+            cr.move_to(rx + 6.0, ry + rh - 8.0);
+            let _ = cr.show_text(&hint);
+        } else {
+            // No selection on this monitor — full dim so the user sees we're in selector mode.
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+            cr.rectangle(0.0, 0.0, w, h);
+            let _ = cr.fill();
         }
     });
 }
 
 fn install_drag(
     area: &gtk4::DrawingArea,
-    selection: &Rc<Cell<LiveSelection>>,
-    tx: &Sender,
-    finalised: &Rc<Cell<bool>>,
-    app_weak: &glib::WeakRef<gtk4::Application>,
-    geo_x: i32,
-    geo_y: i32,
+    selection: &SelectionCell,
+    monitor_index: usize,
+    areas: &AreaRegistry,
 ) {
     let drag = gtk4::GestureDrag::new();
 
     {
         let selection = selection.clone();
-        let area_weak = area.downgrade();
+        let areas = areas.clone();
         drag.connect_drag_begin(move |_, x, y| {
-            selection.set(LiveSelection {
+            *selection.borrow_mut() = SharedSelection {
+                owner: Some(monitor_index),
                 start: Some((x, y)),
                 current: Some((x, y)),
-            });
-            if let Some(a) = area_weak.upgrade() {
-                a.queue_draw();
-            }
+            };
+            redraw_all(&areas);
         });
     }
     {
         let selection = selection.clone();
-        let area_weak = area.downgrade();
+        let areas = areas.clone();
         drag.connect_drag_update(move |g, dx, dy| {
             if let Some((sx, sy)) = g.start_point() {
-                let mut s = selection.get();
-                s.current = Some((sx + dx, sy + dy));
-                selection.set(s);
-                if let Some(a) = area_weak.upgrade() {
-                    a.queue_draw();
+                let mut s = selection.borrow_mut();
+                if s.owner == Some(monitor_index) {
+                    s.current = Some((sx + dx, sy + dy));
+                    drop(s);
+                    redraw_all(&areas);
                 }
             }
         });
     }
     {
         let selection = selection.clone();
-        let tx = tx.clone();
-        let finalised = finalised.clone();
-        let app_weak = app_weak.clone();
+        let areas = areas.clone();
         drag.connect_drag_end(move |g, dx, dy| {
             if let Some((sx, sy)) = g.start_point() {
-                let mut s = selection.get();
-                s.current = Some((sx + dx, sy + dy));
-                selection.set(s);
+                let mut s = selection.borrow_mut();
+                if s.owner == Some(monitor_index) {
+                    s.current = Some((sx + dx, sy + dy));
+                    drop(s);
+                    redraw_all(&areas);
+                }
             }
-            commit(&selection, geo_x, geo_y, &tx, &finalised, &app_weak);
         });
     }
     area.add_controller(drag);
@@ -241,25 +318,26 @@ fn install_drag(
 
 fn install_keys(
     window: &gtk4::ApplicationWindow,
-    selection: &Rc<Cell<LiveSelection>>,
+    selection: &SelectionCell,
     tx: &Sender,
-    finalised: &Rc<Cell<bool>>,
+    finalised: &Rc<RefCell<bool>>,
+    windows: &WindowRegistry,
     app_weak: &glib::WeakRef<gtk4::Application>,
-    geo_x: i32,
-    geo_y: i32,
+    info: MonitorInfo,
 ) {
     let key = gtk4::EventControllerKey::new();
     let selection = selection.clone();
     let tx = tx.clone();
     let finalised = finalised.clone();
+    let windows = windows.clone();
     let app_weak = app_weak.clone();
-    key.connect_key_pressed(move |_, key, _, _| match key {
+    key.connect_key_pressed(move |_, k, _, _| match k {
         gdk4::Key::Escape => {
-            cancel(&tx, &finalised, &app_weak);
+            cancel(&tx, &finalised, &windows, &app_weak);
             glib::Propagation::Stop
         }
         gdk4::Key::Return | gdk4::Key::KP_Enter => {
-            commit(&selection, geo_x, geo_y, &tx, &finalised, &app_weak);
+            commit(&selection, &tx, &finalised, &windows, &app_weak, info);
             glib::Propagation::Stop
         }
         _ => glib::Propagation::Proceed,
@@ -267,38 +345,74 @@ fn install_keys(
     window.add_controller(key);
 }
 
+/// Tear down every overlay window synchronously and flush the Wayland connection so the
+/// compositor processes the unmap requests *before* we hand control back to the caller. Without
+/// this, `app.quit()` only schedules destruction on the next GLib idle, leaving the dimmed veil
+/// visible during capture/encode (often several seconds in dev builds).
+fn dismiss_overlays(windows: &WindowRegistry) {
+    for window in windows.borrow_mut().drain(..) {
+        window.set_visible(false);
+        window.destroy();
+    }
+    if let Some(display) = gdk4::Display::default() {
+        display.flush();
+    }
+}
+
 fn commit(
-    selection: &Rc<Cell<LiveSelection>>,
-    geo_x: i32,
-    geo_y: i32,
+    selection: &SelectionCell,
     tx: &Sender,
-    finalised: &Rc<Cell<bool>>,
+    finalised: &Rc<RefCell<bool>>,
+    windows: &WindowRegistry,
     app_weak: &glib::WeakRef<gtk4::Application>,
+    _local_info: MonitorInfo,
 ) {
-    if finalised.get() {
+    if *finalised.borrow() {
         return;
     }
-    let Some((x, y, w, h)) = selection.get().rect() else {
-        // Empty drag — keep the overlay open, await another attempt.
+    let state = *selection.borrow();
+    let Some(owner) = state.owner else { return };
+    let Some((x, y, w, h)) = state.rect_local() else {
         return;
     };
-    finalised.set(true);
+    let Some(display) = gdk4::Display::default() else {
+        return;
+    };
+    let monitors = display.monitors();
+    let Some(obj) = monitors.item(owner as u32) else {
+        return;
+    };
+    let Ok(monitor) = obj.downcast::<gdk4::Monitor>() else {
+        return;
+    };
+    let geo = monitor.geometry();
     let rect = Rect {
-        x: geo_x + x.round() as i32,
-        y: geo_y + y.round() as i32,
+        x: geo.x() + x.round() as i32,
+        y: geo.y() + y.round() as i32,
         w: w.round() as u32,
         h: h.round() as u32,
     };
+    *finalised.borrow_mut() = true;
+    dismiss_overlays(windows);
     send_once(tx, Ok(rect));
     if let Some(app) = app_weak.upgrade() {
         app.quit();
     }
 }
 
-fn cancel(tx: &Sender, finalised: &Rc<Cell<bool>>, app_weak: &glib::WeakRef<gtk4::Application>) {
-    if finalised.replace(true) {
+fn cancel(
+    tx: &Sender,
+    finalised: &Rc<RefCell<bool>>,
+    windows: &WindowRegistry,
+    app_weak: &glib::WeakRef<gtk4::Application>,
+) {
+    let mut f = finalised.borrow_mut();
+    if *f {
         return;
     }
+    *f = true;
+    drop(f);
+    dismiss_overlays(windows);
     send_once(tx, Err(anyhow!("selection cancelled")));
     if let Some(app) = app_weak.upgrade() {
         app.quit();

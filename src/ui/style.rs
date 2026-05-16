@@ -8,8 +8,15 @@ pub const CSS: &str = r#"
     margin: 12px;
 }
 
-.hyprsnap-selector-dim {
-    background-color: rgba(0, 0, 0, 0.45);
+/* The selector overlay window must be fully transparent so the Cairo draw_func
+ * (which paints a translucent dim + cleared selection cutout) composites directly
+ * over the live desktop, not over GTK's default opaque window background. */
+window.hyprsnap-selector,
+window.hyprsnap-selector decoration,
+window.hyprsnap-selector > * {
+    background: transparent;
+    background-color: transparent;
+    box-shadow: none;
 }
 "#;
 
