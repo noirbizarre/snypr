@@ -11,12 +11,17 @@
 //!   - Enter (or KP Enter): commit and return the rect in compositor logical coordinates.
 //!   - Esc: cancel.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Result, anyhow, bail};
+use gtk4::glib;
+use gtk4::glib::subclass::prelude::*;
+use gtk4::graphene;
+use gtk4::pango;
 use gtk4::prelude::*;
+use gtk4::subclass::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::capture::region::Rect;
@@ -75,7 +80,7 @@ impl SharedSelection {
 
 type SelectionCell = Rc<RefCell<SharedSelection>>;
 type Sender = Arc<Mutex<Option<mpsc::SyncSender<Result<Rect>>>>>;
-type AreaRegistry = Rc<RefCell<Vec<gtk4::DrawingArea>>>;
+type AreaRegistry = Rc<RefCell<Vec<SelectorOverlay>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 
 fn send_once(tx: &Sender, msg: Result<Rect>) {
@@ -91,7 +96,6 @@ fn redraw_all(areas: &AreaRegistry) {
         area.queue_draw();
     }
 }
-
 fn run_gtk(tx: mpsc::SyncSender<Result<Rect>>) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
@@ -184,13 +188,10 @@ fn spawn_monitor_overlay(
     // anchoring to produce a fullscreen surface; without it GTK reports a 200x200 minimum.
     window.set_default_size(mon_w.max(1), mon_h.max(1));
 
-    let area = gtk4::DrawingArea::new();
+    let area = SelectorOverlay::new(shared.selection.clone(), info.index);
     area.set_hexpand(true);
     area.set_vexpand(true);
-    area.set_content_width(mon_w.max(1));
-    area.set_content_height(mon_h.max(1));
 
-    install_draw(&area, &shared.selection, info.index);
     install_drag(&area, &shared.selection, info.index, &shared.areas);
     install_keys(
         &window,
@@ -218,55 +219,8 @@ struct SharedState {
     app_weak: glib::WeakRef<gtk4::Application>,
 }
 
-fn install_draw(area: &gtk4::DrawingArea, selection: &SelectionCell, monitor_index: usize) {
-    let selection = selection.clone();
-    area.set_draw_func(move |_area, cr, w, h| {
-        let (w, h) = (w as f64, h as f64);
-        let state = *selection.borrow();
-        let rect_here = match state.owner {
-            Some(idx) if idx == monitor_index => state.rect_local(),
-            _ => None,
-        };
-
-        if let Some((rx, ry, rw, rh)) = rect_here {
-            // Dim only outside the selection (four surrounding strips).
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
-            cr.rectangle(0.0, 0.0, w, ry);
-            cr.rectangle(0.0, ry + rh, w, h - (ry + rh));
-            cr.rectangle(0.0, ry, rx, rh);
-            cr.rectangle(rx + rw, ry, w - (rx + rw), rh);
-            let _ = cr.fill();
-
-            // White outline around the selection.
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
-            cr.set_line_width(1.5);
-            cr.rectangle(rx + 0.5, ry + 0.5, rw - 1.0, rh - 1.0);
-            let _ = cr.stroke();
-
-            let hint = format!(
-                "{} × {} — Enter to confirm, Esc to cancel",
-                rw as i32, rh as i32
-            );
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
-            cr.select_font_face(
-                "Sans",
-                gtk4::cairo::FontSlant::Normal,
-                gtk4::cairo::FontWeight::Bold,
-            );
-            cr.set_font_size(14.0);
-            cr.move_to(rx + 6.0, ry + rh - 8.0);
-            let _ = cr.show_text(&hint);
-        } else {
-            // No selection on this monitor — full dim so the user sees we're in selector mode.
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
-            cr.rectangle(0.0, 0.0, w, h);
-            let _ = cr.fill();
-        }
-    });
-}
-
 fn install_drag(
-    area: &gtk4::DrawingArea,
+    area: &SelectorOverlay,
     selection: &SelectionCell,
     monitor_index: usize,
     areas: &AreaRegistry,
@@ -416,5 +370,143 @@ fn cancel(
     send_once(tx, Err(anyhow!("selection cancelled")));
     if let Some(app) = app_weak.upgrade() {
         app.quit();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom GtkWidget for the selector overlay
+// ---------------------------------------------------------------------------
+//
+// We subclass `gtk4::Widget` and implement `snapshot()` directly so the dimmer, the white
+// selection outline, and the size readout are produced as GSK render nodes — same path as the
+// annotation canvas. Going custom (instead of a `DrawingArea` Cairo callback) lets us drop the
+// last Cairo dependency from the UI.
+
+glib::wrapper! {
+    pub struct SelectorOverlay(ObjectSubclass<imp::SelectorOverlay>)
+        @extends gtk4::Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
+}
+
+impl SelectorOverlay {
+    fn new(selection: SelectionCell, monitor_index: usize) -> Self {
+        let obj: Self = glib::Object::new();
+        let imp = obj.imp();
+        imp.selection.replace(Some(selection));
+        imp.monitor_index.set(monitor_index);
+        obj
+    }
+}
+
+impl Default for SelectorOverlay {
+    fn default() -> Self {
+        glib::Object::new()
+    }
+}
+
+mod imp {
+    use super::*;
+
+    pub struct SelectorOverlay {
+        /// Optional so the widget can be default-constructed (required by GObject) before the
+        /// caller wires in the shared `SelectionCell`. The `allow` is necessary because
+        /// `SelectionCell` is module-private but the field has to be `pub` so GObject can
+        /// access it through `imp()`.
+        #[allow(private_interfaces)]
+        pub selection: RefCell<Option<SelectionCell>>,
+        pub monitor_index: Cell<usize>,
+    }
+
+    impl Default for SelectorOverlay {
+        fn default() -> Self {
+            Self {
+                selection: RefCell::new(None),
+                monitor_index: Cell::new(0),
+            }
+        }
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for SelectorOverlay {
+        const NAME: &'static str = "HyprsnapSelectorOverlay";
+        type Type = super::SelectorOverlay;
+        type ParentType = gtk4::Widget;
+    }
+
+    impl ObjectImpl for SelectorOverlay {}
+
+    impl WidgetImpl for SelectorOverlay {
+        fn snapshot(&self, snapshot: &gtk4::Snapshot) {
+            let w = self.obj().width() as f32;
+            let h = self.obj().height() as f32;
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            let monitor_index = self.monitor_index.get();
+            let state = self
+                .selection
+                .borrow()
+                .as_ref()
+                .map(|s| *s.borrow())
+                .unwrap_or_default();
+            let rect_here = match state.owner {
+                Some(idx) if idx == monitor_index => state.rect_local(),
+                _ => None,
+            };
+
+            let dim_strong = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.55);
+            let dim_full = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.45);
+            let outline = gtk4::gdk::RGBA::new(1.0, 1.0, 1.0, 0.95);
+            let label_color = gtk4::gdk::RGBA::new(1.0, 1.0, 1.0, 0.9);
+
+            let Some((rx, ry, rw, rh)) = rect_here else {
+                // No selection on this monitor — full dim so the user sees we're in selector mode.
+                snapshot.append_color(&dim_full, &graphene::Rect::new(0.0, 0.0, w, h));
+                return;
+            };
+            let (rx, ry, rw, rh) = (rx as f32, ry as f32, rw as f32, rh as f32);
+
+            // Four dimmed strips around the selection. Doing it as separate `append_color`
+            // calls (instead of one big rect + a clipped clear) keeps the render tree flat —
+            // each node is just a filled rectangle on the GPU.
+            snapshot.append_color(&dim_strong, &graphene::Rect::new(0.0, 0.0, w, ry));
+            snapshot.append_color(
+                &dim_strong,
+                &graphene::Rect::new(0.0, ry + rh, w, (h - (ry + rh)).max(0.0)),
+            );
+            snapshot.append_color(&dim_strong, &graphene::Rect::new(0.0, ry, rx, rh));
+            snapshot.append_color(
+                &dim_strong,
+                &graphene::Rect::new(rx + rw, ry, (w - (rx + rw)).max(0.0), rh),
+            );
+
+            // Single-pixel outline around the selection. `gsk::PathBuilder::add_rect` traces
+            // the perimeter; offsetting by 0.5 px matches the existing Cairo geometry so the
+            // stroke sits inside the dim/selection boundary.
+            let pb = gtk4::gsk::PathBuilder::new();
+            pb.add_rect(&graphene::Rect::new(rx + 0.5, ry + 0.5, rw - 1.0, rh - 1.0));
+            let stroke = gtk4::gsk::Stroke::new(1.5);
+            snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
+
+            // Size readout. Building a Pango layout via the widget's context lets GTK pick the
+            // right font + DPI, and `append_layout` rasterises into a glyph node on the GPU.
+            let hint = format!(
+                "{} × {} — Enter to confirm, Esc to cancel",
+                rw as i32, rh as i32
+            );
+            let pango_ctx = self.obj().create_pango_context();
+            let layout = pango::Layout::new(&pango_ctx);
+            let desc = pango::FontDescription::from_string("Sans Bold 11");
+            layout.set_font_description(Some(&desc));
+            layout.set_text(&hint);
+            let (_lw, lh) = layout.pixel_size();
+            // Cairo `show_text` placed the baseline at `ry + rh - 8`; `append_layout` positions
+            // the top-left of the layout, so subtract the layout height to roughly preserve
+            // where the text sits relative to the bottom edge of the selection rectangle.
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(rx + 6.0, ry + rh - 8.0 - lh as f32));
+            snapshot.append_layout(&layout, &label_color);
+            snapshot.restore();
+        }
     }
 }

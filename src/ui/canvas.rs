@@ -2,16 +2,14 @@
 //!
 //! The on-screen `snapshot()` path builds `gsk::Path` / `gsk::Stroke` nodes and pushes them
 //! onto the [`gtk4::Snapshot`] so GTK's GL renderer can rasterise everything on the GPU.
-//! [`AnnotationCanvas::compose_png`] still flattens through Cairo because it produces a
-//! pixel buffer for PNG encoding, which is exactly Cairo's domain — but the GPU path no
-//! longer pays the BGRA swizzle on every frame: we cache the base image as a
-//! [`gdk::MemoryTexture`] in RGBA and let GSK upload it once.
+//! [`AnnotationCanvas::compose_png`] uses the same render-node tree: it renders into a
+//! `gdk::Texture` through the widget's native [`gsk::Renderer`], then downloads pixels via
+//! [`gdk::TextureDownloader`]. One rendering codepath, identical pixels on-screen and on disk.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
-use gtk4::cairo;
 use gtk4::gdk;
 use gtk4::glib;
 use gtk4::graphene;
@@ -114,13 +112,62 @@ impl AnnotationCanvas {
     }
 
     /// Render the current document to a freshly-allocated `CapturedImage` (BGRA, ready for
-    /// `output::encode_png`). Used by the editor's save action and exercised in tests.
+    /// `output::encode_png`). The render-node tree mirrors what `snapshot()` builds for the
+    /// on-screen path; we just route it through `gsk::Renderer::render_texture` and download
+    /// the resulting `gdk::Texture` as BGRA bytes via `gdk::TextureDownloader`.
+    ///
+    /// Must be called after the canvas widget has been realised inside a `gtk4::Native` (i.e.
+    /// from inside the editor window's GTK callbacks) so we can borrow its `gsk::Renderer`.
     pub fn compose(&self) -> Result<CapturedImage> {
         let Some(doc_rc) = self.imp().doc.borrow().clone() else {
             return Err(anyhow!("no document loaded"));
         };
         let doc = doc_rc.borrow();
-        compose_document(&doc)
+        let crop = doc.bounds();
+        let (w, h) = (crop.w, crop.h);
+        if w == 0 || h == 0 {
+            return Err(anyhow!("cannot compose empty document"));
+        }
+
+        // Build the render tree against the *document* coordinate space (tools store their
+        // absolute coords), then ask `render_texture` to clip to the crop viewport. This
+        // matches the on-screen snapshot exactly minus the editor's neutral background fill
+        // and selection veil — neither belongs in the exported PNG.
+        let snap = gtk4::Snapshot::new();
+        let doc_bounds = graphene::Rect::new(0.0, 0.0, doc.size.0 as f32, doc.size.1 as f32);
+        if let Some(tex) = self.imp().base_texture.borrow().as_ref() {
+            snap.append_texture(tex, &doc_bounds);
+        }
+        let pango_ctx = self.create_pango_context();
+        for layer in &doc.layers {
+            snapshot_tool(&snap, layer.as_ref(), &pango_ctx, doc.base.as_ref());
+        }
+
+        let node = snap
+            .to_node()
+            .ok_or_else(|| anyhow!("nothing to compose: document has no base and no layers"))?;
+
+        // `Native::renderer()` returns the renderer GTK already realised for the editor's
+        // surface, so we don't have to instantiate (and realise) a fresh one per save.
+        let renderer = self.native().and_then(|n| n.renderer()).ok_or_else(|| {
+            anyhow!("canvas has no native renderer; compose must run from inside a realised editor")
+        })?;
+        let viewport = graphene::Rect::new(crop.x as f32, crop.y as f32, w as f32, h as f32);
+        let texture = renderer.render_texture(node, Some(&viewport));
+
+        // Force BGRA8 (premultiplied) so the byte layout matches what `output::encode_png`
+        // already expects — its R<->B swizzle would otherwise produce a colour-swapped PNG.
+        let mut downloader = gdk::TextureDownloader::new(&texture);
+        downloader.set_format(gdk::MemoryFormat::B8g8r8a8Premultiplied);
+        let (bytes, stride) = downloader.download_bytes();
+        let pixels: std::sync::Arc<[u8]> = std::sync::Arc::from(bytes.to_vec().into_boxed_slice());
+        Ok(CapturedImage {
+            width: w,
+            height: h,
+            stride: stride as u32,
+            pixels,
+            source: None,
+        })
     }
 
     /// Convenience: compose + PNG-encode the document in one go.
@@ -429,298 +476,6 @@ fn snapshot_crop_veil(snap: &gtk4::Snapshot, doc_size: (u32, u32), crop: Rect) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Cairo off-screen composition (PNG export)
-// ---------------------------------------------------------------------------
-
-/// Render `doc` into a freshly-allocated `CapturedImage` in BGRA (Cairo ARGB32 byte order).
-/// Cairo is the right tool here: we're producing a pixel buffer for `output::encode_png`, and
-/// keeping it CPU-side avoids round-tripping through `GskRenderer::render_texture`.
-///
-/// When `doc.crop` is set the output is the cropped region only — annotation coordinates are
-/// preserved by translating the cairo origin so clipped tools still render correctly.
-fn compose_document(doc: &Document) -> Result<CapturedImage> {
-    let crop = doc.bounds();
-    let (w, h) = (crop.w, crop.h);
-    if w == 0 || h == 0 {
-        return Err(anyhow!("cannot compose empty document"));
-    }
-    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32)
-        .map_err(|e| anyhow!("creating composite surface: {e}"))?;
-    {
-        let cr = cairo::Context::new(&surface).map_err(|e| anyhow!("cairo context: {e}"))?;
-        if doc.crop.is_some() {
-            cr.translate(-(crop.x as f64), -(crop.y as f64));
-        }
-        if let Some(base) = &doc.base {
-            let bs = build_base_cairo_surface(base)?;
-            cr.set_source_surface(&bs, 0.0, 0.0)
-                .map_err(|e| anyhow!("set_source_surface: {e}"))?;
-            cr.paint().map_err(|e| anyhow!("paint base: {e}"))?;
-        }
-        for layer in &doc.layers {
-            cairo_draw_tool(layer.as_ref(), &cr, doc.base.as_ref());
-        }
-    }
-    surface.flush();
-    let stride = surface.stride() as u32;
-    let mut surface = surface;
-    let data = surface
-        .data()
-        .map_err(|e| anyhow!("cairo surface data: {e}"))?;
-    let pixels: std::sync::Arc<[u8]> = std::sync::Arc::from(data.to_vec().into_boxed_slice());
-    Ok(CapturedImage {
-        width: w,
-        height: h,
-        stride,
-        pixels,
-        source: None,
-    })
-}
-
-/// Build an ARgb32 cairo surface from the document's RGBA base pixels, swizzling channels and
-/// handling stride padding. Only allocated when composing for PNG export.
-fn build_base_cairo_surface(base: &crate::annotate::DocumentBase) -> Result<cairo::ImageSurface> {
-    let mut bgra = base.pixels.to_vec();
-    for px in bgra.chunks_exact_mut(4) {
-        px.swap(0, 2); // RGBA -> BGRA so Cairo ARGB32 (little-endian) renders correctly
-    }
-    let stride = cairo::Format::ARgb32
-        .stride_for_width(base.width)
-        .map_err(|e| anyhow!("cairo stride: {e}"))?;
-    let row_bytes = (base.width * 4) as usize;
-    let surface = if stride as usize == row_bytes {
-        cairo::ImageSurface::create_for_data(
-            bgra,
-            cairo::Format::ARgb32,
-            base.width as i32,
-            base.height as i32,
-            stride,
-        )
-    } else {
-        // Cairo's stride may include trailing padding when the row is not 4-byte aligned (e.g.
-        // odd widths). Rebuild with the padded stride.
-        let mut padded = vec![0u8; stride as usize * base.height as usize];
-        for y in 0..base.height as usize {
-            let src = &bgra[y * row_bytes..(y + 1) * row_bytes];
-            padded[y * stride as usize..y * stride as usize + row_bytes].copy_from_slice(src);
-        }
-        cairo::ImageSurface::create_for_data(
-            padded,
-            cairo::Format::ARgb32,
-            base.width as i32,
-            base.height as i32,
-            stride,
-        )
-    }
-    .map_err(|e| anyhow!("creating base cairo surface: {e}"))?;
-    Ok(surface)
-}
-
-fn cairo_rgba(c: [f32; 4]) -> [f64; 4] {
-    [c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64]
-}
-
-fn cairo_draw_tool(tool: &dyn Tool, cr: &cairo::Context, base: Option<&DocumentBase>) {
-    match tool.kind() {
-        ToolKind::Rect => {
-            if let Some(t) = tool.as_any().downcast_ref::<RectTool>() {
-                cairo_rect_outline(cr, &t.bounds, cairo_rgba(t.stroke), t.stroke_width as f64);
-            }
-        }
-        ToolKind::Arrow => {
-            if let Some(t) = tool.as_any().downcast_ref::<ArrowTool>() {
-                cairo_arrow(
-                    cr,
-                    t.from,
-                    t.to,
-                    cairo_rgba(t.stroke),
-                    t.stroke_width as f64,
-                );
-            }
-        }
-        ToolKind::Highlight => {
-            if let Some(t) = tool.as_any().downcast_ref::<HighlightTool>() {
-                cairo_filled_rect(cr, &t.bounds, cairo_rgba(t.color));
-            }
-        }
-        ToolKind::Freehand => {
-            if let Some(t) = tool.as_any().downcast_ref::<FreehandTool>() {
-                cairo_polyline(cr, &t.points, cairo_rgba(t.stroke), t.stroke_width as f64);
-            }
-        }
-        ToolKind::Redact => {
-            if let Some(t) = tool.as_any().downcast_ref::<RedactTool>() {
-                cairo_filled_rect(cr, &t.bounds, [0.0, 0.0, 0.0, 1.0]);
-            }
-        }
-        ToolKind::Number => {
-            if let Some(t) = tool.as_any().downcast_ref::<NumberTool>() {
-                cairo_number(cr, t);
-            }
-        }
-        ToolKind::Text => {
-            if let Some(t) = tool.as_any().downcast_ref::<TextTool>() {
-                cairo_text(cr, t);
-            }
-        }
-        ToolKind::Blur => {
-            if let Some(t) = tool.as_any().downcast_ref::<BlurTool>()
-                && let Some(base) = base
-            {
-                cairo_blur(cr, t, base);
-            }
-        }
-        ToolKind::Crop => {}
-    }
-}
-
-fn cairo_rect_outline(cr: &cairo::Context, rect: &Rect, rgba: [f64; 4], width: f64) {
-    cr.set_source_rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
-    cr.set_line_width(width);
-    cr.rectangle(rect.x as f64, rect.y as f64, rect.w as f64, rect.h as f64);
-    let _ = cr.stroke();
-}
-
-fn cairo_filled_rect(cr: &cairo::Context, rect: &Rect, rgba: [f64; 4]) {
-    cr.set_source_rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
-    cr.rectangle(rect.x as f64, rect.y as f64, rect.w as f64, rect.h as f64);
-    let _ = cr.fill();
-}
-
-fn cairo_arrow(cr: &cairo::Context, from: (f64, f64), to: (f64, f64), rgba: [f64; 4], width: f64) {
-    cr.set_source_rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
-    cr.set_line_width(width);
-    cr.move_to(from.0, from.1);
-    cr.line_to(to.0, to.1);
-    let _ = cr.stroke();
-    let head = (width * 5.0).max(10.0);
-    let (l, r) = arrowhead(from, to, head);
-    cr.move_to(to.0, to.1);
-    cr.line_to(l.0, l.1);
-    cr.line_to(r.0, r.1);
-    cr.close_path();
-    let _ = cr.fill();
-}
-
-fn cairo_polyline(cr: &cairo::Context, points: &[(f64, f64)], rgba: [f64; 4], width: f64) {
-    if points.is_empty() {
-        return;
-    }
-    cr.set_source_rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
-    cr.set_line_width(width);
-    cr.set_line_cap(cairo::LineCap::Round);
-    cr.set_line_join(cairo::LineJoin::Round);
-    let (x0, y0) = points[0];
-    cr.move_to(x0, y0);
-    if points.len() == 1 {
-        cr.line_to(x0 + 0.01, y0);
-    } else {
-        for &(x, y) in &points[1..] {
-            cr.line_to(x, y);
-        }
-    }
-    let _ = cr.stroke();
-}
-
-fn cairo_number(cr: &cairo::Context, t: &NumberTool) {
-    let (cx, cy) = t.center;
-    cr.set_source_rgba(
-        t.fill[0] as f64,
-        t.fill[1] as f64,
-        t.fill[2] as f64,
-        t.fill[3] as f64,
-    );
-    cr.arc(cx, cy, t.radius, 0.0, std::f64::consts::TAU);
-    let _ = cr.fill();
-    let label = t.value.to_string();
-    cr.set_source_rgba(
-        t.text_color[0] as f64,
-        t.text_color[1] as f64,
-        t.text_color[2] as f64,
-        t.text_color[3] as f64,
-    );
-    cr.select_font_face("sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-    cr.set_font_size(t.radius * 1.2);
-    if let Ok(ext) = cr.text_extents(&label) {
-        let tx = cx - ext.width() / 2.0 - ext.x_bearing();
-        let ty = cy - ext.height() / 2.0 - ext.y_bearing();
-        cr.move_to(tx, ty);
-        let _ = cr.show_text(&label);
-    }
-}
-
-fn cairo_text(cr: &cairo::Context, t: &TextTool) {
-    cr.set_source_rgba(
-        t.color[0] as f64,
-        t.color[1] as f64,
-        t.color[2] as f64,
-        t.color[3] as f64,
-    );
-    cr.select_font_face("sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-    cr.set_font_size(t.size_pt as f64);
-    // Cairo's text origin is the baseline; offset by ascent so `origin` is the top-left like
-    // the GSK / Pango path.
-    if let Ok(ext) = cr.font_extents() {
-        cr.move_to(t.origin.0, t.origin.1 + ext.ascent());
-        let _ = cr.show_text(&t.text);
-    }
-}
-
-/// Apply a software Gaussian blur to the document's base pixels inside `t.bounds` and paint the
-/// blurred region back into the cairo context. Only the base image is blurred — layers stacked
-/// below the BlurTool are not, matching the GSK path's limitation.
-fn cairo_blur(cr: &cairo::Context, t: &BlurTool, base: &DocumentBase) {
-    use image::{ImageBuffer, RgbaImage, imageops};
-
-    let r = clamp_to_doc(t.bounds, (base.width, base.height));
-    if r.w == 0 || r.h == 0 {
-        return;
-    }
-    // Copy RGBA region out of the base buffer.
-    let mut region: Vec<u8> = Vec::with_capacity((r.w * r.h * 4) as usize);
-    let row_bytes = (base.width * 4) as usize;
-    let pix = base.pixels.as_ref();
-    for y in r.y as usize..(r.y as usize + r.h as usize) {
-        let row_start = y * row_bytes + r.x as usize * 4;
-        region.extend_from_slice(&pix[row_start..row_start + r.w as usize * 4]);
-    }
-    let Some(img): Option<RgbaImage> = ImageBuffer::from_raw(r.w, r.h, region) else {
-        return;
-    };
-    let blurred = imageops::blur(&img, t.radius);
-    // RGBA -> BGRA for cairo ARgb32.
-    let mut bgra = blurred.into_raw();
-    for px in bgra.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
-    let stride = match cairo::Format::ARgb32.stride_for_width(r.w) {
-        Ok(s) => s as usize,
-        Err(_) => return,
-    };
-    let row = (r.w * 4) as usize;
-    let buf = if stride == row {
-        bgra
-    } else {
-        let mut padded = vec![0u8; stride * r.h as usize];
-        for y in 0..r.h as usize {
-            padded[y * stride..y * stride + row].copy_from_slice(&bgra[y * row..(y + 1) * row]);
-        }
-        padded
-    };
-    let Ok(surface) = cairo::ImageSurface::create_for_data(
-        buf,
-        cairo::Format::ARgb32,
-        r.w as i32,
-        r.h as i32,
-        stride as i32,
-    ) else {
-        return;
-    };
-    let _ = cr.set_source_surface(&surface, r.x as f64, r.y as f64);
-    let _ = cr.paint();
-}
-
 /// A drag-in-progress preview that hasn't been committed to the document yet.
 #[derive(Clone, Debug)]
 pub struct PendingStroke {
@@ -927,7 +682,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                 ToolKind::Crop => {
                     let r = drag_rect(stroke.from, stroke.to);
                     // Clamp to the document so a stray over-drag doesn't crop to an off-canvas
-                    // rect (which would produce empty rows in compose_document).
+                    // rect (which would produce empty rows when compose() renders the viewport).
                     let clamped = clamp_to_doc(r, doc.size);
                     if clamped.w >= 2 && clamped.h >= 2 {
                         doc.crop = Some(clamped);
@@ -1052,48 +807,6 @@ fn clamp_to_doc(r: Rect, size: (u32, u32)) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::annotate::DocumentBase;
-    use std::sync::Arc;
-
-    fn solid_base(w: u32, h: u32) -> DocumentBase {
-        let pixels: Arc<[u8]> = Arc::from(vec![0xFFu8; (w * h * 4) as usize].into_boxed_slice());
-        DocumentBase {
-            pixels,
-            width: w,
-            height: h,
-            stride: w * 4,
-        }
-    }
-
-    #[test]
-    fn compose_document_produces_bgra_buffer() {
-        let mut doc = Document::with_base(solid_base(4, 4));
-        doc.push_layer(Box::new(RectTool::new(Rect {
-            x: 0,
-            y: 0,
-            w: 4,
-            h: 4,
-        })));
-        let img = compose_document(&doc).expect("compose");
-        assert_eq!(img.width, 4);
-        assert_eq!(img.height, 4);
-        // ARgb32 stride is at least 4 * width.
-        assert!(img.stride >= 16);
-    }
-
-    #[test]
-    fn compose_document_honours_crop() {
-        let mut doc = Document::with_base(solid_base(10, 8));
-        doc.crop = Some(Rect {
-            x: 2,
-            y: 1,
-            w: 5,
-            h: 4,
-        });
-        let img = compose_document(&doc).expect("compose");
-        assert_eq!(img.width, 5);
-        assert_eq!(img.height, 4);
-    }
 
     #[test]
     fn clamp_to_doc_constrains_overflow() {
