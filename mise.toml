@@ -28,7 +28,7 @@ run = "cargo install --path . --force"
 [tasks.hyprsnap]
 description = "Run the application"
 raw_args = true
-run = 'cargo run --bin hyprsnap'
+run = 'cargo run --bin hyprsnap --'
 
 [tasks.fmt]
 description = "Format the code"

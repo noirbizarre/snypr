@@ -1,17 +1,22 @@
-//! Annotation canvas — a `GtkWidget` subclass that draws a [`Document`] via Cairo.
+//! Annotation canvas — a `GtkWidget` subclass that draws a [`Document`] via GSK render nodes.
 //!
-//! Rendering goes through `Snapshot::append_cairo` rather than building per-shape GSK render
-//! nodes: Cairo gives us stroke/fill/arrowhead/text semantics with one path each, and the same
-//! drawing routine is reused (against a `cairo::ImageSurface`) by [`AnnotationCanvas::compose_png`]
-//! to flatten the document to a PNG for saving. The cached `base_surface` keeps the BGRA swizzle
-//! cost off the per-frame draw path.
+//! The on-screen `snapshot()` path builds `gsk::Path` / `gsk::Stroke` nodes and pushes them
+//! onto the [`gtk4::Snapshot`] so GTK's GL renderer can rasterise everything on the GPU.
+//! [`AnnotationCanvas::compose_png`] still flattens through Cairo because it produces a
+//! pixel buffer for PNG encoding, which is exactly Cairo's domain — but the GPU path no
+//! longer pays the BGRA swizzle on every frame: we cache the base image as a
+//! [`gdk::MemoryTexture`] in RGBA and let GSK upload it once.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
 use gtk4::cairo;
+use gtk4::gdk;
 use gtk4::glib;
+use gtk4::graphene;
+use gtk4::gsk;
+use gtk4::pango;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 
@@ -39,10 +44,10 @@ impl AnnotationCanvas {
 
     pub fn set_document(&self, doc: Document) {
         let imp = self.imp();
-        // Refresh the cached cairo surface used for the base texture so the first draw doesn't
-        // pay the swizzle cost mid-frame.
-        let surface = doc.base.as_ref().and_then(|b| build_base_surface(b).ok());
-        imp.base_surface.replace(surface);
+        // Cache a gdk::MemoryTexture for the on-screen path so GSK can upload it once and
+        // sample it on the GPU — avoids the per-frame BGRA swizzle that Cairo needed.
+        let tex = doc.base.as_ref().and_then(|b| build_base_texture(b).ok());
+        imp.base_texture.replace(tex);
         imp.doc.replace(Some(Rc::new(RefCell::new(doc))));
         imp.pending.replace(None);
         imp.next_number.set(1);
@@ -129,8 +134,291 @@ impl Default for AnnotationCanvas {
     }
 }
 
-/// Build a cached BGRA `cairo::ImageSurface` from the document's base pixels (which are RGBA).
-fn build_base_surface(base: &crate::annotate::DocumentBase) -> Result<cairo::ImageSurface> {
+// ---------------------------------------------------------------------------
+// GSK on-screen rendering
+// ---------------------------------------------------------------------------
+
+/// Build a `gdk::MemoryTexture` from the document's RGBA base pixels. The texture is uploaded
+/// to the GPU on first use and cached on the canvas for the lifetime of the document.
+fn build_base_texture(base: &crate::annotate::DocumentBase) -> Result<gdk::MemoryTexture> {
+    let bytes = glib::Bytes::from(base.pixels.as_ref());
+    let tex = gdk::MemoryTexture::new(
+        base.width as i32,
+        base.height as i32,
+        gdk::MemoryFormat::R8g8b8a8,
+        &bytes,
+        base.stride as usize,
+    );
+    Ok(tex)
+}
+
+fn rgba(c: [f32; 4]) -> gdk::RGBA {
+    gdk::RGBA::new(c[0], c[1], c[2], c[3])
+}
+
+fn rect_to_graphene(r: &Rect) -> graphene::Rect {
+    graphene::Rect::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32)
+}
+
+/// Path builder helper for an outlined rectangle.
+fn rect_path(r: &Rect) -> gsk::Path {
+    let pb = gsk::PathBuilder::new();
+    pb.add_rect(&rect_to_graphene(r));
+    pb.to_path()
+}
+
+fn line_path(from: (f64, f64), to: (f64, f64)) -> gsk::Path {
+    let pb = gsk::PathBuilder::new();
+    pb.move_to(from.0 as f32, from.1 as f32);
+    pb.line_to(to.0 as f32, to.1 as f32);
+    pb.to_path()
+}
+
+fn arrowhead_path(from: (f64, f64), to: (f64, f64), size: f64) -> gsk::Path {
+    let (l, r) = arrowhead(from, to, size);
+    let pb = gsk::PathBuilder::new();
+    pb.move_to(to.0 as f32, to.1 as f32);
+    pb.line_to(l.0 as f32, l.1 as f32);
+    pb.line_to(r.0 as f32, r.1 as f32);
+    pb.close();
+    pb.to_path()
+}
+
+fn polyline_path(points: &[(f64, f64)]) -> Option<gsk::Path> {
+    if points.is_empty() {
+        return None;
+    }
+    let pb = gsk::PathBuilder::new();
+    let (x0, y0) = points[0];
+    pb.move_to(x0 as f32, y0 as f32);
+    if points.len() == 1 {
+        // Single tap → render a tiny dash so the user gets feedback.
+        pb.line_to(x0 as f32 + 0.01, y0 as f32);
+    } else {
+        for &(x, y) in &points[1..] {
+            pb.line_to(x as f32, y as f32);
+        }
+    }
+    Some(pb.to_path())
+}
+
+fn solid_stroke(width: f64) -> gsk::Stroke {
+    let s = gsk::Stroke::new(width as f32);
+    s.set_line_cap(gsk::LineCap::Round);
+    s.set_line_join(gsk::LineJoin::Round);
+    s
+}
+
+fn dashed_stroke(width: f64, dash: &[f32]) -> gsk::Stroke {
+    let s = solid_stroke(width);
+    s.set_dash(dash);
+    s
+}
+
+/// Append a committed [`Tool`] layer to the snapshot.
+fn snapshot_tool(snap: &gtk4::Snapshot, tool: &dyn Tool, pango_ctx: &pango::Context) {
+    match tool.kind() {
+        ToolKind::Rect => {
+            if let Some(t) = tool.as_any().downcast_ref::<RectTool>() {
+                snap.append_stroke(
+                    &rect_path(&t.bounds),
+                    &solid_stroke(t.stroke_width as f64),
+                    &rgba(t.stroke),
+                );
+            }
+        }
+        ToolKind::Arrow => {
+            if let Some(t) = tool.as_any().downcast_ref::<ArrowTool>() {
+                let color = rgba(t.stroke);
+                snap.append_stroke(
+                    &line_path(t.from, t.to),
+                    &solid_stroke(t.stroke_width as f64),
+                    &color,
+                );
+                let head = (t.stroke_width as f64 * 5.0).max(10.0);
+                snap.append_fill(
+                    &arrowhead_path(t.from, t.to, head),
+                    gsk::FillRule::Winding,
+                    &color,
+                );
+            }
+        }
+        ToolKind::Highlight => {
+            if let Some(t) = tool.as_any().downcast_ref::<HighlightTool>() {
+                snap.append_color(&rgba(t.color), &rect_to_graphene(&t.bounds));
+            }
+        }
+        ToolKind::Freehand => {
+            if let Some(t) = tool.as_any().downcast_ref::<FreehandTool>()
+                && let Some(path) = polyline_path(&t.points)
+            {
+                snap.append_stroke(
+                    &path,
+                    &solid_stroke(t.stroke_width as f64),
+                    &rgba(t.stroke),
+                );
+            }
+        }
+        ToolKind::Redact => {
+            if let Some(t) = tool.as_any().downcast_ref::<RedactTool>() {
+                snap.append_color(&gdk::RGBA::BLACK, &rect_to_graphene(&t.bounds));
+            }
+        }
+        ToolKind::Number => {
+            if let Some(t) = tool.as_any().downcast_ref::<NumberTool>() {
+                snapshot_number(snap, t, pango_ctx);
+            }
+        }
+        // `Crop` is applied at compose time via `doc.crop`; no on-screen layer rendering.
+        // Text/Blur land in a follow-up commit (text-entry popover + live region blur).
+        ToolKind::Crop | ToolKind::Text | ToolKind::Blur => {}
+    }
+}
+
+fn snapshot_number(snap: &gtk4::Snapshot, t: &NumberTool, pango_ctx: &pango::Context) {
+    let (cx, cy) = (t.center.0 as f32, t.center.1 as f32);
+    // Filled disc as a circular path.
+    let pb = gsk::PathBuilder::new();
+    pb.add_circle(&graphene::Point::new(cx, cy), t.radius as f32);
+    snap.append_fill(&pb.to_path(), gsk::FillRule::Winding, &rgba(t.fill));
+
+    // Centered Pango label. We measure the layout's pixel size and translate so the rendered
+    // glyphs sit centred over the disc.
+    let layout = pango::Layout::new(pango_ctx);
+    layout.set_text(&t.value.to_string());
+    let mut desc = pango::FontDescription::from_string("Sans Bold");
+    desc.set_size(((t.radius * 1.2) * pango::SCALE as f64) as i32);
+    layout.set_font_description(Some(&desc));
+    let (lw, lh) = layout.pixel_size();
+    snap.save();
+    snap.translate(&graphene::Point::new(
+        cx - lw as f32 / 2.0,
+        cy - lh as f32 / 2.0,
+    ));
+    snap.append_layout(&layout, &rgba(t.text_color));
+    snap.restore();
+}
+
+fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
+    match p.kind {
+        ToolKind::Rect => {
+            let r = drag_rect(p.from, p.to);
+            snap.append_stroke(
+                &rect_path(&r),
+                &dashed_stroke(2.0, &[6.0, 4.0]),
+                &rgba([1.0, 0.0, 0.0, 0.85]),
+            );
+        }
+        ToolKind::Arrow => {
+            let color = rgba([1.0, 0.0, 0.0, 0.85]);
+            snap.append_stroke(&line_path(p.from, p.to), &solid_stroke(3.0), &color);
+            snap.append_fill(
+                &arrowhead_path(p.from, p.to, 15.0),
+                gsk::FillRule::Winding,
+                &color,
+            );
+        }
+        ToolKind::Highlight => {
+            let r = drag_rect(p.from, p.to);
+            snap.append_color(&rgba([1.0, 1.0, 0.0, 0.35]), &rect_to_graphene(&r));
+        }
+        ToolKind::Redact => {
+            let r = drag_rect(p.from, p.to);
+            snap.append_color(&rgba([0.0, 0.0, 0.0, 0.85]), &rect_to_graphene(&r));
+        }
+        ToolKind::Freehand => {
+            if let Some(path) = polyline_path(&p.points) {
+                snap.append_stroke(&path, &solid_stroke(3.0), &rgba([1.0, 0.0, 0.0, 0.85]));
+            }
+        }
+        ToolKind::Crop => {
+            let r = drag_rect(p.from, p.to);
+            snap.append_stroke(
+                &rect_path(&r),
+                &dashed_stroke(1.5, &[8.0, 4.0]),
+                &rgba([1.0, 1.0, 1.0, 0.9]),
+            );
+        }
+        ToolKind::Number | ToolKind::Text | ToolKind::Blur => {}
+    }
+}
+
+fn snapshot_crop_veil(snap: &gtk4::Snapshot, doc_size: (u32, u32), crop: Rect) {
+    // Even-odd fill on a path with the document rect AND the crop rect: outside is filled with
+    // a translucent black veil so the user sees what gets exported.
+    let pb = gsk::PathBuilder::new();
+    pb.add_rect(&graphene::Rect::new(
+        0.0,
+        0.0,
+        doc_size.0 as f32,
+        doc_size.1 as f32,
+    ));
+    pb.add_rect(&rect_to_graphene(&crop));
+    snap.append_fill(
+        &pb.to_path(),
+        gsk::FillRule::EvenOdd,
+        &rgba([0.0, 0.0, 0.0, 0.35]),
+    );
+    // Dashed border around the crop rect.
+    snap.append_stroke(
+        &rect_path(&crop),
+        &dashed_stroke(1.0, &[6.0, 4.0]),
+        &rgba([1.0, 1.0, 1.0, 0.9]),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cairo off-screen composition (PNG export)
+// ---------------------------------------------------------------------------
+
+/// Render `doc` into a freshly-allocated `CapturedImage` in BGRA (Cairo ARGB32 byte order).
+/// Cairo is the right tool here: we're producing a pixel buffer for `output::encode_png`, and
+/// keeping it CPU-side avoids round-tripping through `GskRenderer::render_texture`.
+///
+/// When `doc.crop` is set the output is the cropped region only — annotation coordinates are
+/// preserved by translating the cairo origin so clipped tools still render correctly.
+fn compose_document(doc: &Document) -> Result<CapturedImage> {
+    let crop = doc.bounds();
+    let (w, h) = (crop.w, crop.h);
+    if w == 0 || h == 0 {
+        return Err(anyhow!("cannot compose empty document"));
+    }
+    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32)
+        .map_err(|e| anyhow!("creating composite surface: {e}"))?;
+    {
+        let cr = cairo::Context::new(&surface).map_err(|e| anyhow!("cairo context: {e}"))?;
+        if doc.crop.is_some() {
+            cr.translate(-(crop.x as f64), -(crop.y as f64));
+        }
+        if let Some(base) = &doc.base {
+            let bs = build_base_cairo_surface(base)?;
+            cr.set_source_surface(&bs, 0.0, 0.0)
+                .map_err(|e| anyhow!("set_source_surface: {e}"))?;
+            cr.paint().map_err(|e| anyhow!("paint base: {e}"))?;
+        }
+        for layer in &doc.layers {
+            cairo_draw_tool(layer.as_ref(), &cr);
+        }
+    }
+    surface.flush();
+    let stride = surface.stride() as u32;
+    let mut surface = surface;
+    let data = surface
+        .data()
+        .map_err(|e| anyhow!("cairo surface data: {e}"))?;
+    let pixels: std::sync::Arc<[u8]> = std::sync::Arc::from(data.to_vec().into_boxed_slice());
+    Ok(CapturedImage {
+        width: w,
+        height: h,
+        stride,
+        pixels,
+        source: None,
+    })
+}
+
+/// Build an ARgb32 cairo surface from the document's RGBA base pixels, swizzling channels and
+/// handling stride padding. Only allocated when composing for PNG export.
+fn build_base_cairo_surface(base: &crate::annotate::DocumentBase) -> Result<cairo::ImageSurface> {
     let mut bgra = base.pixels.to_vec();
     for px in bgra.chunks_exact_mut(4) {
         px.swap(0, 2); // RGBA -> BGRA so Cairo ARGB32 (little-endian) renders correctly
@@ -167,107 +455,66 @@ fn build_base_surface(base: &crate::annotate::DocumentBase) -> Result<cairo::Ima
     Ok(surface)
 }
 
-/// Render `doc` into a freshly-allocated `CapturedImage` in BGRA (Cairo ARGB32 byte order).
-/// When `doc.crop` is set the output is the cropped region only — annotation coordinates are
-/// preserved by translating the cairo origin, so clipped tools still render correctly.
-fn compose_document(doc: &Document) -> Result<CapturedImage> {
-    let crop = doc.bounds();
-    let (w, h) = (crop.w, crop.h);
-    if w == 0 || h == 0 {
-        return Err(anyhow!("cannot compose empty document"));
-    }
-    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32)
-        .map_err(|e| anyhow!("creating composite surface: {e}"))?;
-    {
-        let cr = cairo::Context::new(&surface).map_err(|e| anyhow!("cairo context: {e}"))?;
-        if doc.crop.is_some() {
-            cr.translate(-(crop.x as f64), -(crop.y as f64));
-        }
-        // Transparent base so widget background isn't baked into the saved image when the
-        // document has no base texture.
-        if let Some(base) = &doc.base {
-            let bs = build_base_surface(base)?;
-            cr.set_source_surface(&bs, 0.0, 0.0)
-                .map_err(|e| anyhow!("set_source_surface: {e}"))?;
-            cr.paint().map_err(|e| anyhow!("paint base: {e}"))?;
-        }
-        for layer in &doc.layers {
-            draw_tool(layer.as_ref(), &cr);
-        }
-    }
-    surface.flush();
-    let stride = surface.stride() as u32;
-    let mut surface = surface;
-    let data = surface
-        .data()
-        .map_err(|e| anyhow!("cairo surface data: {e}"))?;
-    let pixels: std::sync::Arc<[u8]> = std::sync::Arc::from(data.to_vec().into_boxed_slice());
-    Ok(CapturedImage {
-        width: w,
-        height: h,
-        stride,
-        pixels,
-        source: None,
-    })
+fn cairo_rgba(c: [f32; 4]) -> [f64; 4] {
+    [c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64]
 }
 
-/// Draw a committed [`Tool`] layer into a cairo context.
-fn draw_tool(tool: &dyn Tool, cr: &cairo::Context) {
+fn cairo_draw_tool(tool: &dyn Tool, cr: &cairo::Context) {
     match tool.kind() {
         ToolKind::Rect => {
             if let Some(t) = tool.as_any().downcast_ref::<RectTool>() {
-                draw_rect_outline(cr, &t.bounds, rgba(t.stroke), t.stroke_width as f64);
+                cairo_rect_outline(cr, &t.bounds, cairo_rgba(t.stroke), t.stroke_width as f64);
             }
         }
         ToolKind::Arrow => {
             if let Some(t) = tool.as_any().downcast_ref::<ArrowTool>() {
-                draw_arrow(cr, t.from, t.to, rgba(t.stroke), t.stroke_width as f64);
+                cairo_arrow(
+                    cr,
+                    t.from,
+                    t.to,
+                    cairo_rgba(t.stroke),
+                    t.stroke_width as f64,
+                );
             }
         }
         ToolKind::Highlight => {
             if let Some(t) = tool.as_any().downcast_ref::<HighlightTool>() {
-                draw_filled_rect(cr, &t.bounds, rgba(t.color));
+                cairo_filled_rect(cr, &t.bounds, cairo_rgba(t.color));
             }
         }
         ToolKind::Freehand => {
             if let Some(t) = tool.as_any().downcast_ref::<FreehandTool>() {
-                draw_polyline(cr, &t.points, rgba(t.stroke), t.stroke_width as f64);
+                cairo_polyline(cr, &t.points, cairo_rgba(t.stroke), t.stroke_width as f64);
             }
         }
         ToolKind::Redact => {
             if let Some(t) = tool.as_any().downcast_ref::<RedactTool>() {
-                draw_filled_rect(cr, &t.bounds, [0.0, 0.0, 0.0, 1.0]);
+                cairo_filled_rect(cr, &t.bounds, [0.0, 0.0, 0.0, 1.0]);
             }
         }
         ToolKind::Number => {
             if let Some(t) = tool.as_any().downcast_ref::<NumberTool>() {
-                draw_number(cr, t);
+                cairo_number(cr, t);
             }
         }
-        // `Crop` is applied at compose time via `doc.crop`; no layer rendering. Text/Blur land in
-        // a follow-up commit (text-entry popover + live region blur).
         ToolKind::Crop | ToolKind::Text | ToolKind::Blur => {}
     }
 }
 
-fn rgba(c: [f32; 4]) -> [f64; 4] {
-    [c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64]
-}
-
-fn draw_rect_outline(cr: &cairo::Context, rect: &Rect, rgba: [f64; 4], width: f64) {
+fn cairo_rect_outline(cr: &cairo::Context, rect: &Rect, rgba: [f64; 4], width: f64) {
     cr.set_source_rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
     cr.set_line_width(width);
     cr.rectangle(rect.x as f64, rect.y as f64, rect.w as f64, rect.h as f64);
     let _ = cr.stroke();
 }
 
-fn draw_filled_rect(cr: &cairo::Context, rect: &Rect, rgba: [f64; 4]) {
+fn cairo_filled_rect(cr: &cairo::Context, rect: &Rect, rgba: [f64; 4]) {
     cr.set_source_rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
     cr.rectangle(rect.x as f64, rect.y as f64, rect.w as f64, rect.h as f64);
     let _ = cr.fill();
 }
 
-fn draw_arrow(cr: &cairo::Context, from: (f64, f64), to: (f64, f64), rgba: [f64; 4], width: f64) {
+fn cairo_arrow(cr: &cairo::Context, from: (f64, f64), to: (f64, f64), rgba: [f64; 4], width: f64) {
     cr.set_source_rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
     cr.set_line_width(width);
     cr.move_to(from.0, from.1);
@@ -282,7 +529,7 @@ fn draw_arrow(cr: &cairo::Context, from: (f64, f64), to: (f64, f64), rgba: [f64;
     let _ = cr.fill();
 }
 
-fn draw_polyline(cr: &cairo::Context, points: &[(f64, f64)], rgba: [f64; 4], width: f64) {
+fn cairo_polyline(cr: &cairo::Context, points: &[(f64, f64)], rgba: [f64; 4], width: f64) {
     if points.is_empty() {
         return;
     }
@@ -293,7 +540,6 @@ fn draw_polyline(cr: &cairo::Context, points: &[(f64, f64)], rgba: [f64; 4], wid
     let (x0, y0) = points[0];
     cr.move_to(x0, y0);
     if points.len() == 1 {
-        // Single-tap freehand → render a dot so the user sees something.
         cr.line_to(x0 + 0.01, y0);
     } else {
         for &(x, y) in &points[1..] {
@@ -303,9 +549,8 @@ fn draw_polyline(cr: &cairo::Context, points: &[(f64, f64)], rgba: [f64; 4], wid
     let _ = cr.stroke();
 }
 
-fn draw_number(cr: &cairo::Context, t: &NumberTool) {
+fn cairo_number(cr: &cairo::Context, t: &NumberTool) {
     let (cx, cy) = t.center;
-    // Filled disc.
     cr.set_source_rgba(
         t.fill[0] as f64,
         t.fill[1] as f64,
@@ -314,7 +559,6 @@ fn draw_number(cr: &cairo::Context, t: &NumberTool) {
     );
     cr.arc(cx, cy, t.radius, 0.0, std::f64::consts::TAU);
     let _ = cr.fill();
-    // Centered label. Cairo's text origin is the baseline; offset by the extents.
     let label = t.value.to_string();
     cr.set_source_rgba(
         t.text_color[0] as f64,
@@ -347,7 +591,7 @@ mod imp {
 
     pub struct AnnotationCanvas {
         pub doc: RefCell<Option<Rc<RefCell<Document>>>>,
-        pub base_surface: RefCell<Option<cairo::ImageSurface>>,
+        pub base_texture: RefCell<Option<gdk::MemoryTexture>>,
         pub current_tool: Cell<ToolKind>,
         pub pending: RefCell<Option<PendingStroke>>,
         /// Auto-increment counter used by the Number tool. Resets when a new document is loaded.
@@ -361,7 +605,7 @@ mod imp {
         fn default() -> Self {
             Self {
                 doc: RefCell::new(None),
-                base_surface: RefCell::new(None),
+                base_texture: RefCell::new(None),
                 current_tool: Cell::new(ToolKind::Rect),
                 pending: RefCell::new(None),
                 next_number: Cell::new(1),
@@ -411,84 +655,31 @@ mod imp {
             let doc = doc_rc.borrow();
             let width = doc.size.0 as f32;
             let height = doc.size.1 as f32;
-            let bounds = gtk4::graphene::Rect::new(0.0, 0.0, width, height);
+            let bounds = graphene::Rect::new(0.0, 0.0, width, height);
 
-            let cr = snapshot.append_cairo(&bounds);
-            // Neutral background for documents without a base image, unless the host opted into
-            // a transparent canvas (live overlay) — in that case we leave the background alone
-            // so the desktop shows through.
+            // Background: neutral dark fill for baseless documents in the editor; the base
+            // texture (uploaded once via GdkMemoryTexture) for loaded documents; nothing at
+            // all for the transparent overlay path.
             if doc.base.is_none() {
                 if !self.transparent_background.get() {
-                    cr.set_source_rgba(0.1, 0.1, 0.12, 1.0);
-                    cr.paint().ok();
+                    snapshot.append_color(&gdk::RGBA::new(0.1, 0.1, 0.12, 1.0), &bounds);
                 }
-            } else if let Some(bs) = self.base_surface.borrow().as_ref() {
-                cr.set_source_surface(bs, 0.0, 0.0).ok();
-                cr.paint().ok();
+            } else if let Some(tex) = self.base_texture.borrow().as_ref() {
+                snapshot.append_texture(tex, &bounds);
             }
+
+            let pango_ctx = self.obj().create_pango_context();
             for layer in &doc.layers {
-                draw_tool(layer.as_ref(), &cr);
+                snapshot_tool(snapshot, layer.as_ref(), &pango_ctx);
             }
             if let Some(p) = self.pending.borrow().as_ref() {
-                draw_pending(&cr, p);
+                snapshot_pending(snapshot, p);
             }
-            // Crop indicator: dim everything outside the active crop rect so the user sees what
-            // will be exported.
             if let Some(c) = doc.crop {
-                draw_crop_veil(&cr, doc.size, c);
+                snapshot_crop_veil(snapshot, doc.size, c);
             }
         }
     }
-}
-
-fn draw_pending(cr: &cairo::Context, p: &PendingStroke) {
-    match p.kind {
-        ToolKind::Rect => {
-            let r = drag_rect(p.from, p.to);
-            cr.save().ok();
-            cr.set_dash(&[6.0, 4.0], 0.0);
-            draw_rect_outline(cr, &r, [1.0, 0.0, 0.0, 0.85], 2.0);
-            cr.restore().ok();
-        }
-        ToolKind::Arrow => {
-            draw_arrow(cr, p.from, p.to, [1.0, 0.0, 0.0, 0.85], 3.0);
-        }
-        ToolKind::Highlight => {
-            let r = drag_rect(p.from, p.to);
-            draw_filled_rect(cr, &r, [1.0, 1.0, 0.0, 0.35]);
-        }
-        ToolKind::Redact => {
-            let r = drag_rect(p.from, p.to);
-            draw_filled_rect(cr, &r, [0.0, 0.0, 0.0, 0.85]);
-        }
-        ToolKind::Freehand => {
-            draw_polyline(cr, &p.points, [1.0, 0.0, 0.0, 0.85], 3.0);
-        }
-        ToolKind::Crop => {
-            let r = drag_rect(p.from, p.to);
-            cr.save().ok();
-            cr.set_dash(&[8.0, 4.0], 0.0);
-            draw_rect_outline(cr, &r, [1.0, 1.0, 1.0, 0.9], 1.5);
-            cr.restore().ok();
-        }
-        ToolKind::Number | ToolKind::Text | ToolKind::Blur => {}
-    }
-}
-
-fn draw_crop_veil(cr: &cairo::Context, doc_size: (u32, u32), crop: Rect) {
-    cr.save().ok();
-    // Even-odd fill: full doc rect with the crop rect punched out -> outside is filled.
-    cr.set_fill_rule(cairo::FillRule::EvenOdd);
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
-    cr.rectangle(0.0, 0.0, doc_size.0 as f64, doc_size.1 as f64);
-    cr.rectangle(crop.x as f64, crop.y as f64, crop.w as f64, crop.h as f64);
-    let _ = cr.fill();
-    cr.set_dash(&[6.0, 4.0], 0.0);
-    cr.set_line_width(1.0);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
-    cr.rectangle(crop.x as f64, crop.y as f64, crop.w as f64, crop.h as f64);
-    let _ = cr.stroke();
-    cr.restore().ok();
 }
 
 fn install_drag(canvas: &AnnotationCanvas) {
