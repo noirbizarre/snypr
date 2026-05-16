@@ -23,7 +23,7 @@ ui = [
     "dep:cairo-rs",
     "dep:pango",
 ]
-tray = ["dep:ksni"]
+tray = ["ui", "dep:ksni"]
 # Reserved for tests that require a live Wayland compositor.
 integration-wayland = []
 

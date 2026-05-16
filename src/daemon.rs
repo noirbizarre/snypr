@@ -29,6 +29,13 @@ pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
         .with_context(|| format!("binding socket {}", socket.display()))?;
     tracing::info!(path = %socket.display(), "hyprsnap daemon listening");
 
+    // Optional StatusNotifierItem tray. Held in scope here so its Drop runs when the daemon
+    // exits. The handle is unused beyond that — actions are funnelled back over `tray_rx`.
+    #[cfg(feature = "tray")]
+    let (mut tray_rx, _tray_handle) = setup_tray(&ctx).await?;
+    #[cfg(not(feature = "tray"))]
+    let mut tray_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
+
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
@@ -47,6 +54,12 @@ pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
                     Err(err) => tracing::warn!(error = ?err, "accept failed"),
                 }
             }
+            tray_action = recv_optional(&mut tray_rx) => {
+                if handle_tray_action(&ctx, tray_action).await {
+                    tracing::info!("tray requested daemon shutdown");
+                    break;
+                }
+            }
             _ = &mut shutdown => {
                 tracing::info!("daemon shutting down");
                 break;
@@ -56,6 +69,87 @@ pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
 
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+/// Awaits the next message from an optional channel; returns `None` forever when the channel is
+/// absent (so the `select!` arm never resolves and doesn't tip the loop). This is cleaner than
+/// peppering the `select!` with `#[cfg]` gates.
+async fn recv_optional<T>(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<T>>) -> Option<T> {
+    match rx.as_mut() {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(feature = "tray")]
+async fn setup_tray(
+    ctx: &Ctx,
+) -> Result<(
+    Option<tokio::sync::mpsc::UnboundedReceiver<crate::ui::tray::TrayAction>>,
+    Option<ksni::Handle<crate::ui::tray::HyprSnapTray>>,
+)> {
+    if !ctx.config.tray.enabled {
+        return Ok((None, None));
+    }
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = crate::ui::tray::spawn(tx).await?;
+    Ok((Some(rx), Some(handle)))
+}
+
+/// Returns `true` when the action requested a daemon shutdown.
+#[cfg(feature = "tray")]
+async fn handle_tray_action(ctx: &Ctx, action: Option<crate::ui::tray::TrayAction>) -> bool {
+    use crate::ui::tray::TrayAction;
+    let Some(action) = action else {
+        // Channel closed: the tray went away. Treat as a no-op so the daemon keeps serving the
+        // IPC socket.
+        return false;
+    };
+    let ctx = ctx.clone();
+    match action {
+        TrayAction::Quit => return true,
+        TrayAction::Screenshot => {
+            tokio::spawn(async move {
+                let sinks = ctx.config.default_sinks();
+                let result = crate::cli::screenshot::execute(
+                    ctx,
+                    crate::capture::Selection::Full,
+                    false,
+                    sinks,
+                )
+                .await;
+                match result {
+                    Ok(paths) => {
+                        for p in &paths {
+                            tracing::info!(path = %p.display(), "tray screenshot saved");
+                        }
+                    }
+                    Err(err) => tracing::warn!(error = ?err, "tray screenshot failed"),
+                }
+            });
+        }
+        TrayAction::Capture => {
+            tokio::spawn(async move {
+                let sinks = ctx.config.default_sinks();
+                if let Err(err) = crate::ui::run_capture_flow(ctx, sinks, false).await {
+                    tracing::warn!(error = ?err, "tray capture failed");
+                }
+            });
+        }
+        TrayAction::OpenDraw => {
+            tokio::spawn(async move {
+                if let Err(err) = crate::ui::overlay::run(ctx, false).await {
+                    tracing::warn!(error = ?err, "tray overlay failed");
+                }
+            });
+        }
+    }
+    false
+}
+
+#[cfg(not(feature = "tray"))]
+async fn handle_tray_action(_ctx: &Ctx, _action: Option<()>) -> bool {
+    false
 }
 
 async fn handle_client(ctx: Ctx, stream: UnixStream) -> Result<()> {
