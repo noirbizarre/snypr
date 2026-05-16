@@ -103,7 +103,8 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
     canvas.set_document(Document::with_base(setup.base));
     canvas.set_tool(ToolKind::Rect);
 
-    // Toolbar with tool selection, undo, and save buttons.
+    // Toolbar with tool selection, undo, and save buttons. Toggle buttons share a group so they
+    // behave as a radio: picking one releases the others.
     let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     toolbar.add_css_class("hyprsnap-toolbar");
 
@@ -112,23 +113,37 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
         .active(true)
         .build();
     let arrow_btn = gtk4::ToggleButton::with_label("Arrow");
-    arrow_btn.set_group(Some(&rect_btn));
+    let highlight_btn = gtk4::ToggleButton::with_label("Highlight");
+    let freehand_btn = gtk4::ToggleButton::with_label("Freehand");
+    let number_btn = gtk4::ToggleButton::with_label("Number");
+    let redact_btn = gtk4::ToggleButton::with_label("Redact");
+    let crop_btn = gtk4::ToggleButton::with_label("Crop");
+    for btn in [
+        &arrow_btn,
+        &highlight_btn,
+        &freehand_btn,
+        &number_btn,
+        &redact_btn,
+        &crop_btn,
+    ] {
+        btn.set_group(Some(&rect_btn));
+    }
     let undo_btn = gtk4::Button::with_label("Undo");
     let save_btn = gtk4::Button::with_label("Save");
 
-    {
+    for (btn, kind) in [
+        (&rect_btn, ToolKind::Rect),
+        (&arrow_btn, ToolKind::Arrow),
+        (&highlight_btn, ToolKind::Highlight),
+        (&freehand_btn, ToolKind::Freehand),
+        (&number_btn, ToolKind::Number),
+        (&redact_btn, ToolKind::Redact),
+        (&crop_btn, ToolKind::Crop),
+    ] {
         let canvas = canvas.clone();
-        rect_btn.connect_toggled(move |b| {
+        btn.connect_toggled(move |b| {
             if b.is_active() {
-                canvas.set_tool(ToolKind::Rect);
-            }
-        });
-    }
-    {
-        let canvas = canvas.clone();
-        arrow_btn.connect_toggled(move |b| {
-            if b.is_active() {
-                canvas.set_tool(ToolKind::Arrow);
+                canvas.set_tool(kind);
             }
         });
     }
@@ -151,6 +166,11 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
 
     toolbar.append(&rect_btn);
     toolbar.append(&arrow_btn);
+    toolbar.append(&highlight_btn);
+    toolbar.append(&freehand_btn);
+    toolbar.append(&number_btn);
+    toolbar.append(&redact_btn);
+    toolbar.append(&crop_btn);
     let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     toolbar.append(&spacer);
@@ -211,6 +231,26 @@ fn install_shortcuts(
             }
             (false, gdk4::Key::a | gdk4::Key::A) => {
                 canvas.set_tool(ToolKind::Arrow);
+                glib::Propagation::Stop
+            }
+            (false, gdk4::Key::h | gdk4::Key::H) => {
+                canvas.set_tool(ToolKind::Highlight);
+                glib::Propagation::Stop
+            }
+            (false, gdk4::Key::f | gdk4::Key::F) => {
+                canvas.set_tool(ToolKind::Freehand);
+                glib::Propagation::Stop
+            }
+            (false, gdk4::Key::n | gdk4::Key::N) => {
+                canvas.set_tool(ToolKind::Number);
+                glib::Propagation::Stop
+            }
+            (false, gdk4::Key::x | gdk4::Key::X) => {
+                canvas.set_tool(ToolKind::Redact);
+                glib::Propagation::Stop
+            }
+            (false, gdk4::Key::c | gdk4::Key::C) => {
+                canvas.set_tool(ToolKind::Crop);
                 glib::Propagation::Stop
             }
             (false, gdk4::Key::Escape) => {

@@ -67,6 +67,10 @@ pub trait Tool: std::fmt::Debug + Send + Sync {
     fn bounds(&self) -> Rect;
     fn hit_test(&self, x: f64, y: f64) -> bool;
     fn clone_box(&self) -> Box<dyn Tool>;
+    /// Downcast escape hatch so the UI layer can pick the concrete tool struct (and its
+    /// type-specific fields like `FreehandTool::points` or `NumberTool::value`) without baking
+    /// rendering knowledge into the trait itself.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

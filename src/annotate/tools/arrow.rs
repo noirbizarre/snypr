@@ -33,4 +33,7 @@ impl Tool for ArrowTool {
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(self.clone())
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
