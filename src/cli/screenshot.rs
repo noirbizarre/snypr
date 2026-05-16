@@ -50,12 +50,32 @@ pub async fn run(args: Args) -> Result<()> {
     let config = Config::load_default().context("loading configuration")?;
     let ctx = Context::new(config).await?;
 
-    let selection = parse_selection(&args)?;
+    let mut selection = parse_selection(&args)?;
 
+    // Resolve the interactive selector up-front so the rest of the pipeline only ever sees a
+    // concrete `Region`. We do this *before* the optional delay so the user can compose the
+    // selection, then wait quietly for the delay.
     if matches!(selection, Selection::Interactive) {
-        tracing::warn!(
-            "interactive selector overlay is not yet implemented; capturing all outputs as a fallback"
-        );
+        #[cfg(feature = "ui")]
+        {
+            let rect = crate::ui::selector::pick_region(ctx.clone())
+                .await
+                .context("interactive region selection")?;
+            tracing::info!(
+                x = rect.x,
+                y = rect.y,
+                w = rect.w,
+                h = rect.h,
+                "region selected"
+            );
+            selection = Selection::Region(rect);
+        }
+        #[cfg(not(feature = "ui"))]
+        {
+            anyhow::bail!(
+                "interactive selector requires the `ui` cargo feature; pass a concrete --region, --full, or other flag"
+            );
+        }
     }
 
     if let Some(delay) = args.delay {

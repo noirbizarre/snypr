@@ -91,6 +91,9 @@ pub enum Selection {
 /// On mixed-DPI setups (e.g. a HiDPI laptop next to a 1× external) each captured frame is
 /// downscaled from its native device pixels to its output's logical size, so the resulting
 /// composite is a single coherent logical-coordinate canvas matching what the user sees.
+///
+/// When `selection` is `Region(rect)`, the composite is additionally cropped to that rect
+/// (clipped to the bounding box if it extends beyond captured outputs).
 pub fn stitch(images: &[CapturedImage], selection: &Selection) -> Result<CapturedImage> {
     if images.is_empty() {
         bail!("no captured images to stitch");
@@ -98,7 +101,7 @@ pub fn stitch(images: &[CapturedImage], selection: &Selection) -> Result<Capture
     if let Selection::PerOutput = selection {
         // The CLI handles per-output specially; if we get here, fall through to the bounding box.
     }
-    if images.len() == 1 {
+    if images.len() == 1 && !matches!(selection, Selection::Region(_)) {
         return Ok(images[0].clone());
     }
 
@@ -147,11 +150,49 @@ pub fn stitch(images: &[CapturedImage], selection: &Selection) -> Result<Capture
         }
     }
 
-    Ok(CapturedImage {
+    let composite = CapturedImage {
         width: bbox.w,
         height: bbox.h,
         stride: stride as u32,
-        pixels: buf.into(),
+        pixels: Arc::from(buf.into_boxed_slice()),
+        source: None,
+    };
+
+    if let Selection::Region(rect) = selection {
+        return crop(&composite, &bbox, rect);
+    }
+    Ok(composite)
+}
+
+/// Crop `img` (whose top-left sits at `origin` in logical coords) to `rect` (also logical).
+/// Returns the input unchanged if `rect` fully covers it.
+fn crop(img: &CapturedImage, origin: &Rect, rect: &Rect) -> Result<CapturedImage> {
+    let Some(clipped) = rect.intersect(origin) else {
+        bail!(
+            "selected region {:?} does not intersect captured outputs (bbox {:?})",
+            rect,
+            origin
+        );
+    };
+    if clipped == *origin {
+        return Ok(img.clone());
+    }
+    let off_x = (clipped.x - origin.x) as usize;
+    let off_y = (clipped.y - origin.y) as usize;
+    let dst_w = clipped.w as usize;
+    let dst_h = clipped.h as usize;
+    let src_stride = img.stride as usize;
+    let dst_stride = dst_w * 4;
+    let mut out = Vec::with_capacity(dst_stride * dst_h);
+    for y in 0..dst_h {
+        let s = (off_y + y) * src_stride + off_x * 4;
+        out.extend_from_slice(&img.pixels[s..s + dst_stride]);
+    }
+    Ok(CapturedImage {
+        width: clipped.w,
+        height: clipped.h,
+        stride: dst_stride as u32,
+        pixels: Arc::from(out.into_boxed_slice()),
         source: None,
     })
 }
@@ -371,5 +412,42 @@ mod tests {
         // Left half (hidpi) is 0x11, right half (external) is 0x22.
         assert_eq!(out.pixels[0], 0x11);
         assert_eq!(out.pixels[2 * 4], 0x22);
+    }
+
+    #[test]
+    fn stitch_with_region_crops_to_rect() {
+        let left = solid_image(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+            0x11,
+        );
+        let right = solid_image(
+            Rect {
+                x: 4,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+            0x22,
+        );
+        // Region spans the gap between the two: x=2..6, y=0..4.
+        let region = Rect {
+            x: 2,
+            y: 0,
+            w: 4,
+            h: 4,
+        };
+        let out = stitch(&[left, right], &Selection::Region(region)).unwrap();
+        assert_eq!(out.width, 4);
+        assert_eq!(out.height, 4);
+        // Left two columns are 0x11 (from `left`), right two columns are 0x22 (from `right`).
+        assert_eq!(out.pixels[0], 0x11);
+        assert_eq!(out.pixels[4], 0x11);
+        assert_eq!(out.pixels[8], 0x22);
+        assert_eq!(out.pixels[12], 0x22);
     }
 }
