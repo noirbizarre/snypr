@@ -188,6 +188,8 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
     let highlight_btn = gtk4::ToggleButton::with_label("Highlight");
     let freehand_btn = gtk4::ToggleButton::with_label("Freehand");
     let number_btn = gtk4::ToggleButton::with_label("Number");
+    let text_btn = gtk4::ToggleButton::with_label("Text");
+    let blur_btn = gtk4::ToggleButton::with_label("Blur");
     let redact_btn = gtk4::ToggleButton::with_label("Redact");
     let crop_btn = gtk4::ToggleButton::with_label("Crop");
     for btn in [
@@ -195,6 +197,8 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
         &highlight_btn,
         &freehand_btn,
         &number_btn,
+        &text_btn,
+        &blur_btn,
         &redact_btn,
         &crop_btn,
     ] {
@@ -209,6 +213,8 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
         (&highlight_btn, ToolKind::Highlight),
         (&freehand_btn, ToolKind::Freehand),
         (&number_btn, ToolKind::Number),
+        (&text_btn, ToolKind::Text),
+        (&blur_btn, ToolKind::Blur),
         (&redact_btn, ToolKind::Redact),
         (&crop_btn, ToolKind::Crop),
     ] {
@@ -241,6 +247,8 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
     toolbar.append(&highlight_btn);
     toolbar.append(&freehand_btn);
     toolbar.append(&number_btn);
+    toolbar.append(&text_btn);
+    toolbar.append(&blur_btn);
     toolbar.append(&redact_btn);
     toolbar.append(&crop_btn);
     let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -309,6 +317,14 @@ fn install_shortcuts(window: &gtk4::ApplicationWindow, canvas: &AnnotationCanvas
             }
             (false, gdk4::Key::n | gdk4::Key::N) => {
                 canvas.set_tool(ToolKind::Number);
+                glib::Propagation::Stop
+            }
+            (false, gdk4::Key::t | gdk4::Key::T) => {
+                canvas.set_tool(ToolKind::Text);
+                glib::Propagation::Stop
+            }
+            (false, gdk4::Key::b | gdk4::Key::B) => {
+                canvas.set_tool(ToolKind::Blur);
                 glib::Propagation::Stop
             }
             (false, gdk4::Key::x | gdk4::Key::X) => {

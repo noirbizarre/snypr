@@ -12,14 +12,14 @@ Screen capture talks the `zwlr_screencopy_manager_v1` Wayland protocol directly;
 
 ## Status
 
-The five subcommands are wired end-to-end. Tool work is feature-complete except for `Text`
-(needs a text-entry popover) and `Blur` (needs live region blur), which are deferred to a
-follow-up release.
+The five subcommands are wired end-to-end. All nine annotation tools (Rect, Arrow, Highlight,
+Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on screen and
+flatten to PNG through Cairo on save.
 
 | Subcommand    | Status                                                                            |
 | ------------- | --------------------------------------------------------------------------------- |
 | `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`       |
-| `annotate`    | Editor with Rect / Arrow / Highlight / Freehand / Number / Redact / Crop tools    |
+| `annotate`    | Editor with Rect / Arrow / Highlight / Freehand / Number / Text / Blur / Redact / Crop tools |
 | `capture`     | Selector → wlr-screencopy → editor (in-memory base) → sinks                       |
 | `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools    |
 | `daemon`      | IPC server: `Ping`, `Screenshot`; tray (StatusNotifierItem) when enabled in config|
@@ -87,6 +87,8 @@ hyprsnap --via-daemon screenshot --full
 | `H`      | Highlight tool               |
 | `F`      | Freehand tool                |
 | `N`      | Numbered marker              |
+| `T`      | Text (popover entry)         |
+| `B`      | Blur (editor only)           |
 | `X`      | Redact (solid black)         |
 | `C`      | Crop (editor only)           |
 | `Ctrl+Z` | Undo last layer              |

@@ -16,7 +16,7 @@ bind = SUPER SHIFT ALT, Print, exec, hyprsnap screenshot --full --per-output --t
 bind = SUPER CTRL,   Print, exec, hyprsnap screenshot --focused --to clipboard
 
 # Live draw-on-screen overlay — ideal for presentations / Google Meet.
-# Inside the overlay: R/A/H/F/N/X to pick tools, Ctrl+Z to undo, P to toggle
+# Inside the overlay: R/A/H/F/N/T/X to pick tools, Ctrl+Z to undo, P to toggle
 # pointer passthrough, Ctrl+L to clear, Esc to quit.
 bind = SUPER ALT,    Print, exec, hyprsnap draw
 

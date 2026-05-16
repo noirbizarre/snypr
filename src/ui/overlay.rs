@@ -216,6 +216,10 @@ fn install_keys(window: &gtk4::ApplicationWindow, canvas: &AnnotationCanvas, sha
                 set_tool(ToolKind::Number);
                 glib::Propagation::Stop
             }
+            (false, gdk4::Key::t | gdk4::Key::T) => {
+                set_tool(ToolKind::Text);
+                glib::Propagation::Stop
+            }
             (false, gdk4::Key::x | gdk4::Key::X) => {
                 set_tool(ToolKind::Redact);
                 glib::Propagation::Stop

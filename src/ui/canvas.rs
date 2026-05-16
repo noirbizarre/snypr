@@ -22,12 +22,14 @@ use gtk4::subclass::prelude::*;
 
 use crate::annotate::render::{arrowhead, drag_rect};
 use crate::annotate::tools::arrow::ArrowTool;
+use crate::annotate::tools::blur::BlurTool;
 use crate::annotate::tools::freehand::FreehandTool;
 use crate::annotate::tools::highlight::HighlightTool;
 use crate::annotate::tools::number::NumberTool;
 use crate::annotate::tools::rect::RectTool;
 use crate::annotate::tools::redact::RedactTool;
-use crate::annotate::{Document, Tool, ToolKind};
+use crate::annotate::tools::text::TextTool;
+use crate::annotate::{Document, DocumentBase, Tool, ToolKind};
 use crate::capture::CapturedImage;
 use crate::capture::region::Rect;
 
@@ -216,7 +218,12 @@ fn dashed_stroke(width: f64, dash: &[f32]) -> gsk::Stroke {
 }
 
 /// Append a committed [`Tool`] layer to the snapshot.
-fn snapshot_tool(snap: &gtk4::Snapshot, tool: &dyn Tool, pango_ctx: &pango::Context) {
+fn snapshot_tool(
+    snap: &gtk4::Snapshot,
+    tool: &dyn Tool,
+    pango_ctx: &pango::Context,
+    base: Option<&DocumentBase>,
+) {
     match tool.kind() {
         ToolKind::Rect => {
             if let Some(t) = tool.as_any().downcast_ref::<RectTool>() {
@@ -252,11 +259,7 @@ fn snapshot_tool(snap: &gtk4::Snapshot, tool: &dyn Tool, pango_ctx: &pango::Cont
             if let Some(t) = tool.as_any().downcast_ref::<FreehandTool>()
                 && let Some(path) = polyline_path(&t.points)
             {
-                snap.append_stroke(
-                    &path,
-                    &solid_stroke(t.stroke_width as f64),
-                    &rgba(t.stroke),
-                );
+                snap.append_stroke(&path, &solid_stroke(t.stroke_width as f64), &rgba(t.stroke));
             }
         }
         ToolKind::Redact => {
@@ -269,9 +272,18 @@ fn snapshot_tool(snap: &gtk4::Snapshot, tool: &dyn Tool, pango_ctx: &pango::Cont
                 snapshot_number(snap, t, pango_ctx);
             }
         }
+        ToolKind::Text => {
+            if let Some(t) = tool.as_any().downcast_ref::<TextTool>() {
+                snapshot_text(snap, t, pango_ctx);
+            }
+        }
+        ToolKind::Blur => {
+            if let Some(t) = tool.as_any().downcast_ref::<BlurTool>() {
+                snapshot_blur(snap, t, base);
+            }
+        }
         // `Crop` is applied at compose time via `doc.crop`; no on-screen layer rendering.
-        // Text/Blur land in a follow-up commit (text-entry popover + live region blur).
-        ToolKind::Crop | ToolKind::Text | ToolKind::Blur => {}
+        ToolKind::Crop => {}
     }
 }
 
@@ -297,6 +309,44 @@ fn snapshot_number(snap: &gtk4::Snapshot, t: &NumberTool, pango_ctx: &pango::Con
     ));
     snap.append_layout(&layout, &rgba(t.text_color));
     snap.restore();
+}
+
+fn text_layout(t: &TextTool, pango_ctx: &pango::Context) -> pango::Layout {
+    let layout = pango::Layout::new(pango_ctx);
+    layout.set_text(&t.text);
+    let mut desc = pango::FontDescription::from_string("Sans");
+    desc.set_size((t.size_pt as f64 * pango::SCALE as f64) as i32);
+    layout.set_font_description(Some(&desc));
+    layout
+}
+
+fn snapshot_text(snap: &gtk4::Snapshot, t: &TextTool, pango_ctx: &pango::Context) {
+    let layout = text_layout(t, pango_ctx);
+    snap.save();
+    snap.translate(&graphene::Point::new(t.origin.0 as f32, t.origin.1 as f32));
+    snap.append_layout(&layout, &rgba(t.color));
+    snap.restore();
+}
+
+/// Blur the base image inside the tool's bounds, leaving other layers untouched. The push_blur
+/// node applies a Gaussian blur to everything drawn in the active subtree; we wrap that subtree
+/// in a clip rect so only pixels inside `t.bounds` are affected.
+fn snapshot_blur(snap: &gtk4::Snapshot, t: &BlurTool, base: Option<&DocumentBase>) {
+    let Some(base) = base else {
+        // Fall back to a translucent grey rectangle when there's no base to blur (overlay path).
+        snap.append_color(&rgba([0.5, 0.5, 0.5, 0.45]), &rect_to_graphene(&t.bounds));
+        return;
+    };
+    let Ok(tex) = build_base_texture(base) else {
+        return;
+    };
+    let clip = rect_to_graphene(&t.bounds);
+    let full = graphene::Rect::new(0.0, 0.0, base.width as f32, base.height as f32);
+    snap.push_clip(&clip);
+    snap.push_blur(t.radius as f64);
+    snap.append_texture(&tex, &full);
+    snap.pop(); // blur
+    snap.pop(); // clip
 }
 
 fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
@@ -339,7 +389,19 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
                 &rgba([1.0, 1.0, 1.0, 0.9]),
             );
         }
-        ToolKind::Number | ToolKind::Text | ToolKind::Blur => {}
+        ToolKind::Blur => {
+            // Dashed outline with a faint fill — actually applying the blur every drag-update
+            // would re-upload the texture every frame, so we settle for a marker preview and
+            // commit the real blur on drag-end.
+            let r = drag_rect(p.from, p.to);
+            snap.append_color(&rgba([0.5, 0.5, 0.5, 0.25]), &rect_to_graphene(&r));
+            snap.append_stroke(
+                &rect_path(&r),
+                &dashed_stroke(1.0, &[4.0, 3.0]),
+                &rgba([1.0, 1.0, 1.0, 0.9]),
+            );
+        }
+        ToolKind::Number | ToolKind::Text => {}
     }
 }
 
@@ -397,7 +459,7 @@ fn compose_document(doc: &Document) -> Result<CapturedImage> {
             cr.paint().map_err(|e| anyhow!("paint base: {e}"))?;
         }
         for layer in &doc.layers {
-            cairo_draw_tool(layer.as_ref(), &cr);
+            cairo_draw_tool(layer.as_ref(), &cr, doc.base.as_ref());
         }
     }
     surface.flush();
@@ -459,7 +521,7 @@ fn cairo_rgba(c: [f32; 4]) -> [f64; 4] {
     [c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64]
 }
 
-fn cairo_draw_tool(tool: &dyn Tool, cr: &cairo::Context) {
+fn cairo_draw_tool(tool: &dyn Tool, cr: &cairo::Context, base: Option<&DocumentBase>) {
     match tool.kind() {
         ToolKind::Rect => {
             if let Some(t) = tool.as_any().downcast_ref::<RectTool>() {
@@ -497,7 +559,19 @@ fn cairo_draw_tool(tool: &dyn Tool, cr: &cairo::Context) {
                 cairo_number(cr, t);
             }
         }
-        ToolKind::Crop | ToolKind::Text | ToolKind::Blur => {}
+        ToolKind::Text => {
+            if let Some(t) = tool.as_any().downcast_ref::<TextTool>() {
+                cairo_text(cr, t);
+            }
+        }
+        ToolKind::Blur => {
+            if let Some(t) = tool.as_any().downcast_ref::<BlurTool>()
+                && let Some(base) = base
+            {
+                cairo_blur(cr, t, base);
+            }
+        }
+        ToolKind::Crop => {}
     }
 }
 
@@ -574,6 +648,77 @@ fn cairo_number(cr: &cairo::Context, t: &NumberTool) {
         cr.move_to(tx, ty);
         let _ = cr.show_text(&label);
     }
+}
+
+fn cairo_text(cr: &cairo::Context, t: &TextTool) {
+    cr.set_source_rgba(
+        t.color[0] as f64,
+        t.color[1] as f64,
+        t.color[2] as f64,
+        t.color[3] as f64,
+    );
+    cr.select_font_face("sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.set_font_size(t.size_pt as f64);
+    // Cairo's text origin is the baseline; offset by ascent so `origin` is the top-left like
+    // the GSK / Pango path.
+    if let Ok(ext) = cr.font_extents() {
+        cr.move_to(t.origin.0, t.origin.1 + ext.ascent());
+        let _ = cr.show_text(&t.text);
+    }
+}
+
+/// Apply a software Gaussian blur to the document's base pixels inside `t.bounds` and paint the
+/// blurred region back into the cairo context. Only the base image is blurred — layers stacked
+/// below the BlurTool are not, matching the GSK path's limitation.
+fn cairo_blur(cr: &cairo::Context, t: &BlurTool, base: &DocumentBase) {
+    use image::{ImageBuffer, RgbaImage, imageops};
+
+    let r = clamp_to_doc(t.bounds, (base.width, base.height));
+    if r.w == 0 || r.h == 0 {
+        return;
+    }
+    // Copy RGBA region out of the base buffer.
+    let mut region: Vec<u8> = Vec::with_capacity((r.w * r.h * 4) as usize);
+    let row_bytes = (base.width * 4) as usize;
+    let pix = base.pixels.as_ref();
+    for y in r.y as usize..(r.y as usize + r.h as usize) {
+        let row_start = y * row_bytes + r.x as usize * 4;
+        region.extend_from_slice(&pix[row_start..row_start + r.w as usize * 4]);
+    }
+    let Some(img): Option<RgbaImage> = ImageBuffer::from_raw(r.w, r.h, region) else {
+        return;
+    };
+    let blurred = imageops::blur(&img, t.radius);
+    // RGBA -> BGRA for cairo ARgb32.
+    let mut bgra = blurred.into_raw();
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let stride = match cairo::Format::ARgb32.stride_for_width(r.w) {
+        Ok(s) => s as usize,
+        Err(_) => return,
+    };
+    let row = (r.w * 4) as usize;
+    let buf = if stride == row {
+        bgra
+    } else {
+        let mut padded = vec![0u8; stride * r.h as usize];
+        for y in 0..r.h as usize {
+            padded[y * stride..y * stride + row].copy_from_slice(&bgra[y * row..(y + 1) * row]);
+        }
+        padded
+    };
+    let Ok(surface) = cairo::ImageSurface::create_for_data(
+        buf,
+        cairo::Format::ARgb32,
+        r.w as i32,
+        r.h as i32,
+        stride as i32,
+    ) else {
+        return;
+    };
+    let _ = cr.set_source_surface(&surface, r.x as f64, r.y as f64);
+    let _ = cr.paint();
 }
 
 /// A drag-in-progress preview that hasn't been committed to the document yet.
@@ -669,8 +814,9 @@ mod imp {
             }
 
             let pango_ctx = self.obj().create_pango_context();
+            let base = doc.base.clone();
             for layer in &doc.layers {
-                snapshot_tool(snapshot, layer.as_ref(), &pango_ctx);
+                snapshot_tool(snapshot, layer.as_ref(), &pango_ctx, base.as_ref());
             }
             if let Some(p) = self.pending.borrow().as_ref() {
                 snapshot_pending(snapshot, p);
@@ -690,8 +836,8 @@ fn install_drag(canvas: &AnnotationCanvas) {
         drag.connect_drag_begin(move |_, x, y| {
             let Some(c) = weak.upgrade() else { return };
             let kind = c.tool();
-            // Number is click-driven, not drag-driven; ignore drag-begin for it.
-            if matches!(kind, ToolKind::Number | ToolKind::Text | ToolKind::Blur) {
+            // Number/Text are click-driven, not drag-driven; ignore drag-begin for them.
+            if matches!(kind, ToolKind::Number | ToolKind::Text) {
                 return;
             }
             let points = if matches!(kind, ToolKind::Freehand) {
@@ -787,7 +933,17 @@ fn install_drag(canvas: &AnnotationCanvas) {
                         doc.crop = Some(clamped);
                     }
                 }
-                ToolKind::Number | ToolKind::Text | ToolKind::Blur => {}
+                ToolKind::Blur => {
+                    let r = drag_rect(stroke.from, stroke.to);
+                    let clamped = clamp_to_doc(r, doc.size);
+                    if clamped.w >= 2 && clamped.h >= 2 {
+                        doc.push_layer(Box::new(BlurTool {
+                            bounds: clamped,
+                            radius: 12.0,
+                        }));
+                    }
+                }
+                ToolKind::Number | ToolKind::Text => {}
             }
             let resize = matches!(stroke.kind, ToolKind::Crop);
             drop(doc);
@@ -810,24 +966,74 @@ fn install_click(canvas: &AnnotationCanvas) {
             return;
         }
         let Some(c) = weak.upgrade() else { return };
-        if !matches!(c.tool(), ToolKind::Number) {
-            return;
+        match c.tool() {
+            ToolKind::Number => place_number(&c, x, y),
+            ToolKind::Text => prompt_text(&c, x, y),
+            _ => {}
         }
-        let Some(doc_rc) = c.imp().doc.borrow().clone() else {
-            return;
-        };
-        let value = c.imp().next_number.get();
-        c.imp().next_number.set(value + 1);
-        doc_rc.borrow_mut().push_layer(Box::new(NumberTool {
-            center: (x, y),
-            radius: 18.0,
-            value,
-            fill: [0.9, 0.1, 0.1, 1.0],
-            text_color: [1.0, 1.0, 1.0, 1.0],
-        }));
-        c.queue_draw();
     });
     canvas.add_controller(click);
+}
+
+fn place_number(c: &AnnotationCanvas, x: f64, y: f64) {
+    let Some(doc_rc) = c.imp().doc.borrow().clone() else {
+        return;
+    };
+    let value = c.imp().next_number.get();
+    c.imp().next_number.set(value + 1);
+    doc_rc.borrow_mut().push_layer(Box::new(NumberTool {
+        center: (x, y),
+        radius: 18.0,
+        value,
+        fill: [0.9, 0.1, 0.1, 1.0],
+        text_color: [1.0, 1.0, 1.0, 1.0],
+    }));
+    c.queue_draw();
+}
+
+/// Pop an Entry popover anchored at `(x, y)` and commit a `TextTool` when the user presses
+/// Enter (empty input cancels). The popover is unparented on close to keep GTK from leaking
+/// the widget hierarchy.
+fn prompt_text(canvas: &AnnotationCanvas, x: f64, y: f64) {
+    let popover = gtk4::Popover::new();
+    popover.set_parent(canvas);
+    popover.set_autohide(true);
+    let rect = gdk4::Rectangle::new(x as i32, y as i32, 1, 1);
+    popover.set_pointing_to(Some(&rect));
+    let entry = gtk4::Entry::new();
+    entry.set_placeholder_text(Some("Text"));
+    entry.set_width_chars(20);
+    popover.set_child(Some(&entry));
+
+    {
+        let canvas_weak = canvas.downgrade();
+        let popover_weak = popover.downgrade();
+        entry.connect_activate(move |e| {
+            let Some(c) = canvas_weak.upgrade() else {
+                return;
+            };
+            let text = e.text().to_string();
+            if !text.is_empty()
+                && let Some(doc_rc) = c.imp().doc.borrow().clone()
+            {
+                doc_rc.borrow_mut().push_layer(Box::new(TextTool {
+                    origin: (x, y),
+                    text,
+                    size_pt: 18.0,
+                    color: [1.0, 0.95, 0.2, 1.0],
+                }));
+                c.queue_draw();
+            }
+            if let Some(p) = popover_weak.upgrade() {
+                p.popdown();
+            }
+        });
+    }
+    // GTK4 requires explicit unparent on transient popovers, otherwise the widget tree leaks.
+    popover.connect_closed(|p| p.unparent());
+
+    popover.popup();
+    entry.grab_focus();
 }
 
 fn clamp_to_doc(r: Rect, size: (u32, u32)) -> Rect {
