@@ -8,8 +8,18 @@ pub const CSS: &str = r#"
     margin: 12px;
 }
 
-/* The selector overlay window must be fully transparent so the Cairo draw_func
- * (which paints a translucent dim + cleared selection cutout) composites directly
+.hyprsnap-toolbar separator {
+    margin: 2px 4px;
+    background-color: alpha(@theme_fg_color, 0.18);
+}
+
+.hyprsnap-toolbar button.suggested-action {
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
+
+/* The selector overlay window must be fully transparent so the snapshot path
+ * (which paints a translucent dim + selection outline) composites directly
  * over the live desktop, not over GTK's default opaque window background. */
 window.hyprsnap-selector,
 window.hyprsnap-selector decoration,

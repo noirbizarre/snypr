@@ -7,8 +7,11 @@ pub mod editor;
 pub mod overlay;
 pub mod selector;
 pub mod style;
+pub mod toolbar;
 #[cfg(feature = "tray")]
 pub mod tray;
+
+pub use toolbar::{ModeKind, Toolbar, ToolbarAction, ToolbarSpec};
 
 use std::path::PathBuf;
 
@@ -34,18 +37,13 @@ pub async fn run_capture_flow(
     sinks: Vec<SinkSpec>,
     cursor: bool,
 ) -> Result<Vec<PathBuf>> {
-    let rect = selector::pick_region(ctx.clone())
+    let outcome = selector::pick_region(ctx.clone(), cursor)
         .await
         .context("interactive region selection")?;
-    tracing::info!(
-        x = rect.x,
-        y = rect.y,
-        w = rect.w,
-        h = rect.h,
-        "region selected"
-    );
+    let selection = resolve_outcome(&outcome.selection).await?;
+    let cursor = outcome.cursor;
+    tracing::info!(?selection, cursor, "selector outcome");
 
-    let selection = Selection::Region(rect);
     let capturer = WlrCapturer::new()?;
     let images = capturer
         .capture(selection.clone(), cursor)
@@ -55,13 +53,33 @@ pub async fn run_capture_flow(
     tracing::info!(
         width = stitched.width,
         height = stitched.height,
-        "captured region for editor"
+        "captured selection for editor"
     );
 
     // BGRA (from screencopy) → RGBA so the canvas's `build_base_surface` swizzle path stays
     // honest. We do the conversion once here rather than teaching the canvas about both layouts.
     let base = base_from_captured(&stitched);
     editor::run_with_base(ctx, base, sinks).await
+}
+
+/// Resolve any compositor-aware variants the selector may emit (`Window`, `Focused`) into
+/// concrete selections the capture pipeline can act on. `Full`, `Output`, `Region` pass through.
+async fn resolve_outcome(selection: &Selection) -> Result<Selection> {
+    match selection {
+        Selection::Window => {
+            let win = crate::hypr::active_window()
+                .await
+                .context("querying active window from Hyprland")?;
+            Ok(Selection::Region(win.rect()))
+        }
+        Selection::Focused => {
+            let name = crate::hypr::focused_monitor()
+                .await
+                .context("querying focused monitor from Hyprland")?;
+            Ok(Selection::Output(name))
+        }
+        other => Ok(other.clone()),
+    }
 }
 
 /// Convert a screencopy `CapturedImage` (BGRA, possibly with padded stride) into a tight RGBA

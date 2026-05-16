@@ -2,18 +2,19 @@
 //!
 //! Spawns one `gtk4_layer_shell` window per monitor at `Layer::Overlay`. Each hosts an
 //! [`AnnotationCanvas`] sized to its monitor so the user can sketch directly on top of their
-//! desktop. The keyboard is grabbed exclusively while the overlay is alive so the user's tool
-//! shortcuts always reach us, even when input passthrough lets pointer events fall through to
-//! whatever app is underneath.
+//! desktop, plus a floating bottom-center [`crate::ui::Toolbar`] with tool toggles, undo,
+//! clear, and a passthrough toggle. The keyboard is grabbed exclusively while the overlay is
+//! alive so the user's tool shortcuts always reach us, even when input passthrough lets pointer
+//! events fall through to whatever app is underneath.
 //!
-//! Keys:
-//!   * `R / A / H / F / N / X` — switch tool (Rect/Arrow/Highlight/Freehand/Number/Redact)
+//! Shortcuts (mirrored on every monitor's toolbar):
+//!   * `R / A / H / F / N / T / X` — switch tool
 //!   * `Ctrl+Z` — undo last layer
 //!   * `Ctrl+L` — clear all layers
-//!   * `P` — toggle pointer passthrough (when on, clicks fall through to the desktop)
+//!   * `P` — toggle pointer passthrough
 //!   * `Esc` — quit
 //!
-//! Crop/Save aren't useful for an ephemeral overlay so they're intentionally omitted.
+//! Crop and Blur are intentionally omitted (no underlying pixels to operate on).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -27,6 +28,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use crate::annotate::ToolKind;
 use crate::context::Ctx;
 use crate::ui::canvas::AnnotationCanvas;
+use crate::ui::toolbar::{OVERLAY_TOOLS, Toolbar, ToolbarAction, ToolbarSpec};
 
 /// Launch the live overlay. Returns once the user presses `Esc` (or the GTK loop otherwise
 /// exits). `initial_passthrough` matches the `--passthrough` CLI flag. When `shutdown` is
@@ -47,6 +49,7 @@ pub async fn run(
 
 type CanvasRegistry = Rc<RefCell<Vec<AnnotationCanvas>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
+type ToolbarRegistry = Rc<RefCell<Vec<Toolbar>>>;
 type ResultSender = Arc<Mutex<Option<mpsc::SyncSender<Result<()>>>>>;
 
 fn run_gtk(
@@ -127,6 +130,7 @@ fn build_overlays(app: &gtk4::Application, initial_passthrough: bool) -> Result<
         current_tool: Rc::new(Cell::new(ToolKind::Freehand)),
         canvases: Rc::new(RefCell::new(Vec::new())),
         windows: Rc::new(RefCell::new(Vec::new())),
+        toolbars: Rc::new(RefCell::new(Vec::new())),
         app_weak: app.downgrade(),
     };
 
@@ -149,6 +153,7 @@ struct Shared {
     current_tool: Rc<Cell<ToolKind>>,
     canvases: CanvasRegistry,
     windows: WindowRegistry,
+    toolbars: ToolbarRegistry,
     app_weak: glib::WeakRef<gtk4::Application>,
 }
 
@@ -183,10 +188,33 @@ fn spawn_monitor_overlay(app: &gtk4::Application, monitor: &gdk4::Monitor, share
     canvas.set_transparent(true);
     canvas.set_tool(shared.current_tool.get());
 
-    window.set_child(Some(&canvas));
-    install_keys(&window, &canvas, shared);
+    // Floating bottom-center toolbar per monitor. Each monitor gets its own instance, but
+    // actions propagate to every canvas via the `Shared` state, and we mirror state changes
+    // back to the other monitors' toolbars so the UI stays consistent.
+    let toolbar = Toolbar::new(ToolbarSpec {
+        tools: OVERLAY_TOOLS,
+        show_undo: true,
+        show_clear: true,
+        show_passthrough_toggle: true,
+        initial_tool: Some(shared.current_tool.get()),
+        initial_passthrough: shared.passthrough.get(),
+        ..Default::default()
+    });
+    wire_toolbar(&toolbar, shared, &canvas);
+
+    let overlay = gtk4::Overlay::new();
+    overlay.set_child(Some(&canvas));
+    toolbar.widget().set_halign(gtk4::Align::Center);
+    toolbar.widget().set_valign(gtk4::Align::End);
+    toolbar.widget().set_margin_bottom(24);
+    overlay.add_overlay(toolbar.widget());
+
+    window.set_child(Some(&overlay));
+    install_keys(&window, shared);
+    toolbar.install_shortcuts(&window);
 
     shared.canvases.borrow_mut().push(canvas);
+    shared.toolbars.borrow_mut().push(toolbar);
     shared.windows.borrow_mut().push(window.clone());
     window.present();
 
@@ -201,78 +229,60 @@ fn spawn_monitor_overlay(app: &gtk4::Application, monitor: &gdk4::Monitor, share
     });
 }
 
-fn install_keys(window: &gtk4::ApplicationWindow, canvas: &AnnotationCanvas, shared: &Shared) {
-    let key = gtk4::EventControllerKey::new();
+/// Wire toolbar actions back into the per-overlay shared state. Tool / Clear / Passthrough
+/// propagate across monitors so all toolbars stay in lockstep with the canvases.
+fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
     let canvases = shared.canvases.clone();
     let windows = shared.windows.clone();
+    let toolbars = shared.toolbars.clone();
     let passthrough = shared.passthrough.clone();
     let current_tool = shared.current_tool.clone();
-    let app_weak = shared.app_weak.clone();
     let canvas_weak = canvas.downgrade();
-    key.connect_key_pressed(move |_, k, _, state| {
-        let ctrl = state.contains(gdk4::ModifierType::CONTROL_MASK);
-        let set_tool = |kind: ToolKind| {
+    toolbar.connect(move |action| match action {
+        ToolbarAction::ToolSelected(kind) => {
             current_tool.set(kind);
             for c in canvases.borrow().iter() {
                 c.set_tool(kind);
             }
-        };
-        match (ctrl, k) {
-            (true, gdk4::Key::z) => {
-                if let Some(c) = canvas_weak.upgrade() {
-                    c.undo();
-                }
-                glib::Propagation::Stop
+            for t in toolbars.borrow().iter() {
+                t.set_tool(kind);
             }
-            (true, gdk4::Key::l) => {
-                for c in canvases.borrow().iter() {
-                    c.clear_layers();
-                }
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::r | gdk4::Key::R) => {
-                set_tool(ToolKind::Rect);
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::a | gdk4::Key::A) => {
-                set_tool(ToolKind::Arrow);
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::h | gdk4::Key::H) => {
-                set_tool(ToolKind::Highlight);
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::f | gdk4::Key::F) => {
-                set_tool(ToolKind::Freehand);
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::n | gdk4::Key::N) => {
-                set_tool(ToolKind::Number);
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::t | gdk4::Key::T) => {
-                set_tool(ToolKind::Text);
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::x | gdk4::Key::X) => {
-                set_tool(ToolKind::Redact);
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::p | gdk4::Key::P) => {
-                let next = !passthrough.get();
-                passthrough.set(next);
-                for w in windows.borrow().iter() {
-                    apply_passthrough(w, next);
-                }
-                tracing::info!(passthrough = next, "overlay passthrough toggled");
-                glib::Propagation::Stop
-            }
-            (false, gdk4::Key::Escape) => {
-                tear_down(&windows, &app_weak);
-                glib::Propagation::Stop
-            }
-            _ => glib::Propagation::Proceed,
         }
+        ToolbarAction::Undo => {
+            if let Some(c) = canvas_weak.upgrade() {
+                c.undo();
+            }
+        }
+        ToolbarAction::Clear => {
+            for c in canvases.borrow().iter() {
+                c.clear_layers();
+            }
+        }
+        ToolbarAction::PassthroughToggled(on) => {
+            passthrough.set(on);
+            for w in windows.borrow().iter() {
+                apply_passthrough(w, on);
+            }
+            for t in toolbars.borrow().iter() {
+                t.set_passthrough(on);
+            }
+            tracing::info!(passthrough = on, "overlay passthrough toggled");
+        }
+        _ => {}
+    });
+}
+
+/// Window-level keys not owned by the toolbar (Esc to quit).
+fn install_keys(window: &gtk4::ApplicationWindow, shared: &Shared) {
+    let key = gtk4::EventControllerKey::new();
+    let windows = shared.windows.clone();
+    let app_weak = shared.app_weak.clone();
+    key.connect_key_pressed(move |_, k, _, _| match k {
+        gdk4::Key::Escape => {
+            tear_down(&windows, &app_weak);
+            glib::Propagation::Stop
+        }
+        _ => glib::Propagation::Proceed,
     });
     window.add_controller(key);
 }

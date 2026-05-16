@@ -78,6 +78,14 @@ hyprsnap daemon
 hyprsnap --via-daemon screenshot --full
 ```
 
+### Interactive selector
+
+The selector (used by `capture` and the default `screenshot`) shows a floating
+toolbar on the primary monitor with four modes — **Full**, **Screen**, **Window**,
+**Region** — plus a cursor toggle and a **Capture** button. Keyboard shortcuts:
+`1/2/3/4` switch modes, drag with the mouse in Region mode, click on a monitor in
+Screen mode, then press `Enter` (or click **Capture**) to commit. `Esc` cancels.
+
 ### Editor & overlay keybinds
 
 | Key      | Action                       |

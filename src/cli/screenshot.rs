@@ -67,7 +67,6 @@ pub async fn run(args: Args) -> Result<()> {
     }
     Ok(())
 }
-
 /// Headless core of the screenshot pipeline used by both the CLI (`run`) and the daemon's IPC
 /// handler. Resolves compositor-aware selections, captures, encodes, and writes — returning the
 /// file paths produced by `OutputSink`s (clipboard sinks contribute nothing). `delay` and arg
@@ -79,8 +78,9 @@ pub async fn execute(
     sinks: Vec<SinkSpec>,
 ) -> Result<Vec<std::path::PathBuf>> {
     // Resolve compositor-aware selections up front (Hyprland IPC + interactive overlay) so the
-    // rest of the pipeline only ever sees concrete Region/Output/Full/PerOutput variants.
-    let selection = resolve_selection(selection, &ctx).await?;
+    // rest of the pipeline only ever sees concrete Region/Output/Full/PerOutput variants. The
+    // interactive selector can also override `cursor` via its toolbar toggle.
+    let (selection, cursor) = resolve_selection(selection, cursor, &ctx).await?;
 
     let capturer = WlrCapturer::new()?;
     let t0 = std::time::Instant::now();
@@ -143,33 +143,33 @@ fn selection_label(s: &Selection) -> &'static str {
 }
 
 /// Resolve compositor-aware selections (`Interactive`, `Window`, `Focused`) into concrete ones
-/// that the capture pipeline can act on directly.
+/// that the capture pipeline can act on directly. Also passes the (potentially updated) cursor
+/// flag back — the interactive selector's toolbar can override the CLI default.
 ///
-/// - `Interactive` opens the GTK overlay and is replaced with `Region(rect)`.
+/// - `Interactive` opens the GTK overlay; the resulting selection + cursor flag come from the
+///   user's toolbar choices.
 /// - `Window` reads the currently active window from Hyprland and is replaced with `Region(rect)`.
 /// - `Focused` reads the currently focused monitor from Hyprland and is replaced with
 ///   `Output(name)`.
 ///
-/// All other variants pass through unchanged.
+/// All other variants pass through unchanged (with the input `cursor` unchanged).
 async fn resolve_selection(
     selection: Selection,
+    cursor: bool,
     _ctx: &std::sync::Arc<crate::context::Context>,
-) -> Result<Selection> {
+) -> Result<(Selection, bool)> {
     match selection {
         Selection::Interactive => {
             #[cfg(feature = "ui")]
             {
-                let rect = crate::ui::selector::pick_region(_ctx.clone())
+                let outcome = crate::ui::selector::pick_region(_ctx.clone(), cursor)
                     .await
                     .context("interactive region selection")?;
-                tracing::info!(
-                    x = rect.x,
-                    y = rect.y,
-                    w = rect.w,
-                    h = rect.h,
-                    "region selected"
-                );
-                Ok(Selection::Region(rect))
+                tracing::info!(?outcome.selection, cursor = outcome.cursor, "selector outcome");
+                // Resolve any compositor-aware variants the user picked (Window) by recursing.
+                let (resolved, _) =
+                    Box::pin(resolve_selection(outcome.selection, outcome.cursor, _ctx)).await?;
+                Ok((resolved, outcome.cursor))
             }
             #[cfg(not(feature = "ui"))]
             {
@@ -193,16 +193,16 @@ async fn resolve_selection(
                 h = rect.h,
                 "active window resolved"
             );
-            Ok(Selection::Region(rect))
+            Ok((Selection::Region(rect), cursor))
         }
         Selection::Focused => {
             let name = crate::hypr::focused_monitor()
                 .await
                 .context("querying focused monitor from Hyprland")?;
             tracing::info!(monitor = %name, "focused monitor resolved");
-            Ok(Selection::Output(name))
+            Ok((Selection::Output(name), cursor))
         }
-        other => Ok(other),
+        other => Ok((other, cursor)),
     }
 }
 
