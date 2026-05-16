@@ -52,31 +52,11 @@ pub async fn run(args: Args) -> Result<()> {
 
     let mut selection = parse_selection(&args)?;
 
-    // Resolve the interactive selector up-front so the rest of the pipeline only ever sees a
-    // concrete `Region`. We do this *before* the optional delay so the user can compose the
-    // selection, then wait quietly for the delay.
-    if matches!(selection, Selection::Interactive) {
-        #[cfg(feature = "ui")]
-        {
-            let rect = crate::ui::selector::pick_region(ctx.clone())
-                .await
-                .context("interactive region selection")?;
-            tracing::info!(
-                x = rect.x,
-                y = rect.y,
-                w = rect.w,
-                h = rect.h,
-                "region selected"
-            );
-            selection = Selection::Region(rect);
-        }
-        #[cfg(not(feature = "ui"))]
-        {
-            anyhow::bail!(
-                "interactive selector requires the `ui` cargo feature; pass a concrete --region, --full, or other flag"
-            );
-        }
-    }
+    // Resolve compositor-aware selections up front (Hyprland IPC + interactive overlay) so the
+    // rest of the pipeline only ever sees concrete Region/Output/Full/PerOutput variants. We do
+    // this *before* the optional delay so the user can compose the selection and then wait
+    // quietly for the delay to elapse.
+    selection = resolve_selection(selection, &ctx).await?;
 
     if let Some(delay) = args.delay {
         tokio::time::sleep(delay).await;
@@ -135,6 +115,70 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve compositor-aware selections (`Interactive`, `Window`, `Focused`) into concrete ones
+/// that the capture pipeline can act on directly.
+///
+/// - `Interactive` opens the GTK overlay and is replaced with `Region(rect)`.
+/// - `Window` reads the currently active window from Hyprland and is replaced with `Region(rect)`.
+/// - `Focused` reads the currently focused monitor from Hyprland and is replaced with
+///   `Output(name)`.
+///
+/// All other variants pass through unchanged.
+async fn resolve_selection(
+    selection: Selection,
+    _ctx: &std::sync::Arc<crate::context::Context>,
+) -> Result<Selection> {
+    match selection {
+        Selection::Interactive => {
+            #[cfg(feature = "ui")]
+            {
+                let rect = crate::ui::selector::pick_region(_ctx.clone())
+                    .await
+                    .context("interactive region selection")?;
+                tracing::info!(
+                    x = rect.x,
+                    y = rect.y,
+                    w = rect.w,
+                    h = rect.h,
+                    "region selected"
+                );
+                Ok(Selection::Region(rect))
+            }
+            #[cfg(not(feature = "ui"))]
+            {
+                anyhow::bail!(
+                    "interactive selector requires the `ui` cargo feature; pass a concrete --region, --full, or other flag"
+                );
+            }
+        }
+        Selection::Window => {
+            let win = crate::hypr::active_window()
+                .await
+                .context("querying active window from Hyprland")?;
+            let rect = win.rect();
+            tracing::info!(
+                class = %win.class,
+                title = %win.title,
+                monitor = %win.monitor,
+                x = rect.x,
+                y = rect.y,
+                w = rect.w,
+                h = rect.h,
+                "active window resolved"
+            );
+            Ok(Selection::Region(rect))
+        }
+        Selection::Focused => {
+            let name = crate::hypr::focused_monitor()
+                .await
+                .context("querying focused monitor from Hyprland")?;
+            tracing::info!(monitor = %name, "focused monitor resolved");
+            Ok(Selection::Output(name))
+        }
+        other => Ok(other),
+    }
 }
 
 fn parse_selection(args: &Args) -> Result<Selection> {

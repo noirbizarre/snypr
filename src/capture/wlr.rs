@@ -213,6 +213,18 @@ fn resolve_targets(
     data: &AppData,
     selection: &Selection,
 ) -> Result<Vec<(wl_output::WlOutput, Output)>> {
+    // Compositor-aware variants must be resolved upstream (see cli::screenshot::resolve_selection).
+    // If one reaches us, that's a bug: capture has no Hyprland IPC of its own.
+    match selection {
+        Selection::Focused | Selection::Window | Selection::Interactive => {
+            bail!(
+                "internal: capture received an unresolved selection {:?}; resolve it via cli::screenshot::resolve_selection first",
+                selection
+            );
+        }
+        _ => {}
+    }
+
     let mut out = Vec::new();
     for wl_output in data.output_state.outputs() {
         let Some(info) = data.output_state.info(&wl_output) else {
@@ -232,10 +244,11 @@ fn resolve_targets(
             scale: info.scale_factor,
         };
         let want = match selection {
-            Selection::Full | Selection::PerOutput | Selection::Region(_) => true,
+            Selection::Full | Selection::PerOutput => true,
             Selection::Output(target) => target == &name,
-            Selection::Focused => true, // resolved later
-            Selection::Window | Selection::Interactive => true,
+            Selection::Region(rect) => rect.intersect(&descriptor.logical).is_some(),
+            // Already bailed above.
+            Selection::Focused | Selection::Window | Selection::Interactive => unreachable!(),
         };
         if want {
             out.push((wl_output, descriptor));
