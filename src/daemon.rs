@@ -1,16 +1,32 @@
 //! Long-lived IPC daemon listening on a Unix socket.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{Mutex, oneshot};
 
 use crate::capture::Selection;
 use crate::capture::region::Rect;
 use crate::cli::SinkSpec as CliSinkSpec;
 use crate::context::Ctx;
-use crate::ipc::{Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
+use crate::ipc::{CaptureRequest, Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
+
+/// Per-daemon mutable state that survives across IPC clients. Shared via `Arc` between the
+/// accept loop and every spawned handler so concurrent `Capture` / `DrawToggle` requests can
+/// coordinate.
+#[derive(Default)]
+struct DaemonState {
+    /// Serialises Capture-over-IPC handlers — GTK's `Application::run` is per-process, so two
+    /// editor windows from two clients would clash. Acquired with `try_lock` so a second client
+    /// gets an immediate "busy" error instead of queuing.
+    capture: Mutex<()>,
+    /// `Some(tx)` while a daemon-managed draw overlay is alive. A `DrawToggle` request flips
+    /// this: present → fire `tx` to tear it down; absent → spawn a fresh overlay.
+    overlay: Mutex<Option<oneshot::Sender<()>>>,
+}
 
 /// Default IPC socket path: `$XDG_RUNTIME_DIR/hyprsnap.sock`.
 pub fn default_socket_path() -> PathBuf {
@@ -29,6 +45,8 @@ pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
         .with_context(|| format!("binding socket {}", socket.display()))?;
     tracing::info!(path = %socket.display(), "hyprsnap daemon listening");
 
+    let state = Arc::new(DaemonState::default());
+
     // Optional StatusNotifierItem tray. Held in scope here so its Drop runs when the daemon
     // exits. The handle is unused beyond that — actions are funnelled back over `tray_rx`.
     #[cfg(feature = "tray")]
@@ -45,8 +63,9 @@ pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
                 match res {
                     Ok((stream, _addr)) => {
                         let ctx = ctx.clone();
+                        let state = state.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = handle_client(ctx, stream).await {
+                            if let Err(err) = handle_client(ctx, state, stream).await {
                                 tracing::warn!(error = ?err, "daemon client error");
                             }
                         });
@@ -55,7 +74,7 @@ pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
                 }
             }
             tray_action = recv_optional(&mut tray_rx) => {
-                if handle_tray_action(&ctx, tray_action).await {
+                if handle_tray_action(&ctx, &state, tray_action).await {
                     tracing::info!("tray requested daemon shutdown");
                     break;
                 }
@@ -98,7 +117,11 @@ async fn setup_tray(
 
 /// Returns `true` when the action requested a daemon shutdown.
 #[cfg(feature = "tray")]
-async fn handle_tray_action(ctx: &Ctx, action: Option<crate::ui::tray::TrayAction>) -> bool {
+async fn handle_tray_action(
+    ctx: &Ctx,
+    state: &Arc<DaemonState>,
+    action: Option<crate::ui::tray::TrayAction>,
+) -> bool {
     use crate::ui::tray::TrayAction;
     let Some(action) = action else {
         // Channel closed: the tray went away. Treat as a no-op so the daemon keeps serving the
@@ -106,18 +129,14 @@ async fn handle_tray_action(ctx: &Ctx, action: Option<crate::ui::tray::TrayActio
         return false;
     };
     let ctx = ctx.clone();
+    let state = state.clone();
     match action {
         TrayAction::Quit => return true,
         TrayAction::Screenshot => {
             tokio::spawn(async move {
                 let sinks = ctx.config.default_sinks();
-                let result = crate::cli::screenshot::execute(
-                    ctx,
-                    crate::capture::Selection::Full,
-                    false,
-                    sinks,
-                )
-                .await;
+                let result =
+                    crate::cli::screenshot::execute(ctx, Selection::Full, false, sinks).await;
                 match result {
                     Ok(paths) => {
                         for p in &paths {
@@ -130,16 +149,17 @@ async fn handle_tray_action(ctx: &Ctx, action: Option<crate::ui::tray::TrayActio
         }
         TrayAction::Capture => {
             tokio::spawn(async move {
-                let sinks = ctx.config.default_sinks();
-                if let Err(err) = crate::ui::run_capture_flow(ctx, sinks, false).await {
+                if let Err(err) =
+                    run_capture_with_lock(&ctx, &state, ctx.config.default_sinks(), false).await
+                {
                     tracing::warn!(error = ?err, "tray capture failed");
                 }
             });
         }
         TrayAction::OpenDraw => {
             tokio::spawn(async move {
-                if let Err(err) = crate::ui::overlay::run(ctx, false).await {
-                    tracing::warn!(error = ?err, "tray overlay failed");
+                if let Err(err) = toggle_overlay(&ctx, &state).await {
+                    tracing::warn!(error = ?err, "tray overlay toggle failed");
                 }
             });
         }
@@ -148,11 +168,11 @@ async fn handle_tray_action(ctx: &Ctx, action: Option<crate::ui::tray::TrayActio
 }
 
 #[cfg(not(feature = "tray"))]
-async fn handle_tray_action(_ctx: &Ctx, _action: Option<()>) -> bool {
+async fn handle_tray_action(_ctx: &Ctx, _state: &Arc<DaemonState>, _action: Option<()>) -> bool {
     false
 }
 
-async fn handle_client(ctx: Ctx, stream: UnixStream) -> Result<()> {
+async fn handle_client(ctx: Ctx, state: Arc<DaemonState>, stream: UnixStream) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
     let mut line = String::new();
@@ -163,7 +183,7 @@ async fn handle_client(ctx: Ctx, stream: UnixStream) -> Result<()> {
             continue;
         }
         let resp = match serde_json::from_str::<Request>(trimmed) {
-            Ok(req) => dispatch(ctx.clone(), req).await,
+            Ok(req) => dispatch(ctx.clone(), state.clone(), req).await,
             Err(err) => Response::Error {
                 message: format!("malformed request: {err}"),
             },
@@ -179,19 +199,12 @@ async fn handle_client(ctx: Ctx, stream: UnixStream) -> Result<()> {
 /// Run a single IPC `Request` against the daemon's context and return the matching `Response`.
 /// Errors propagated by helpers are flattened into [`Response::Error`] so the client always
 /// gets a structured frame back instead of a torn connection.
-async fn dispatch(ctx: Ctx, req: Request) -> Response {
+async fn dispatch(ctx: Ctx, state: Arc<DaemonState>, req: Request) -> Response {
     let result = match req {
         Request::Ping => Ok(Response::Ok),
         Request::Screenshot(req) => run_screenshot(ctx, req).await,
-        // The capture flow opens an interactive GTK editor; ferrying its in-memory result back
-        // over the socket (and the cleanup that implies) is complex enough to deserve its own
-        // commit. Surfaces an explicit error so clients can fall back to running locally.
-        Request::Capture(_) => Err(anyhow::anyhow!(
-            "Capture-over-IPC is not yet implemented; run `hyprsnap capture` directly"
-        )),
-        Request::DrawToggle => Err(anyhow::anyhow!(
-            "DrawToggle-over-IPC is not yet implemented; run `hyprsnap draw` directly"
-        )),
+        Request::Capture(req) => run_capture(ctx, state, req).await,
+        Request::DrawToggle => toggle_overlay(&ctx, &state).await.map(|_| Response::Ok),
     };
     match result {
         Ok(resp) => resp,
@@ -199,6 +212,57 @@ async fn dispatch(ctx: Ctx, req: Request) -> Response {
             message: format!("{err:#}"),
         },
     }
+}
+
+async fn run_capture(ctx: Ctx, state: Arc<DaemonState>, req: CaptureRequest) -> Result<Response> {
+    let sinks = sinks_from_specs(req.sinks, &ctx);
+    let paths = run_capture_with_lock(&ctx, &state, sinks, req.cursor).await?;
+    Ok(Response::Paths { paths })
+}
+
+/// Acquire `state.capture` with `try_lock` so concurrent IPC clients get an immediate "busy"
+/// error rather than serializing behind a GTK editor that may sit open for minutes. The lock
+/// is released when the returned guard drops, i.e. after `run_capture_flow` returns.
+async fn run_capture_with_lock(
+    ctx: &Ctx,
+    state: &Arc<DaemonState>,
+    sinks: Vec<CliSinkSpec>,
+    cursor: bool,
+) -> Result<Vec<PathBuf>> {
+    let _guard = state
+        .capture
+        .try_lock()
+        .map_err(|_| anyhow::anyhow!("another capture session is already in progress"))?;
+    crate::ui::run_capture_flow(ctx.clone(), sinks, cursor).await
+}
+
+/// Toggle the daemon-managed draw overlay: kill the running instance if present, otherwise
+/// spawn a fresh one. The `oneshot::Sender` stored in `state.overlay` is the shutdown signal
+/// the overlay's GTK task awaits via `attach_shutdown`; a spawned task clears the slot when
+/// the overlay actually exits so a follow-up toggle starts a new one.
+async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response> {
+    let mut guard = state.overlay.lock().await;
+    if let Some(tx) = guard.take() {
+        // Sender ignores its return value: if the receiver was already dropped (overlay died on
+        // its own) the next branch would have been taken instead. Either way the slot is now
+        // empty and a follow-up toggle will spawn a new overlay.
+        let _ = tx.send(());
+        return Ok(Response::Ok);
+    }
+    let (tx, rx) = oneshot::channel();
+    *guard = Some(tx);
+    let ctx = ctx.clone();
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Err(err) = crate::ui::overlay::run(ctx, false, Some(rx)).await {
+            tracing::warn!(error = ?err, "overlay task failed");
+        }
+        // Drop the stored sender so the *next* DrawToggle spawns a fresh overlay instead of
+        // sending into a dead channel.
+        let mut guard = state.overlay.lock().await;
+        *guard = None;
+    });
+    Ok(Response::Ok)
 }
 
 async fn run_screenshot(ctx: Ctx, req: ScreenshotRequest) -> Result<Response> {

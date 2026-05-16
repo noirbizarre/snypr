@@ -19,7 +19,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     let config = Config::load_default().context("loading configuration")?;
     let ctx = Context::new(config).await?;
-    crate::ui::overlay::run(ctx, args.passthrough).await
+    crate::ui::overlay::run(ctx, args.passthrough, None).await
 }
 
 #[cfg(not(feature = "ui"))]

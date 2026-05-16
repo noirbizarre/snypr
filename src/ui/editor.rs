@@ -56,15 +56,23 @@ pub async fn run_standalone(ctx: Ctx, image: PathBuf, sinks: Vec<SinkSpec>) -> R
 
 /// Open the editor against an already-captured image and route Ctrl+S through the configured
 /// sinks. Used by the `capture` subcommand so the base buffer never has to round-trip through
-/// PNG. Returns once the GTK loop exits (window closed).
-pub async fn run_with_base(ctx: Ctx, base: DocumentBase, sinks: Vec<SinkSpec>) -> Result<()> {
+/// PNG. Returns the paths written during the editor session (empty if the user closed without
+/// saving, multiple entries if they saved more than once). Used by the daemon's
+/// Capture-over-IPC handler to ferry the result back to the client.
+pub async fn run_with_base(
+    ctx: Ctx,
+    base: DocumentBase,
+    sinks: Vec<SinkSpec>,
+) -> Result<Vec<PathBuf>> {
     let title = "HyprSnap — capture".to_owned();
-    let save = sinks_save_fn(ctx.config.clone(), sinks);
+    let written: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let save = sinks_save_fn(ctx.config.clone(), sinks, written.clone());
     let setup = EditorSetup { base, title, save };
     tokio::task::spawn_blocking(move || run_gtk(setup))
         .await
         .map_err(|e| anyhow::anyhow!("editor task panicked: {e}"))??;
-    Ok(())
+    // GTK loop has exited; nobody else holds the Mutex.
+    Ok(std::mem::take(&mut written.lock().unwrap()))
 }
 
 /// Compute where `Ctrl+S` writes the edited image. CLI `--to file=PATH` wins; otherwise the
@@ -113,10 +121,15 @@ fn path_save_fn(path: PathBuf) -> SaveFn {
     })
 }
 
-/// Build a save closure that routes the composed PNG through the configured `Outputs` sinks.
+/// Build a save closure that routes the composed PNG through the configured `Outputs` sinks
+/// and records the written paths into `collected` so the caller can return them over IPC.
 /// We capture the tokio runtime handle so the GTK thread (inside `spawn_blocking`) can
 /// `block_on` the async clipboard/file writes without spinning up a second runtime.
-fn sinks_save_fn(config: Config, sinks: Vec<SinkSpec>) -> SaveFn {
+fn sinks_save_fn(
+    config: Config,
+    sinks: Vec<SinkSpec>,
+    collected: Arc<Mutex<Vec<PathBuf>>>,
+) -> SaveFn {
     let handle = tokio::runtime::Handle::current();
     let sinks = if sinks.is_empty() {
         config.default_sinks()
@@ -136,6 +149,9 @@ fn sinks_save_fn(config: Config, sinks: Vec<SinkSpec>) -> SaveFn {
             paths = ?paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "saved capture"
         );
+        if let Ok(mut g) = collected.lock() {
+            g.extend(paths.iter().cloned());
+        }
         Ok(paths)
     })
 }

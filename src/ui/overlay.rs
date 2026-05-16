@@ -29,10 +29,16 @@ use crate::context::Ctx;
 use crate::ui::canvas::AnnotationCanvas;
 
 /// Launch the live overlay. Returns once the user presses `Esc` (or the GTK loop otherwise
-/// exits). `initial_passthrough` matches the `--passthrough` CLI flag.
-pub async fn run(_ctx: Ctx, initial_passthrough: bool) -> Result<()> {
+/// exits). `initial_passthrough` matches the `--passthrough` CLI flag. When `shutdown` is
+/// provided, completing the receiver (e.g. from the daemon's DrawToggle handler) tears the
+/// overlay down from outside the GTK loop.
+pub async fn run(
+    _ctx: Ctx,
+    initial_passthrough: bool,
+    shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> Result<()> {
     let (tx, rx) = mpsc::sync_channel::<Result<()>>(1);
-    tokio::task::spawn_blocking(move || run_gtk(tx, initial_passthrough))
+    tokio::task::spawn_blocking(move || run_gtk(tx, initial_passthrough, shutdown))
         .await
         .map_err(|e| anyhow!("overlay task panicked: {e}"))??;
     rx.recv()
@@ -43,16 +49,31 @@ type CanvasRegistry = Rc<RefCell<Vec<AnnotationCanvas>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 type ResultSender = Arc<Mutex<Option<mpsc::SyncSender<Result<()>>>>>;
 
-fn run_gtk(tx: mpsc::SyncSender<Result<()>>, initial_passthrough: bool) -> Result<()> {
+fn run_gtk(
+    tx: mpsc::SyncSender<Result<()>>,
+    initial_passthrough: bool,
+    shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
         .build();
     let tx: ResultSender = Arc::new(Mutex::new(Some(tx)));
 
+    // Wrap the shutdown receiver in a Cell so the activate handler can take ownership the
+    // first time it fires (Application::connect_activate is Fn, not FnOnce).
+    let shutdown_cell: Rc<RefCell<Option<tokio::sync::oneshot::Receiver<()>>>> =
+        Rc::new(RefCell::new(shutdown));
+
     {
         let tx = tx.clone();
-        app.connect_activate(move |app| {
-            if let Err(err) = build_overlays(app, initial_passthrough) {
+        let shutdown_cell = shutdown_cell.clone();
+        app.connect_activate(move |app| match build_overlays(app, initial_passthrough) {
+            Ok(shared) => {
+                if let Some(rx) = shutdown_cell.borrow_mut().take() {
+                    attach_shutdown(&shared, rx);
+                }
+            }
+            Err(err) => {
                 send_once(&tx, Err(err));
                 app.quit();
             }
@@ -61,13 +82,26 @@ fn run_gtk(tx: mpsc::SyncSender<Result<()>>, initial_passthrough: bool) -> Resul
 
     let exit = app.run_with_args::<&str>(&[]);
     let code: i32 = exit.into();
-    // Treat a normal quit (Esc) as success. If the channel still has a slot, fill it so the
-    // caller's recv() doesn't dangle.
+    // Treat a normal quit (Esc or external shutdown) as success. If the channel still has a
+    // slot, fill it so the caller's recv() doesn't dangle.
     send_once(&tx, Ok(()));
     if code != 0 {
         bail!("GTK exited with status {code}");
     }
     Ok(())
+}
+
+/// Wire an external shutdown receiver into the GTK main context so a daemon-driven toggle can
+/// tear the overlay down cleanly without racing the GTK thread.
+fn attach_shutdown(shared: &Shared, rx: tokio::sync::oneshot::Receiver<()>) {
+    let windows = shared.windows.clone();
+    let app_weak = shared.app_weak.clone();
+    glib::MainContext::default().spawn_local(async move {
+        // If the sender is dropped without firing, await yields Err; either way we tear down so
+        // the overlay doesn't outlive the daemon-side state.
+        let _ = rx.await;
+        tear_down(&windows, &app_weak);
+    });
 }
 
 fn send_once(tx: &ResultSender, msg: Result<()>) {
@@ -78,7 +112,7 @@ fn send_once(tx: &ResultSender, msg: Result<()>) {
     }
 }
 
-fn build_overlays(app: &gtk4::Application, initial_passthrough: bool) -> Result<()> {
+fn build_overlays(app: &gtk4::Application, initial_passthrough: bool) -> Result<Shared> {
     crate::ui::style::install();
 
     let display = gdk4::Display::default().ok_or_else(|| anyhow!("no GDK display available"))?;
@@ -105,7 +139,7 @@ fn build_overlays(app: &gtk4::Application, initial_passthrough: bool) -> Result<
         };
         spawn_monitor_overlay(app, &monitor, &shared);
     }
-    Ok(())
+    Ok(shared)
 }
 
 struct Shared {

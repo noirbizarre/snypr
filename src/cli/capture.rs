@@ -24,7 +24,11 @@ pub async fn run(args: Args) -> Result<()> {
 
     let config = Config::load_default().context("loading configuration")?;
     let ctx = Context::new(config).await?;
-    crate::ui::run_capture_flow(ctx, args.to, args.cursor).await
+    let paths = crate::ui::run_capture_flow(ctx, args.to, args.cursor).await?;
+    for p in &paths {
+        println!("{}", p.display());
+    }
+    Ok(())
 }
 
 #[cfg(not(feature = "ui"))]

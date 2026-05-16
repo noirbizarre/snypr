@@ -26,8 +26,14 @@ pub const APP_ID: &str = "ai.hyprtools.HyprSnap";
 ///
 /// The captured pixels are handed to the editor as an in-memory [`DocumentBase`] so we skip a
 /// PNG encode + decode round-trip. The editor's save action then re-encodes once when the user
-/// commits, fanning the bytes out to whatever sinks the caller (or config) provides.
-pub async fn run_capture_flow(ctx: Ctx, sinks: Vec<SinkSpec>, cursor: bool) -> Result<()> {
+/// commits, fanning the bytes out to whatever sinks the caller (or config) provides. Returns
+/// the paths written during the editor session (empty if the user closed without saving),
+/// matching `cli::screenshot::execute` so the daemon can ferry results back over IPC.
+pub async fn run_capture_flow(
+    ctx: Ctx,
+    sinks: Vec<SinkSpec>,
+    cursor: bool,
+) -> Result<Vec<PathBuf>> {
     let rect = selector::pick_region(ctx.clone())
         .await
         .context("interactive region selection")?;
