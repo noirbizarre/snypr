@@ -6,8 +6,11 @@ use anyhow::{Context as _, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+use crate::capture::Selection;
+use crate::capture::region::Rect;
+use crate::cli::SinkSpec as CliSinkSpec;
 use crate::context::Ctx;
-use crate::ipc::{Request, Response};
+use crate::ipc::{Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
 
 /// Default IPC socket path: `$XDG_RUNTIME_DIR/hyprsnap.sock`.
 pub fn default_socket_path() -> PathBuf {
@@ -55,7 +58,7 @@ pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn handle_client(_ctx: Ctx, stream: UnixStream) -> Result<()> {
+async fn handle_client(ctx: Ctx, stream: UnixStream) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
     let mut line = String::new();
@@ -66,10 +69,7 @@ async fn handle_client(_ctx: Ctx, stream: UnixStream) -> Result<()> {
             continue;
         }
         let resp = match serde_json::from_str::<Request>(trimmed) {
-            Ok(Request::Ping) => Response::Ok,
-            Ok(other) => Response::Error {
-                message: format!("not yet implemented: {other:?}"),
-            },
+            Ok(req) => dispatch(ctx.clone(), req).await,
             Err(err) => Response::Error {
                 message: format!("malformed request: {err}"),
             },
@@ -80,4 +80,140 @@ async fn handle_client(_ctx: Ctx, stream: UnixStream) -> Result<()> {
         line.clear();
     }
     Ok(())
+}
+
+/// Run a single IPC `Request` against the daemon's context and return the matching `Response`.
+/// Errors propagated by helpers are flattened into [`Response::Error`] so the client always
+/// gets a structured frame back instead of a torn connection.
+async fn dispatch(ctx: Ctx, req: Request) -> Response {
+    let result = match req {
+        Request::Ping => Ok(Response::Ok),
+        Request::Screenshot(req) => run_screenshot(ctx, req).await,
+        // The capture flow opens an interactive GTK editor; ferrying its in-memory result back
+        // over the socket (and the cleanup that implies) is complex enough to deserve its own
+        // commit. Surfaces an explicit error so clients can fall back to running locally.
+        Request::Capture(_) => Err(anyhow::anyhow!(
+            "Capture-over-IPC is not yet implemented; run `hyprsnap capture` directly"
+        )),
+        Request::DrawToggle => Err(anyhow::anyhow!(
+            "DrawToggle-over-IPC is not yet implemented; run `hyprsnap draw` directly"
+        )),
+    };
+    match result {
+        Ok(resp) => resp,
+        Err(err) => Response::Error {
+            message: format!("{err:#}"),
+        },
+    }
+}
+
+async fn run_screenshot(ctx: Ctx, req: ScreenshotRequest) -> Result<Response> {
+    let selection = selection_from_spec(req.selection);
+    let sinks = sinks_from_specs(req.sinks, &ctx);
+    let paths = crate::cli::screenshot::execute(ctx, selection, req.cursor, sinks).await?;
+    Ok(Response::Paths { paths })
+}
+
+/// Convert the wire `SelectionSpec` into the in-process `Selection`. They mirror each other 1:1
+/// today; the indirection keeps `crate::capture` free of serde derives.
+pub fn selection_from_spec(spec: SelectionSpec) -> Selection {
+    match spec {
+        SelectionSpec::Full => Selection::Full,
+        SelectionSpec::PerOutput => Selection::PerOutput,
+        SelectionSpec::Focused => Selection::Focused,
+        SelectionSpec::Output { name } => Selection::Output(name),
+        SelectionSpec::Window => Selection::Window,
+        SelectionSpec::Region { x, y, w, h } => Selection::Region(Rect { x, y, w, h }),
+        SelectionSpec::Interactive => Selection::Interactive,
+    }
+}
+
+/// Reverse of [`selection_from_spec`], used by the IPC client when forwarding CLI args to the
+/// daemon.
+pub fn selection_to_spec(selection: &Selection) -> SelectionSpec {
+    match selection {
+        Selection::Full => SelectionSpec::Full,
+        Selection::PerOutput => SelectionSpec::PerOutput,
+        Selection::Focused => SelectionSpec::Focused,
+        Selection::Output(name) => SelectionSpec::Output { name: name.clone() },
+        Selection::Window => SelectionSpec::Window,
+        Selection::Region(r) => SelectionSpec::Region {
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+        },
+        Selection::Interactive => SelectionSpec::Interactive,
+    }
+}
+
+fn sinks_from_specs(specs: Vec<SinkSpec>, ctx: &Ctx) -> Vec<CliSinkSpec> {
+    if specs.is_empty() {
+        return ctx.config.default_sinks();
+    }
+    specs
+        .into_iter()
+        .map(|s| match s {
+            SinkSpec::File { path } => CliSinkSpec::File(path),
+            SinkSpec::Clipboard => CliSinkSpec::Clipboard,
+        })
+        .collect()
+}
+
+/// Convert the CLI sink list into the IPC wire form. Mirror of [`sinks_from_specs`] used by the
+/// `--via-daemon` client path.
+pub fn sinks_to_specs(sinks: &[CliSinkSpec]) -> Vec<SinkSpec> {
+    sinks
+        .iter()
+        .map(|s| match s {
+            CliSinkSpec::File(path) => SinkSpec::File { path: path.clone() },
+            CliSinkSpec::Clipboard => SinkSpec::Clipboard,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn selection_spec_round_trips() {
+        for s in [
+            Selection::Full,
+            Selection::PerOutput,
+            Selection::Focused,
+            Selection::Window,
+            Selection::Interactive,
+            Selection::Output("DP-1".into()),
+            Selection::Region(Rect {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            }),
+        ] {
+            let back = selection_from_spec(selection_to_spec(&s));
+            assert_eq!(format!("{s:?}"), format!("{back:?}"));
+        }
+    }
+
+    #[test]
+    fn sinks_round_trip() {
+        let cli = vec![
+            CliSinkSpec::File(None),
+            CliSinkSpec::File(Some("/tmp/x.png".into())),
+            CliSinkSpec::Clipboard,
+        ];
+        let wire = sinks_to_specs(&cli);
+        // We can't easily fake a Ctx here, so emulate the no-default fast-path manually.
+        let back: Vec<CliSinkSpec> = wire
+            .into_iter()
+            .map(|s| match s {
+                SinkSpec::File { path } => CliSinkSpec::File(path),
+                SinkSpec::Clipboard => CliSinkSpec::Clipboard,
+            })
+            .collect();
+        assert_eq!(cli, back);
+    }
 }

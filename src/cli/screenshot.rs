@@ -50,45 +50,49 @@ pub async fn run(args: Args) -> Result<()> {
     let config = Config::load_default().context("loading configuration")?;
     let ctx = Context::new(config).await?;
 
-    let mut selection = parse_selection(&args)?;
-
-    // Resolve compositor-aware selections up front (Hyprland IPC + interactive overlay) so the
-    // rest of the pipeline only ever sees concrete Region/Output/Full/PerOutput variants. We do
-    // this *before* the optional delay so the user can compose the selection and then wait
-    // quietly for the delay to elapse.
-    selection = resolve_selection(selection, &ctx).await?;
-
-    if let Some(delay) = args.delay {
-        tokio::time::sleep(delay).await;
-    }
-
-    let capturer = WlrCapturer::new()?;
-    let t0 = std::time::Instant::now();
-    let images = capturer
-        .capture(selection.clone(), args.cursor)
-        .await
-        .with_context(|| format!("capturing {:?}", selection))?;
-    tracing::info!(
-        elapsed_ms = t0.elapsed().as_millis() as u64,
-        count = images.len(),
-        "captured"
-    );
-
-    for img in &images {
-        tracing::debug!(
-            output = ?img.source.as_ref().map(|o| &o.name),
-            width = img.width,
-            height = img.height,
-            stride = img.stride,
-            "captured image"
-        );
-    }
-
+    let selection = parse_selection(&args)?;
     let sinks = if args.to.is_empty() {
         ctx.config.default_sinks()
     } else {
         args.to.clone()
     };
+
+    if let Some(delay) = args.delay {
+        tokio::time::sleep(delay).await;
+    }
+
+    let paths = execute(ctx, selection, args.cursor, sinks).await?;
+    for p in &paths {
+        println!("{}", p.display());
+    }
+    Ok(())
+}
+
+/// Headless core of the screenshot pipeline used by both the CLI (`run`) and the daemon's IPC
+/// handler. Resolves compositor-aware selections, captures, encodes, and writes — returning the
+/// file paths produced by `OutputSink`s (clipboard sinks contribute nothing). `delay` and arg
+/// parsing live one level up since they're CLI-specific concerns.
+pub async fn execute(
+    ctx: crate::context::Ctx,
+    selection: Selection,
+    cursor: bool,
+    sinks: Vec<SinkSpec>,
+) -> Result<Vec<std::path::PathBuf>> {
+    // Resolve compositor-aware selections up front (Hyprland IPC + interactive overlay) so the
+    // rest of the pipeline only ever sees concrete Region/Output/Full/PerOutput variants.
+    let selection = resolve_selection(selection, &ctx).await?;
+
+    let capturer = WlrCapturer::new()?;
+    let t0 = std::time::Instant::now();
+    let images = capturer
+        .capture(selection.clone(), cursor)
+        .await
+        .with_context(|| format!("capturing {selection:?}"))?;
+    tracing::info!(
+        elapsed_ms = t0.elapsed().as_millis() as u64,
+        count = images.len(),
+        "captured"
+    );
 
     // `--per-output` skips stitching entirely: each captured frame is encoded and written to its
     // own file (or copied to its own clipboard entry), with the output name interpolated into
@@ -107,58 +111,22 @@ pub async fn run(args: Args) -> Result<()> {
                 selection: Some("output"),
             };
             let outputs = Outputs::from_specs_per_output(&sinks, &ctx.config, &ctx_fname)?;
-            let t_e = std::time::Instant::now();
             let png = crate::output::encode_png(img)?;
-            tracing::info!(
-                elapsed_ms = t_e.elapsed().as_millis() as u64,
-                bytes = png.len(),
-                output = %name,
-                "encoded PNG"
-            );
-            let t_w = std::time::Instant::now();
             let paths = outputs.write_png(&png).await?;
-            tracing::info!(
-                elapsed_ms = t_w.elapsed().as_millis() as u64,
-                output = %name,
-                "wrote sinks"
-            );
             all_paths.extend(paths);
         }
-        for p in &all_paths {
-            println!("{}", p.display());
-        }
-        return Ok(());
+        return Ok(all_paths);
     }
 
-    let t1 = std::time::Instant::now();
     let stitched = crate::capture::region::stitch(&images, &selection)?;
-    tracing::info!(
-        elapsed_ms = t1.elapsed().as_millis() as u64,
-        width = stitched.width,
-        height = stitched.height,
-        "stitched"
-    );
-
     let ctx_fname = crate::config::FilenameContext {
         output: None,
         selection: Some(selection_label(&selection)),
     };
     let outputs = Outputs::from_specs(&sinks, &ctx.config, &ctx_fname)?;
-    let t2 = std::time::Instant::now();
     let png = crate::output::encode_png(&stitched)?;
-    tracing::info!(
-        elapsed_ms = t2.elapsed().as_millis() as u64,
-        bytes = png.len(),
-        "encoded PNG"
-    );
-    let t3 = std::time::Instant::now();
     let paths = outputs.write_png(&png).await?;
-    tracing::info!(elapsed_ms = t3.elapsed().as_millis() as u64, "wrote sinks");
-    for p in &paths {
-        println!("{}", p.display());
-    }
-
-    Ok(())
+    Ok(paths)
 }
 
 /// Short label for the filename `{selection}` token.
@@ -238,7 +206,7 @@ async fn resolve_selection(
     }
 }
 
-fn parse_selection(args: &Args) -> Result<Selection> {
+pub(crate) fn parse_selection(args: &Args) -> Result<Selection> {
     match (
         args.full,
         args.per_output,

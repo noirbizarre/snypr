@@ -92,12 +92,81 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         // No subcommand → default to an interactive screenshot.
         Command::Screenshot(screenshot::Args::default())
     });
+    if cli.via_daemon {
+        return dispatch_via_daemon(command).await;
+    }
     match command {
         Command::Screenshot(args) => screenshot::run(args).await,
         Command::Annotate(args) => annotate::run(args).await,
         Command::Capture(args) => capture::run(args).await,
         Command::Draw(args) => draw::run(args).await,
         Command::Daemon(args) => daemon::run(args).await,
+    }
+}
+
+/// Forward a `Command` to a running `hyprsnap daemon` over the IPC socket instead of executing
+/// locally. The screenshot subcommand is the one currently implemented server-side; the others
+/// either don't make sense via IPC (annotate is purely local; daemon obviously) or are flagged
+/// as "not yet" so the user knows to run them locally.
+async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
+    use anyhow::{Context as _, anyhow, bail};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let request = build_request(command)?;
+    let socket = crate::daemon::default_socket_path();
+    let stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .with_context(|| format!("connecting to daemon at {}", socket.display()))?;
+    let (read, mut write) = stream.into_split();
+    let mut payload = serde_json::to_vec(&request)?;
+    payload.push(b'\n');
+    write.write_all(&payload).await?;
+    write.shutdown().await.ok();
+
+    let mut reader = BufReader::new(read);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .await
+        .context("reading daemon response")?;
+    if line.trim().is_empty() {
+        bail!("daemon closed connection without responding");
+    }
+    let resp: crate::ipc::Response = serde_json::from_str(line.trim())
+        .with_context(|| format!("parsing daemon response `{}`", line.trim()))?;
+    match resp {
+        crate::ipc::Response::Ok => Ok(()),
+        crate::ipc::Response::Paths { paths } => {
+            for p in &paths {
+                println!("{}", p.display());
+            }
+            Ok(())
+        }
+        crate::ipc::Response::Error { message } => Err(anyhow!("daemon: {message}")),
+    }
+}
+
+fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
+    use anyhow::bail;
+    match command {
+        Command::Screenshot(args) => {
+            let selection = screenshot::parse_selection(&args)?;
+            let sinks = crate::daemon::sinks_to_specs(&args.to);
+            Ok(crate::ipc::Request::Screenshot(
+                crate::ipc::ScreenshotRequest {
+                    selection: crate::daemon::selection_to_spec(&selection),
+                    cursor: args.cursor,
+                    sinks,
+                },
+            ))
+        }
+        Command::Capture(args) => Ok(crate::ipc::Request::Capture(crate::ipc::CaptureRequest {
+            cursor: args.cursor,
+            sinks: crate::daemon::sinks_to_specs(&args.to),
+        })),
+        Command::Draw(_) => Ok(crate::ipc::Request::DrawToggle),
+        Command::Annotate(_) => bail!("`annotate` is local-only; do not pass --via-daemon"),
+        Command::Daemon(_) => bail!("`daemon` is the server; cannot be invoked via --via-daemon"),
     }
 }
 
