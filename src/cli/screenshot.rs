@@ -84,6 +84,52 @@ pub async fn run(args: Args) -> Result<()> {
         );
     }
 
+    let sinks = if args.to.is_empty() {
+        ctx.config.default_sinks()
+    } else {
+        args.to.clone()
+    };
+
+    // `--per-output` skips stitching entirely: each captured frame is encoded and written to its
+    // own file (or copied to its own clipboard entry), with the output name interpolated into
+    // the filename template. Templates that lack `{output}` get one auto-inserted to avoid the
+    // multiple frames collapsing onto the same path.
+    if matches!(selection, Selection::PerOutput) {
+        let mut all_paths = Vec::new();
+        for img in &images {
+            let name = img
+                .source
+                .as_ref()
+                .map(|o| o.name.as_str())
+                .unwrap_or("output");
+            let ctx_fname = crate::config::FilenameContext {
+                output: Some(name),
+                selection: Some("output"),
+            };
+            let outputs = Outputs::from_specs_per_output(&sinks, &ctx.config, &ctx_fname)?;
+            let t_e = std::time::Instant::now();
+            let png = crate::output::encode_png(img)?;
+            tracing::info!(
+                elapsed_ms = t_e.elapsed().as_millis() as u64,
+                bytes = png.len(),
+                output = %name,
+                "encoded PNG"
+            );
+            let t_w = std::time::Instant::now();
+            let paths = outputs.write_png(&png).await?;
+            tracing::info!(
+                elapsed_ms = t_w.elapsed().as_millis() as u64,
+                output = %name,
+                "wrote sinks"
+            );
+            all_paths.extend(paths);
+        }
+        for p in &all_paths {
+            println!("{}", p.display());
+        }
+        return Ok(());
+    }
+
     let t1 = std::time::Instant::now();
     let stitched = crate::capture::region::stitch(&images, &selection)?;
     tracing::info!(
@@ -93,13 +139,11 @@ pub async fn run(args: Args) -> Result<()> {
         "stitched"
     );
 
-    let sinks = if args.to.is_empty() {
-        ctx.config.default_sinks()
-    } else {
-        args.to.clone()
+    let ctx_fname = crate::config::FilenameContext {
+        output: None,
+        selection: Some(selection_label(&selection)),
     };
-
-    let outputs = Outputs::from_specs(&sinks, &ctx.config)?;
+    let outputs = Outputs::from_specs(&sinks, &ctx.config, &ctx_fname)?;
     let t2 = std::time::Instant::now();
     let png = crate::output::encode_png(&stitched)?;
     tracing::info!(
@@ -115,6 +159,19 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Short label for the filename `{selection}` token.
+fn selection_label(s: &Selection) -> &'static str {
+    match s {
+        Selection::Full => "full",
+        Selection::PerOutput => "output",
+        Selection::Focused => "focused",
+        Selection::Output(_) => "output",
+        Selection::Window => "window",
+        Selection::Region(_) => "region",
+        Selection::Interactive => "region",
+    }
 }
 
 /// Resolve compositor-aware selections (`Interactive`, `Window`, `Focused`) into concrete ones

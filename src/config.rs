@@ -138,6 +138,22 @@ impl Config {
     pub fn expand_filename(&self, ctx: &FilenameContext<'_>) -> String {
         expand_template(&self.output.filename_template, ctx, self.output.use_utc)
     }
+
+    /// Like [`Self::expand_filename`], but ensures the file basename varies with the output
+    /// name — used by `--per-output` so multiple files don't collapse onto the same path when
+    /// the user's template lacks `{output}`.
+    pub fn expand_filename_per_output(&self, ctx: &FilenameContext<'_>) -> String {
+        let template = if self.output.filename_template.contains("{output}") {
+            self.output.filename_template.clone()
+        } else {
+            // Insert `-{output}` before the final extension, or append it if there is none.
+            match self.output.filename_template.rsplit_once('.') {
+                Some((stem, ext)) => format!("{stem}-{{output}}.{ext}"),
+                None => format!("{}-{{output}}", self.output.filename_template),
+            }
+        };
+        expand_template(&template, ctx, self.output.use_utc)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]

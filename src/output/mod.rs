@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::capture::CapturedImage;
 use crate::cli::SinkSpec;
-use crate::config::Config;
+use crate::config::{Config, FilenameContext};
 
 #[async_trait]
 pub trait OutputSink: Send + Sync {
@@ -19,7 +19,34 @@ pub trait OutputSink: Send + Sync {
 pub struct Outputs(pub Vec<Box<dyn OutputSink>>);
 
 impl Outputs {
-    pub fn from_specs(specs: &[SinkSpec], config: &Config) -> Result<Self> {
+    /// Build the sink list from CLI/config specs, expanding `{output}`/`{selection}` tokens in
+    /// the configured filename template against `ctx`. Callers that want per-image filenames
+    /// (e.g. `--per-output`) rebuild `Outputs` once per image with the appropriate context.
+    pub fn from_specs(
+        specs: &[SinkSpec],
+        config: &Config,
+        ctx: &FilenameContext<'_>,
+    ) -> Result<Self> {
+        Self::from_specs_with(specs, config, ctx, false)
+    }
+
+    /// Like [`Self::from_specs`] but uses [`Config::expand_filename_per_output`] which guarantees
+    /// the basename varies with the output name (auto-inserting `-{output}` when the user's
+    /// template lacks it).
+    pub fn from_specs_per_output(
+        specs: &[SinkSpec],
+        config: &Config,
+        ctx: &FilenameContext<'_>,
+    ) -> Result<Self> {
+        Self::from_specs_with(specs, config, ctx, true)
+    }
+
+    fn from_specs_with(
+        specs: &[SinkSpec],
+        config: &Config,
+        ctx: &FilenameContext<'_>,
+        per_output: bool,
+    ) -> Result<Self> {
         let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
         for spec in specs {
             match spec {
@@ -30,7 +57,12 @@ impl Outputs {
                         let dir = config.save_directory();
                         std::fs::create_dir_all(&dir)
                             .with_context(|| format!("creating {}", dir.display()))?;
-                        dir.join(config.expand_filename(&crate::config::FilenameContext::default()))
+                        let name = if per_output {
+                            config.expand_filename_per_output(ctx)
+                        } else {
+                            config.expand_filename(ctx)
+                        };
+                        dir.join(name)
                     };
                     sinks.push(Box::new(file::FileSink::new(p)));
                 }
