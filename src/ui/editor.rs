@@ -1,16 +1,29 @@
 //! Annotation editor window.
+//!
+//! Two entry points share the same GTK plumbing:
+//!
+//! * [`run_standalone`] — `hyprsnap annotate <file>`: loads a PNG from disk and writes back to
+//!   the resolved save path on Ctrl+S.
+//! * [`run_with_base`] — `hyprsnap capture`: receives an in-memory `DocumentBase` from the
+//!   capture pipeline (no PNG round-trip) and dispatches to the configured sinks on save.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use gtk4::prelude::*;
 
 use crate::annotate::{Document, DocumentBase, ToolKind};
+use crate::capture::CapturedImage;
 use crate::cli::SinkSpec;
 use crate::config::{Config, FilenameContext};
 use crate::context::Ctx;
+use crate::output::Outputs;
 use crate::ui::canvas::AnnotationCanvas;
+
+/// Save action invoked when the user hits Ctrl+S / clicks Save. Returns the paths that were
+/// written (clipboard sinks return none) so they can be echoed on stdout.
+type SaveFn = Arc<dyn Fn(&CapturedImage) -> Result<Vec<PathBuf>> + Send + Sync + 'static>;
 
 /// Open the editor standalone (from `hyprsnap annotate <image>`).
 pub async fn run_standalone(ctx: Ctx, image: PathBuf, sinks: Vec<SinkSpec>) -> Result<()> {
@@ -31,8 +44,23 @@ pub async fn run_standalone(ctx: Ctx, image: PathBuf, sinks: Vec<SinkSpec>) -> R
     // The save destination is resolved up-front so the GTK thread doesn't need to know about
     // XDG dirs or template expansion.
     let save_path = resolve_save_path(&ctx.config, &sinks, &image)?;
+    let title = format!("HyprSnap — annotate ({})", save_path.display());
+    let save = path_save_fn(save_path);
 
-    let setup = EditorSetup { base, save_path };
+    let setup = EditorSetup { base, title, save };
+    tokio::task::spawn_blocking(move || run_gtk(setup))
+        .await
+        .map_err(|e| anyhow::anyhow!("editor task panicked: {e}"))??;
+    Ok(())
+}
+
+/// Open the editor against an already-captured image and route Ctrl+S through the configured
+/// sinks. Used by the `capture` subcommand so the base buffer never has to round-trip through
+/// PNG. Returns once the GTK loop exits (window closed).
+pub async fn run_with_base(ctx: Ctx, base: DocumentBase, sinks: Vec<SinkSpec>) -> Result<()> {
+    let title = "HyprSnap — capture".to_owned();
+    let save = sinks_save_fn(ctx.config.clone(), sinks);
+    let setup = EditorSetup { base, title, save };
     tokio::task::spawn_blocking(move || run_gtk(setup))
         .await
         .map_err(|e| anyhow::anyhow!("editor task panicked: {e}"))??;
@@ -69,9 +97,53 @@ fn resolve_save_path(
     Ok(parent.join(format!("{stem}-annotated.{ext}")))
 }
 
+/// Build a synchronous save closure that writes the composed PNG to a fixed path.
+fn path_save_fn(path: PathBuf) -> SaveFn {
+    Arc::new(move |img: &CapturedImage| {
+        let png = crate::output::encode_png(img)?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&path, &png).with_context(|| format!("writing {}", path.display()))?;
+        tracing::info!(path = %path.display(), bytes = png.len(), "saved annotated PNG");
+        Ok(vec![path.clone()])
+    })
+}
+
+/// Build a save closure that routes the composed PNG through the configured `Outputs` sinks.
+/// We capture the tokio runtime handle so the GTK thread (inside `spawn_blocking`) can
+/// `block_on` the async clipboard/file writes without spinning up a second runtime.
+fn sinks_save_fn(config: Config, sinks: Vec<SinkSpec>) -> SaveFn {
+    let handle = tokio::runtime::Handle::current();
+    let sinks = if sinks.is_empty() {
+        config.default_sinks()
+    } else {
+        sinks
+    };
+    Arc::new(move |img: &CapturedImage| {
+        let png = crate::output::encode_png(img)?;
+        let ctx = FilenameContext {
+            output: img.source.as_ref().map(|o| o.name.as_str()),
+            selection: Some("capture"),
+        };
+        let outputs = Outputs::from_specs(&sinks, &config, &ctx)?;
+        let paths = handle.block_on(outputs.write_png(&png))?;
+        tracing::info!(
+            bytes = png.len(),
+            paths = ?paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "saved capture"
+        );
+        Ok(paths)
+    })
+}
+
 struct EditorSetup {
     base: DocumentBase,
-    save_path: PathBuf,
+    title: String,
+    save: SaveFn,
 }
 
 fn run_gtk(setup: EditorSetup) -> Result<()> {
@@ -153,13 +225,13 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
             canvas.undo();
         });
     }
-    let save_path = setup.save_path.clone();
+    let save = setup.save.clone();
     {
         let canvas = canvas.clone();
-        let save_path = save_path.clone();
+        let save = save.clone();
         save_btn.connect_clicked(move |_| {
-            if let Err(err) = save_canvas(&canvas, &save_path) {
-                tracing::error!(error = ?err, path = %save_path.display(), "save failed");
+            if let Err(err) = save_canvas(&canvas, save.as_ref()) {
+                tracing::error!(error = ?err, "save failed");
             }
         });
     }
@@ -188,35 +260,29 @@ fn build_window(app: &gtk4::Application, setup: EditorSetup) {
     root.append(&toolbar);
     root.append(&scroller);
 
-    let title = format!("HyprSnap — annotate ({})", save_path.display());
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
-        .title(title)
+        .title(setup.title)
         .default_width(1100)
         .default_height(750)
         .child(&root)
         .build();
 
-    install_shortcuts(&window, &canvas, &save_path);
+    install_shortcuts(&window, &canvas, save);
     window.present();
     canvas.grab_focus();
 }
 
-/// Keyboard shortcuts: Ctrl+S save, Ctrl+Z undo, R/A switch tool, Esc closes the window.
-fn install_shortcuts(
-    window: &gtk4::ApplicationWindow,
-    canvas: &AnnotationCanvas,
-    save_path: &std::path::Path,
-) {
+/// Keyboard shortcuts: Ctrl+S save, Ctrl+Z undo, tool letters, Esc closes the window.
+fn install_shortcuts(window: &gtk4::ApplicationWindow, canvas: &AnnotationCanvas, save: SaveFn) {
     let controller = gtk4::EventControllerKey::new();
     let canvas = canvas.clone();
     let window_weak = window.downgrade();
-    let save_path = save_path.to_path_buf();
     controller.connect_key_pressed(move |_, key, _, state| {
         let ctrl = state.contains(gdk4::ModifierType::CONTROL_MASK);
         match (ctrl, key) {
             (true, gdk4::Key::s) => {
-                if let Err(err) = save_canvas(&canvas, &save_path) {
+                if let Err(err) = save_canvas(&canvas, save.as_ref()) {
                     tracing::error!(error = ?err, "save failed");
                 }
                 glib::Propagation::Stop
@@ -265,18 +331,14 @@ fn install_shortcuts(
     window.add_controller(controller);
 }
 
-fn save_canvas(canvas: &AnnotationCanvas, path: &std::path::Path) -> Result<()> {
-    let png = canvas
-        .compose_png()
-        .map_err(|e| anyhow!("composing PNG: {e}"))?;
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+fn save_canvas(
+    canvas: &AnnotationCanvas,
+    save: &dyn Fn(&CapturedImage) -> Result<Vec<PathBuf>>,
+) -> Result<()> {
+    let img = canvas.compose().map_err(|e| anyhow!("composing: {e}"))?;
+    let paths = save(&img)?;
+    for p in &paths {
+        println!("{}", p.display());
     }
-    std::fs::write(path, &png).with_context(|| format!("writing {}", path.display()))?;
-    tracing::info!(path = %path.display(), bytes = png.len(), "saved annotated PNG");
-    println!("{}", path.display());
     Ok(())
 }
