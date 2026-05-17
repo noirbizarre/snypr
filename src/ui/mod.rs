@@ -16,7 +16,7 @@ pub use toolbar::{ModeKind, Toolbar, ToolbarAction, ToolbarSpec};
 use std::path::PathBuf;
 
 /// Application id used across the GTK windows and the StatusNotifierItem.
-pub const APP_ID: &str = "ai.hyprtools.HyprSnap";
+pub const APP_ID: &str = "noirbizar.re.HyprSnap";
 
 /// Convenience accessor used by binary stubs that don't need the full editor yet.
 #[allow(dead_code)]

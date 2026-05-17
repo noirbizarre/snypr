@@ -294,6 +294,7 @@ fn spawn_monitor_overlay(
         .application(app)
         .decorated(false)
         .resizable(false)
+        .icon_name(crate::ui::APP_ID)
         .build();
     window.add_css_class("hyprsnap-overlay");
 
