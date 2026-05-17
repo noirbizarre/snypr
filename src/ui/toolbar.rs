@@ -595,9 +595,12 @@ impl Toolbar {
             ] {
                 let toggle = gtk4::ToggleButton::new();
                 let sample = gtk4::DrawingArea::new();
-                sample.set_content_width(28);
-                sample.set_content_height(16);
-                sample.set_size_request(28, 16);
+                // Square sample so the toggle button itself renders square (button size
+                // is driven by its child + theme padding). The sample is wide enough for
+                // the dash pattern to read as dashes/dots, not as one long line.
+                sample.set_content_width(20);
+                sample.set_content_height(20);
+                sample.set_size_request(20, 20);
                 sample.set_draw_func(move |_, cr, w, h| {
                     draw_style_swatch(cr, w as f64, h as f64, style);
                 });
