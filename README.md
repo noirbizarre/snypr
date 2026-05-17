@@ -21,7 +21,7 @@ screen and flatten to PNG through Cairo on save.
 | Subcommand    | Status                                                                            |
 | ------------- | --------------------------------------------------------------------------------- |
 | `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the in-place annotation overlay before sinks |
-| `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools    |
+| `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools; Ctrl+S saves via the zone selector |
 | `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`; tray (StatusNotifierItem) when enabled in config |
 
 ## Build
@@ -66,7 +66,9 @@ hyprsnap screenshot --region 100,200,800x600 --to file
 hyprsnap screenshot --edit --to clipboard --to file
 
 # Live draw-on-screen overlay (R/O/A/H/F/N/X tools, Ctrl+Z undo, P passthrough, Esc quit).
-hyprsnap draw
+# Press Ctrl+S to save: pops the zone selector to pick what to capture (region/output/
+# window/full); strokes are baked in and the overlay stays open for more drawing.
+hyprsnap draw --to file --to clipboard --cursor
 
 # Run the daemon (IPC server; add `--systray` for a StatusNotifierItem icon).
 hyprsnap daemon
@@ -101,7 +103,7 @@ Region mode, click on a monitor in Screen mode, then press `Enter` (Capture) or
 | `X`      | Redact (solid black)         |
 | `C`      | Crop (editor only)           |
 | `Ctrl+Z` | Undo last layer              |
-| `Ctrl+S` / `Enter` | Save (editor only) |
+| `Ctrl+S` / `Enter` | Save (editor and draw overlay) |
 | `P`      | Toggle pointer passthrough (overlay only) |
 | `Ctrl+L` | Clear all layers (overlay only)           |
 | `Esc`    | Quit                         |
@@ -109,6 +111,14 @@ Region mode, click on a monitor in Screen mode, then press `Enter` (Capture) or
 A color picker (with alpha) sits next to the tool buttons. Each tool remembers its own
 color across switches within a session; it's disabled for tools whose appearance is
 hardcoded (Blur, Crop, Redact).
+
+In the **draw overlay**, `Ctrl+S` (or `Enter`, or the toolbar Save button) pops the
+screenshot zone selector so you choose what part of the screen to capture (region,
+monitor, window, or full desktop). Because the strokes are already painted on the
+layer-shell surfaces, the captured PNG naturally contains "desktop + strokes" — no
+post-processing. The overlay stays alive with strokes intact after saving, so you can
+keep drawing or save another zone. Sinks come from `--to` (repeatable; defaults to
+`[output].sinks` from the config), and `--cursor` seeds the selector's cursor toggle.
 
 Next to the color picker, a stroke-style picker offers Solid / Dashed / Dotted dash
 patterns for the outline-rendering tools (Rectangle, Ellipse, Arrow, Line, Freehand).

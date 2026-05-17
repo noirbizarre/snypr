@@ -738,8 +738,10 @@ impl Toolbar {
             });
             widget.append(&btn);
             // Ctrl+S is the conventional shortcut; Enter / KP_Enter is the quick-save used
-            // by the annotation editor (Edit mode only — show_save is never set in Draw
-            // mode, so this can't fire there).
+            // by both the annotation editor (Edit mode) and the live draw overlay (Draw
+            // mode). Neither overlay's tool set binds Enter to a tool action (no Text tool
+            // in OVERLAY_TOOLS, and in EDITOR_TOOLS the Text tool's Return is scoped to its
+            // own popover), so this can't accidentally shadow a drawing operation.
             shortcuts.push(Shortcut {
                 key: gdk4::Key::s,
                 action: ShortcutAction::Save,

@@ -29,14 +29,16 @@ use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::annotate::{Document, DocumentBase, ToolKind};
-use crate::capture::CapturedImage;
 use crate::capture::region::{Rect, slice_pixels};
+use crate::capture::{CapturedImage, Capturer};
 use crate::cli::SinkSpec;
+use crate::config::{Config, FilenameContext};
 use crate::context::Ctx;
+use crate::output::Outputs;
 use crate::ui::canvas::AnnotationCanvas;
 use crate::ui::save::{SaveFn, sinks_save_fn};
+use crate::ui::selector;
 use crate::ui::toolbar::{EDITOR_TOOLS, OVERLAY_TOOLS, Toolbar, ToolbarAction, ToolbarSpec};
-
 /// How the overlay should behave on this invocation.
 pub enum OverlayMode {
     /// Live draw on top of the desktop (today's `hyprsnap draw` flow).
@@ -228,12 +230,24 @@ fn build_overlays(
         bail!("no monitors reported by GDK");
     }
 
-    let (initial_passthrough, edit) = match mode {
+    let (initial_passthrough, edit, draw_save) = match mode {
         OverlayMode::Draw {
             passthrough,
-            sinks: _,
-            cursor: _,
-        } => (passthrough, None),
+            sinks,
+            cursor,
+        } => {
+            // Draw mode wires Save through `run_draw_save` (Ctrl+S / Enter / click) which
+            // pops the zone selector, captures, encodes, fans out to sinks, then leaves the
+            // overlay alive so the user keeps drawing.
+            let draw_save = DrawSaveState {
+                sinks,
+                cursor,
+                config: ctx.config.clone(),
+                runtime: tokio::runtime::Handle::current(),
+                collected: collected.clone(),
+            };
+            (passthrough, None, Some(Rc::new(draw_save)))
+        }
         OverlayMode::Edit {
             base,
             origin,
@@ -249,6 +263,7 @@ fn build_overlays(
                     origin,
                     save,
                 }),
+                None,
             )
         }
     };
@@ -267,6 +282,7 @@ fn build_overlays(
         toolbars: Rc::new(RefCell::new(Vec::new())),
         app_weak: app.downgrade(),
         edit: edit.map(Rc::new),
+        draw_save,
     };
 
     let mut windows = Vec::with_capacity(n as usize);
@@ -303,6 +319,22 @@ struct EditState {
     save: SaveFn,
 }
 
+/// State that's only present in Draw mode (with a save target). Carries everything
+/// `run_draw_save` needs to drive a Save action: the sinks list, the cursor default for the
+/// zone selector, the config (for filename templating + PNG compression + default sinks
+/// fallback), and the path-collection vec the outer `overlay::run` returns.
+struct DrawSaveState {
+    sinks: Vec<SinkSpec>,
+    cursor: bool,
+    config: Config,
+    /// Captured tokio runtime handle. The Save flow needs to `await` tokio futures
+    /// (`WlrCapturer::capture`, `Outputs::write_png`) from inside a `glib::MainContext`
+    /// task; we offload that work to a `tokio::spawn`ed task whose `JoinHandle` we then
+    /// await from the GTK thread, with this handle as the runtime anchor.
+    runtime: tokio::runtime::Handle,
+    collected: Arc<Mutex<Vec<PathBuf>>>,
+}
+
 struct Shared {
     /// Pointer-passthrough toggle shared across all monitors so `P` flips them in lockstep.
     passthrough: Rc<Cell<bool>>,
@@ -313,6 +345,9 @@ struct Shared {
     toolbars: ToolbarRegistry,
     app_weak: glib::WeakRef<gtk4::Application>,
     edit: Option<Rc<EditState>>,
+    /// Set in Draw mode when the overlay should respond to Save (Ctrl+S / Enter / click).
+    /// `None` would disable the Save UI entirely; today we always set this in Draw mode.
+    draw_save: Option<Rc<DrawSaveState>>,
 }
 
 /// Build (or skip) one overlay window for a monitor. Returns `Some(window)` when a window
@@ -423,6 +458,7 @@ fn spawn_monitor_overlay(
             tools: OVERLAY_TOOLS,
             show_undo: true,
             show_clear: true,
+            show_save: shared.draw_save.is_some(),
             show_passthrough_toggle: true,
             show_color_picker: true,
             show_style_picker: true,
@@ -527,6 +563,7 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
     let current_tool = shared.current_tool.clone();
     let canvas_weak = canvas.downgrade();
     let edit = shared.edit.clone();
+    let draw_save = shared.draw_save.clone();
     let app_weak = shared.app_weak.clone();
 
     // Seed the picker with the initial tool's color + correct sensitivity. Done up front so
@@ -610,20 +647,30 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             apply_passthrough_state(&passthrough, &windows, &toolbars, on);
         }
         ToolbarAction::Save => {
-            let Some(edit) = edit.as_ref() else {
-                return;
-            };
-            match compose_edit(&canvases.borrow(), edit) {
-                Ok(stitched) => match (edit.save)(&stitched) {
-                    Ok(paths) => {
-                        for p in &paths {
-                            println!("{}", p.display());
+            if let Some(edit) = edit.as_ref() {
+                match compose_edit(&canvases.borrow(), edit) {
+                    Ok(stitched) => match (edit.save)(&stitched) {
+                        Ok(paths) => {
+                            for p in &paths {
+                                println!("{}", p.display());
+                            }
+                            tear_down(&windows, &app_weak);
                         }
-                        tear_down(&windows, &app_weak);
-                    }
-                    Err(err) => tracing::error!(error = ?err, "save failed"),
-                },
-                Err(err) => tracing::error!(error = ?err, "composing edit failed"),
+                        Err(err) => tracing::error!(error = ?err, "save failed"),
+                    },
+                    Err(err) => tracing::error!(error = ?err, "composing edit failed"),
+                }
+            } else if let Some(draw_save) = draw_save.as_ref() {
+                // Draw-mode save: hand off to `run_draw_save` on the GLib main context so
+                // we can `await` `pick_region_in_app` + the tokio-backed capture pipeline.
+                // The overlay stays alive afterwards — Draw save is non-terminating.
+                glib::MainContext::default().spawn_local(run_draw_save(
+                    app_weak.clone(),
+                    windows.clone(),
+                    toolbars.clone(),
+                    passthrough.clone(),
+                    draw_save.clone(),
+                ));
             }
         }
         _ => {}
@@ -707,6 +754,114 @@ fn compose_edit(canvases: &[MonitorCanvas], edit: &EditState) -> Result<Captured
         pixels: std::sync::Arc::from(buf.into_boxed_slice()),
         source: None,
     })
+}
+
+/// Draw-mode save flow. Pops the screenshot zone selector to let the user pick what region
+/// to save, then captures + encodes + writes via the same path `screenshot` uses. Strokes
+/// are already painted on the layer-shell surfaces and therefore baked into whatever
+/// `zwlr_screencopy` returns — no in-process compositing needed. Hides toolbar widgets
+/// during the selector + capture so they don't appear in the saved PNG; re-shows them on
+/// the way out so the user keeps drawing.
+///
+/// Runs on the GLib main context (`spawn_local`). Long-running async work (the actual
+/// `WlrCapturer::capture` + `Outputs::write_png`) is offloaded onto the tokio runtime via
+/// `runtime.spawn`, then awaited from here — the GTK loop stays responsive while the
+/// capture is in flight.
+async fn run_draw_save(
+    app_weak: glib::WeakRef<gtk4::Application>,
+    windows: WindowRegistry,
+    toolbars: ToolbarRegistry,
+    passthrough: Rc<Cell<bool>>,
+    draw_save: Rc<DrawSaveState>,
+) {
+    let Some(app) = app_weak.upgrade() else {
+        return;
+    };
+
+    // Snapshot the current passthrough state so we can restore it on the way out. Then hide
+    // every per-monitor draw toolbar and force passthrough ON: with the toolbars unmapped,
+    // `apply_passthrough_state` will fall back to an empty input region (no toolbar bounds
+    // to keep clickable), and `KeyboardMode::None` detaches the keyboard. Net effect: the
+    // draw overlay is fully transparent to input, so the selector that we map next
+    // receives every pointer + keyboard event.
+    let prev_passthrough = passthrough.get();
+    for t in toolbars.borrow().iter() {
+        t.widget().set_visible(false);
+    }
+    apply_passthrough_state(&passthrough, &windows, &toolbars, true);
+
+    // Yield once so the parking commit (KeyboardMode swap + toolbar unmap) reaches the
+    // compositor before the selector maps. Without this, Hyprland can route the first
+    // pointer event back to the draw overlay because it sees the parking change one frame
+    // later than the selector's `present()`.
+    glib::timeout_future(std::time::Duration::from_millis(16)).await;
+
+    let outcome = match selector::pick_region_in_app(&app, draw_save.cursor).await {
+        Ok(o) => o,
+        Err(err) => {
+            tracing::info!(error = ?err, "draw-save: selector cancelled");
+            for t in toolbars.borrow().iter() {
+                t.widget().set_visible(true);
+            }
+            apply_passthrough_state(&passthrough, &windows, &toolbars, prev_passthrough);
+            return;
+        }
+    };
+
+    // Keep toolbars hidden through the capture so they don't appear in the saved PNG. The
+    // selector's own dim veil is already gone (it destroyed its windows on commit and
+    // honored the 30 ms post-commit grace internally), so the only thing the screencopy
+    // can still pick up that we don't want is our own toolbar chrome.
+    let selection = outcome.selection.clone();
+    let cursor = outcome.cursor;
+    let sinks = if draw_save.sinks.is_empty() {
+        draw_save.config.default_sinks()
+    } else {
+        draw_save.sinks.clone()
+    };
+    let config = draw_save.config.clone();
+    let collected = draw_save.collected.clone();
+    let label = crate::cli::screenshot::selection_label(&selection);
+
+    let join = draw_save.runtime.spawn(async move {
+        let capturer = crate::capture::wlr::WlrCapturer::new()?;
+        let images = capturer
+            .capture(selection.clone(), cursor)
+            .await
+            .map_err(|e| anyhow!("capturing {selection:?}: {e}"))?;
+        let stitched = crate::capture::region::stitch(&images, &selection)?;
+        let png = crate::output::encode_png(&stitched, config.output.compression)?;
+        let ctx_fname = FilenameContext {
+            output: None,
+            selection: Some(label),
+        };
+        let outputs = Outputs::from_specs(&sinks, &config, &ctx_fname)?;
+        let paths = outputs.write_png(&png).await?;
+        anyhow::Ok(paths)
+    });
+
+    match join.await {
+        Ok(Ok(paths)) => {
+            for p in &paths {
+                println!("{}", p.display());
+            }
+            tracing::info!(
+                count = paths.len(),
+                "draw-save: wrote {} path(s)",
+                paths.len()
+            );
+            if let Ok(mut g) = collected.lock() {
+                g.extend(paths.iter().cloned());
+            }
+        }
+        Ok(Err(err)) => tracing::error!(error = ?err, "draw-save: capture/write failed"),
+        Err(err) => tracing::error!(error = ?err, "draw-save: capture task panicked"),
+    }
+
+    for t in toolbars.borrow().iter() {
+        t.widget().set_visible(true);
+    }
+    apply_passthrough_state(&passthrough, &windows, &toolbars, prev_passthrough);
 }
 
 /// Window-level keys not owned by the toolbar (Esc to quit).

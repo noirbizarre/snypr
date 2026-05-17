@@ -220,7 +220,7 @@ fn base_from_captured(img: &crate::capture::CapturedImage) -> crate::annotate::D
 }
 
 /// Short label for the filename `{selection}` token.
-fn selection_label(s: &Selection) -> &'static str {
+pub(crate) fn selection_label(s: &Selection) -> &'static str {
     match s {
         Selection::Full => "full",
         Selection::PerOutput => "output",
