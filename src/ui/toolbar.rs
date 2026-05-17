@@ -345,20 +345,21 @@ struct ColorPickerUi {
 
 /// Live state for the stroke-style picker. The trigger is a `MenuButton` so the
 /// popover is managed by GTK (no manual `popup()`/`popdown()` plumbing); the
-/// popover hosts three radio `CheckButton`s — one per [`StrokeStyle`] — that
-/// share a group so exactly one stays active. The button's child is a tiny
-/// `DrawingArea` that previews the current style by drawing a horizontal sample
-/// line, mirroring the color-picker swatch pattern.
+/// popover hosts three grouped `ToggleButton`s laid out horizontally as a
+/// segmented control — one per [`StrokeStyle`] — each showing a `DrawingArea`
+/// sample of its style. The trigger button's child is a separate small
+/// `DrawingArea` that previews the *currently selected* style, mirroring the
+/// color-picker swatch pattern.
 struct StylePickerUi {
     button: gtk4::MenuButton,
     /// Sample-line preview drawn with the current style. Redrawn whenever
     /// [`Toolbar::set_stroke_style`] is called.
     swatch: gtk4::DrawingArea,
     current: Rc<Cell<StrokeStyle>>,
-    /// Three `(style, radio, handler)` tuples — kept in declaration order so
-    /// `set_stroke_style` can flip the right radio without re-emitting the
+    /// Three `(style, toggle, handler)` tuples — kept in declaration order so
+    /// `set_stroke_style` can flip the right toggle without re-emitting the
     /// `StrokeStyleChanged` action (via `block_signal`).
-    radios: Vec<(StrokeStyle, gtk4::CheckButton, glib::SignalHandlerId)>,
+    toggles: Vec<(StrokeStyle, gtk4::ToggleButton, glib::SignalHandlerId)>,
 }
 
 impl CaptureUi {
@@ -601,49 +602,65 @@ impl Toolbar {
 
             let popover = gtk4::Popover::new();
             popover.set_has_arrow(true);
-            let popover_box = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-            popover_box.set_margin_top(6);
-            popover_box.set_margin_bottom(6);
-            popover_box.set_margin_start(8);
-            popover_box.set_margin_end(8);
+            // Three toggles laid out horizontally, given the `linked` style class so the
+            // theme renders them as a segmented control. The group makes the toggles
+            // mutually exclusive — clicking one auto-deactivates the others, which also
+            // triggers their `toggled` signals (handled with an early-return on the
+            // de-activated transition below).
+            let popover_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            popover_box.add_css_class("linked");
+            popover_box.set_margin_top(4);
+            popover_box.set_margin_bottom(4);
+            popover_box.set_margin_start(4);
+            popover_box.set_margin_end(4);
 
-            // Three radio buttons sharing a group. We attach a `toggled` handler to
-            // each but only react when the radio is *active* (radios fire twice per
-            // selection: once for the deactivated old, once for the activated new).
-            let mut radios: Vec<(StrokeStyle, gtk4::CheckButton, glib::SignalHandlerId)> =
+            let mut toggles: Vec<(StrokeStyle, gtk4::ToggleButton, glib::SignalHandlerId)> =
                 Vec::new();
-            let mut radio_group: Option<gtk4::CheckButton> = None;
-            for (style, label) in [
+            let mut toggle_group: Option<gtk4::ToggleButton> = None;
+            for (style, tooltip) in [
                 (StrokeStyle::Solid, "Solid"),
                 (StrokeStyle::Dashed, "Dashed"),
                 (StrokeStyle::Dotted, "Dotted"),
             ] {
-                let radio = gtk4::CheckButton::with_label(label);
-                if let Some(first) = &radio_group {
-                    radio.set_group(Some(first));
+                let toggle = gtk4::ToggleButton::new();
+                let sample = gtk4::DrawingArea::new();
+                sample.set_content_width(28);
+                sample.set_content_height(16);
+                sample.set_size_request(28, 16);
+                sample.set_draw_func(move |_, cr, w, h| {
+                    draw_style_swatch(cr, w as f64, h as f64, style);
+                });
+                toggle.set_child(Some(&sample));
+                toggle.set_tooltip_text(Some(tooltip));
+                make_unfocusable(&toggle);
+                if let Some(first) = &toggle_group {
+                    toggle.set_group(Some(first));
                 } else {
-                    radio_group = Some(radio.clone());
+                    toggle_group = Some(toggle.clone());
                 }
                 if style == StrokeStyle::Solid {
-                    radio.set_active(true);
+                    toggle.set_active(true);
                 }
                 let cb = callback.clone();
-                let current_for_radio = current.clone();
-                let swatch_for_radio = swatch.clone();
-                let popover_for_radio = popover.clone();
-                let id = radio.connect_toggled(move |r| {
-                    if !r.is_active() {
+                let current_for_toggle = current.clone();
+                let swatch_for_toggle = swatch.clone();
+                let popover_for_toggle = popover.clone();
+                let id = toggle.connect_toggled(move |t| {
+                    // GtkToggleButton's group semantics fire `toggled` on both the newly
+                    // deactivated and newly activated buttons; only react to activation
+                    // so we don't emit a spurious `StrokeStyleChanged` for the old style.
+                    if !t.is_active() {
                         return;
                     }
-                    current_for_radio.set(style);
-                    swatch_for_radio.queue_draw();
-                    popover_for_radio.popdown();
+                    current_for_toggle.set(style);
+                    swatch_for_toggle.queue_draw();
+                    popover_for_toggle.popdown();
                     if let Some(f) = cb.borrow().as_ref() {
                         f(ToolbarAction::StrokeStyleChanged(style));
                     }
                 });
-                popover_box.append(&radio);
-                radios.push((style, radio, id));
+                popover_box.append(&toggle);
+                toggles.push((style, toggle, id));
             }
             popover.set_child(Some(&popover_box));
 
@@ -658,7 +675,7 @@ impl Toolbar {
                 button: btn,
                 swatch,
                 current,
-                radios,
+                toggles,
             })
         } else {
             None
@@ -978,17 +995,30 @@ impl Toolbar {
         }
     }
 
-    /// Update the style-picker radios + swatch without firing `StrokeStyleChanged`.
+    /// Update the style-picker toggles + swatch without firing `StrokeStyleChanged`.
     /// Used by external state changes (e.g. selecting a different tool) so the
     /// picker always reflects the active tool's stored style.
+    ///
+    /// We block every toggle's `toggled` handler **before** touching any of them so
+    /// the group's "exactly one active" invariant (which fires auto-deactivation
+    /// `toggled` signals on peers) can't trigger a spurious
+    /// `StrokeStyleChanged` callback. We then activate only the matching toggle —
+    /// GTK auto-deactivates the others via the group, but those side-effects are
+    /// silenced by the blocked handlers. A previous version of this method called
+    /// `set_active(false)` then `set_active(true)` per toggle which could leave the
+    /// group temporarily with zero active toggles and not always recover.
     pub fn set_stroke_style(&self, style: StrokeStyle) {
         if let Some(ui) = &self.state.style {
             ui.current.set(style);
             ui.swatch.queue_draw();
-            for (s, radio, id) in &ui.radios {
-                radio.block_signal(id);
-                radio.set_active(*s == style);
-                radio.unblock_signal(id);
+            for (_, toggle, id) in &ui.toggles {
+                toggle.block_signal(id);
+            }
+            if let Some((_, toggle, _)) = ui.toggles.iter().find(|(s, _, _)| *s == style) {
+                toggle.set_active(true);
+            }
+            for (_, toggle, id) in &ui.toggles {
+                toggle.unblock_signal(id);
             }
         }
     }
