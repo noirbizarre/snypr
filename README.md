@@ -105,6 +105,23 @@ Region mode, click on a monitor in Screen mode, then press `Enter` (Capture) or
 | `Ctrl+L` | Clear all layers (overlay only)           |
 | `Esc`    | Quit                         |
 
+A color picker (with alpha) sits next to the tool buttons. Each tool remembers its own
+color across switches within a session; it's disabled for tools whose appearance is
+hardcoded (Blur, Crop, Redact).
+
+The picker opens GTK's native `GtkColorDialog`. Placement, sizing, and the resize
+behaviour when toggling the *Custom Color* editor are delegated to the compositor —
+`GtkColorDialog` does not expose its window to applications. On Hyprland (0.55+, Lua
+config), add a window rule if you want it to always float and centre:
+
+```lua
+hl.window_rule({
+  match  = { title = "^Pick a Color$" },
+  float  = true,
+  center = true,
+})
+```
+
 ### Hyprland keybindings
 
 A ready-to-paste sample lives in [`docs/hyprland.conf.example`](docs/hyprland.conf.example):

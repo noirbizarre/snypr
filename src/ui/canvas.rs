@@ -7,6 +7,7 @@
 //! [`gdk::TextureDownloader`]. One rendering codepath, identical pixels on-screen and on disk.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
@@ -63,6 +64,19 @@ impl AnnotationCanvas {
 
     pub fn tool(&self) -> ToolKind {
         self.imp().current_tool.get()
+    }
+
+    /// Color the given tool should use when the next layer of that kind is committed.
+    /// Returns `None` for tools that have no user-facing color (Blur, Crop, Redact —
+    /// their appearance is hardcoded).
+    pub fn tool_color(&self, kind: ToolKind) -> Option<[f32; 4]> {
+        self.imp().tool_colors.borrow().get(&kind).copied()
+    }
+
+    /// Override the color stored for `kind`. Has no effect on already-committed layers;
+    /// only affects subsequent drags / clicks that produce a fresh tool instance.
+    pub fn set_tool_color(&self, kind: ToolKind, color: [f32; 4]) {
+        self.imp().tool_colors.borrow_mut().insert(kind, color);
     }
 
     /// Render with a transparent background when no base image is loaded. The annotation editor
@@ -435,7 +449,7 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
             snap.append_stroke(
                 &rect_path(&r),
                 &dashed_stroke(2.0, &[6.0, 4.0]),
-                &rgba([1.0, 0.0, 0.0, 0.85]),
+                &rgba(p.color),
             );
         }
         ToolKind::Ellipse => {
@@ -443,11 +457,11 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
             snap.append_stroke(
                 &ellipse_path(&r),
                 &dashed_stroke(2.0, &[6.0, 4.0]),
-                &rgba([1.0, 0.0, 0.0, 0.85]),
+                &rgba(p.color),
             );
         }
         ToolKind::Arrow => {
-            let color = rgba([1.0, 0.0, 0.0, 0.85]);
+            let color = rgba(p.color);
             snap.append_stroke(&line_path(p.from, p.to), &solid_stroke(3.0), &color);
             snap.append_fill(
                 &arrowhead_path(p.from, p.to, 15.0),
@@ -457,15 +471,15 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
         }
         ToolKind::Highlight => {
             let r = drag_rect(p.from, p.to);
-            snap.append_color(&rgba([1.0, 1.0, 0.0, 0.35]), &rect_to_graphene(&r));
+            snap.append_color(&rgba(p.color), &rect_to_graphene(&r));
         }
         ToolKind::Redact => {
             let r = drag_rect(p.from, p.to);
-            snap.append_color(&rgba([0.0, 0.0, 0.0, 0.85]), &rect_to_graphene(&r));
+            snap.append_color(&rgba(p.color), &rect_to_graphene(&r));
         }
         ToolKind::Freehand => {
             if let Some(path) = polyline_path(&p.points) {
-                snap.append_stroke(&path, &solid_stroke(3.0), &rgba([1.0, 0.0, 0.0, 0.85]));
+                snap.append_stroke(&path, &solid_stroke(3.0), &rgba(p.color));
             }
         }
         ToolKind::Crop => {
@@ -473,7 +487,7 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
             snap.append_stroke(
                 &rect_path(&r),
                 &dashed_stroke(1.5, &[8.0, 4.0]),
-                &rgba([1.0, 1.0, 1.0, 0.9]),
+                &rgba(p.color),
             );
         }
         ToolKind::Blur => {
@@ -481,7 +495,7 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
             // would re-upload the texture every frame, so we settle for a marker preview and
             // commit the real blur on drag-end.
             let r = drag_rect(p.from, p.to);
-            snap.append_color(&rgba([0.5, 0.5, 0.5, 0.25]), &rect_to_graphene(&r));
+            snap.append_color(&rgba(p.color), &rect_to_graphene(&r));
             snap.append_stroke(
                 &rect_path(&r),
                 &dashed_stroke(1.0, &[4.0, 3.0]),
@@ -524,6 +538,10 @@ pub struct PendingStroke {
     to: (f64, f64),
     /// Populated for Freehand; empty for two-point tools.
     points: Vec<(f64, f64)>,
+    /// Color the preview should render in. Mirrors the color the committed layer will
+    /// receive at drag-end; populated from [`AnnotationCanvas::tool_color`] at drag-begin
+    /// (with a kind-specific fallback for colorless tools).
+    color: [f32; 4],
 }
 
 mod imp {
@@ -539,10 +557,22 @@ mod imp {
         /// When true, baseless documents render with a transparent background instead of the
         /// editor's dark fill — used by the live overlay so strokes float over the desktop.
         pub transparent_background: Cell<bool>,
+        /// Per-tool color overrides driven by the toolbar's color picker. Keys are only
+        /// inserted for tools whose appearance is user-controlled — Blur, Crop and Redact
+        /// stay hardcoded so the picker can disable itself for them.
+        pub tool_colors: RefCell<HashMap<ToolKind, [f32; 4]>>,
     }
 
     impl Default for AnnotationCanvas {
         fn default() -> Self {
+            let mut colors = HashMap::new();
+            colors.insert(ToolKind::Rect, [1.0, 0.0, 0.0, 1.0]);
+            colors.insert(ToolKind::Ellipse, [1.0, 0.0, 0.0, 1.0]);
+            colors.insert(ToolKind::Arrow, [1.0, 0.0, 0.0, 1.0]);
+            colors.insert(ToolKind::Freehand, [1.0, 0.0, 0.0, 1.0]);
+            colors.insert(ToolKind::Highlight, [1.0, 1.0, 0.0, 0.35]);
+            colors.insert(ToolKind::Number, [0.9, 0.1, 0.1, 1.0]);
+            colors.insert(ToolKind::Text, [1.0, 0.95, 0.2, 1.0]);
             Self {
                 doc: RefCell::new(None),
                 base_texture: RefCell::new(None),
@@ -550,6 +580,7 @@ mod imp {
                 pending: RefCell::new(None),
                 next_number: Cell::new(1),
                 transparent_background: Cell::new(false),
+                tool_colors: RefCell::new(colors),
             }
         }
     }
@@ -640,11 +671,21 @@ fn install_drag(canvas: &AnnotationCanvas) {
             } else {
                 Vec::new()
             };
+            // For colorable tools the user's picker choice drives the preview; for the
+            // hardcoded-appearance tools (Blur/Crop/Redact) we fall back to a sensible
+            // preview color so `snapshot_pending` doesn't need a special case.
+            let color = c.tool_color(kind).unwrap_or(match kind {
+                ToolKind::Redact => [0.0, 0.0, 0.0, 0.85],
+                ToolKind::Crop => [1.0, 1.0, 1.0, 0.9],
+                ToolKind::Blur => [0.5, 0.5, 0.5, 0.25],
+                _ => [1.0, 0.0, 0.0, 0.85],
+            });
             c.imp().pending.replace(Some(PendingStroke {
                 kind,
                 from: (x, y),
                 to: (x, y),
                 points,
+                color,
             }));
             c.queue_draw();
         });
@@ -685,29 +726,41 @@ fn install_drag(canvas: &AnnotationCanvas) {
                 ToolKind::Rect => {
                     let r = drag_rect(stroke.from, stroke.to);
                     if r.w >= 2 && r.h >= 2 {
-                        doc.push_layer(Box::new(RectTool::new(r)));
+                        let mut t = RectTool::new(r);
+                        if let Some(color) = c.tool_color(ToolKind::Rect) {
+                            t.stroke = color;
+                        }
+                        doc.push_layer(Box::new(t));
                     }
                 }
                 ToolKind::Ellipse => {
                     let r = drag_rect(stroke.from, stroke.to);
                     if r.w >= 2 && r.h >= 2 {
-                        doc.push_layer(Box::new(EllipseTool::new(r)));
+                        let mut t = EllipseTool::new(r);
+                        if let Some(color) = c.tool_color(ToolKind::Ellipse) {
+                            t.stroke = color;
+                        }
+                        doc.push_layer(Box::new(t));
                     }
                 }
                 ToolKind::Arrow => {
                     let dx = stroke.to.0 - stroke.from.0;
                     let dy = stroke.to.1 - stroke.from.1;
                     if (dx * dx + dy * dy) >= 16.0 {
-                        doc.push_layer(Box::new(ArrowTool::new(stroke.from, stroke.to)));
+                        let mut t = ArrowTool::new(stroke.from, stroke.to);
+                        if let Some(color) = c.tool_color(ToolKind::Arrow) {
+                            t.stroke = color;
+                        }
+                        doc.push_layer(Box::new(t));
                     }
                 }
                 ToolKind::Highlight => {
                     let r = drag_rect(stroke.from, stroke.to);
                     if r.w >= 2 && r.h >= 2 {
-                        doc.push_layer(Box::new(HighlightTool {
-                            bounds: r,
-                            color: [1.0, 1.0, 0.0, 0.35],
-                        }));
+                        let color = c
+                            .tool_color(ToolKind::Highlight)
+                            .unwrap_or([1.0, 1.0, 0.0, 0.35]);
+                        doc.push_layer(Box::new(HighlightTool { bounds: r, color }));
                     }
                 }
                 ToolKind::Redact => {
@@ -718,9 +771,12 @@ fn install_drag(canvas: &AnnotationCanvas) {
                 }
                 ToolKind::Freehand => {
                     if stroke.points.len() >= 2 {
+                        let stroke_color = c
+                            .tool_color(ToolKind::Freehand)
+                            .unwrap_or([1.0, 0.0, 0.0, 1.0]);
                         doc.push_layer(Box::new(FreehandTool {
                             points: stroke.points,
-                            stroke: [1.0, 0.0, 0.0, 1.0],
+                            stroke: stroke_color,
                             stroke_width: 3.0,
                         }));
                     }
@@ -782,11 +838,16 @@ fn place_number(c: &AnnotationCanvas, x: f64, y: f64) {
     };
     let value = c.imp().next_number.get();
     c.imp().next_number.set(value + 1);
+    let fill = c
+        .tool_color(ToolKind::Number)
+        .unwrap_or([0.9, 0.1, 0.1, 1.0]);
     doc_rc.borrow_mut().push_layer(Box::new(NumberTool {
         center: (x, y),
         radius: 18.0,
         value,
-        fill: [0.9, 0.1, 0.1, 1.0],
+        fill,
+        // White stays hardcoded — the picker drives only the disc fill so digits keep their
+        // contrast guarantee regardless of which color the user picks for the marker.
         text_color: [1.0, 1.0, 1.0, 1.0],
     }));
     c.queue_draw();
@@ -817,11 +878,14 @@ fn prompt_text(canvas: &AnnotationCanvas, x: f64, y: f64) {
             if !text.is_empty()
                 && let Some(doc_rc) = c.imp().doc.borrow().clone()
             {
+                let color = c
+                    .tool_color(ToolKind::Text)
+                    .unwrap_or([1.0, 0.95, 0.2, 1.0]);
                 doc_rc.borrow_mut().push_layer(Box::new(TextTool {
                     origin: (x, y),
                     text,
                     size_pt: 18.0,
-                    color: [1.0, 0.95, 0.2, 1.0],
+                    color,
                 }));
                 c.queue_draw();
             }

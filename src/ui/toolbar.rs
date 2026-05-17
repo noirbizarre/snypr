@@ -215,6 +215,11 @@ pub struct ToolbarSpec {
     pub show_capture: bool,
     pub show_cursor_toggle: bool,
     pub show_passthrough_toggle: bool,
+    /// Show a color-picker button (with alpha) that drives the color of the currently
+    /// selected tool. The toolbar emits [`ToolbarAction::ColorChanged`] when the user
+    /// picks a new color; the caller is responsible for storing the choice on whatever
+    /// canvas state it owns.
+    pub show_color_picker: bool,
     pub initial_tool: Option<ToolKind>,
     pub initial_mode: Option<ModeKind>,
     pub initial_cursor: bool,
@@ -234,6 +239,7 @@ impl ToolbarSpec {
             show_capture: false,
             show_cursor_toggle: false,
             show_passthrough_toggle: false,
+            show_color_picker: false,
             initial_tool: None,
             initial_mode: None,
             initial_cursor: false,
@@ -244,7 +250,7 @@ impl ToolbarSpec {
 
 /// Action emitted by the toolbar in response to a user interaction (or a matching keyboard
 /// shortcut installed via [`Toolbar::install_shortcuts`]).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ToolbarAction {
     ToolSelected(ToolKind),
     ModeSelected(ModeKind),
@@ -258,6 +264,9 @@ pub enum ToolbarAction {
     /// button, or Shift+Enter / Shift+KP_Enter). Asks the caller to open the annotation
     /// editor on the captured image.
     Annotate,
+    /// User picked a new color from the color picker. The caller applies it to the
+    /// currently active tool (whichever it tracks).
+    ColorChanged([f32; 4]),
 }
 
 type Callback = Rc<RefCell<Option<Box<dyn Fn(ToolbarAction) + 'static>>>>;
@@ -274,6 +283,12 @@ struct ToolbarState {
     /// true. `install_shortcuts` updates `shift_held` and re-skins the icon/tooltip as Shift
     /// is pressed/released so users get visual feedback before clicking.
     capture: Option<CaptureUi>,
+    /// Color-picker UI (button + popover + inline chooser). We use an inline
+    /// `ColorChooserWidget` hosted in a `Popover` rather than the modern `ColorDialog`
+    /// because `ColorDialog` opens as a new `xdg_toplevel`, which can't receive pointer
+    /// or keyboard input while a layer-shell parent holds `KeyboardMode::Exclusive`.
+    /// Popovers are popup surfaces of the parent layer-shell surface and work fine.
+    color: Option<ColorPickerUi>,
     shortcuts: Vec<Shortcut>,
     callback: Callback,
 }
@@ -284,6 +299,24 @@ struct CaptureUi {
     button: gtk4::Button,
     icon: gtk4::Image,
     shift_held: Rc<Cell<bool>>,
+}
+
+/// Live state for the color picker. Stored on `ToolbarState` so external callers can update
+/// the swatch silently when the active tool changes ([`Toolbar::set_color`]) or enable /
+/// disable the button for tools with hardcoded appearance
+/// ([`Toolbar::set_color_picker_sensitive`]).
+///
+/// Picking uses the modern `gtk4::ColorDialog` (full HSV picker + presets + custom-color
+/// editor). The dialog opens as an `xdg_toplevel`, which on Wayland can't receive input
+/// while a layer-shell parent surface holds `KeyboardMode::Exclusive` — so when the parent
+/// is a layer-shell window, the button click handler temporarily switches it to
+/// `KeyboardMode::OnDemand` and restores the previous mode from the dialog's completion
+/// callback. Non-layer-shell parents (e.g. the standalone annotation editor) don't need
+/// any of that.
+struct ColorPickerUi {
+    button: gtk4::Button,
+    swatch: gtk4::DrawingArea,
+    current: Rc<Cell<gdk4::RGBA>>,
 }
 
 impl CaptureUi {
@@ -417,6 +450,80 @@ impl Toolbar {
             });
             tools.push((entry.kind, btn, id));
         }
+
+        // Color picker (optional) — sits right after the tool radios so it visually belongs
+        // to the tool group it modifies.
+        //
+        // We use the modern `gtk4::ColorDialog` for the actual picking UI: it has the full
+        // HSV picker, presets, custom-color editor, and works correctly across themes.
+        // The dialog opens as a new `xdg_toplevel`; on Wayland this means it can't receive
+        // input while a layer-shell parent surface holds `KeyboardMode::Exclusive`. The
+        // workaround lives in the button's click handler: it walks to the root window,
+        // and — if that window is a layer-shell window — temporarily switches the keyboard
+        // mode to `OnDemand` for the duration of the dialog. The dialog's completion
+        // callback restores the previous mode. Non-layer-shell parents (the standalone
+        // annotation editor's `gtk4::Window`) skip the swap and use the dialog directly.
+        //
+        // The visible trigger is a plain `gtk4::Button` with a 16×16 `DrawingArea` swatch
+        // as its child, sized to match the icon-only tool buttons so the toolbar stays
+        // visually uniform. The swatch paints a checkerboard background + the current
+        // color on top, so translucent colors are distinguishable from greys.
+        let color = if spec.show_color_picker {
+            if !spec.tools.is_empty() {
+                widget.append(&separator());
+            }
+            let initial = array_to_rgba([1.0, 0.0, 0.0, 1.0]);
+            let current = Rc::new(Cell::new(initial));
+
+            // Trigger-button swatch. We pin both `content_*` (natural size) and
+            // `size_request` (hard minimum) plus center alignment — without those the
+            // DrawingArea expands to fill the button's allocation and renders as a
+            // vertical rectangle when the button is taller than 16 px (which it is,
+            // thanks to the icon-button padding inherited from the theme).
+            let swatch = gtk4::DrawingArea::new();
+            swatch.set_content_width(16);
+            swatch.set_content_height(16);
+            swatch.set_size_request(16, 16);
+            swatch.set_halign(gtk4::Align::Center);
+            swatch.set_valign(gtk4::Align::Center);
+            swatch.set_hexpand(false);
+            swatch.set_vexpand(false);
+            let current_for_draw = current.clone();
+            swatch.set_draw_func(move |_, cr, w, h| {
+                draw_color_swatch(cr, w as f64, h as f64, current_for_draw.get());
+            });
+
+            let btn = gtk4::Button::new();
+            btn.set_child(Some(&swatch));
+            btn.set_tooltip_text(Some("Tool color (alpha included)"));
+            make_unfocusable(&btn);
+
+            // On click: walk to the root window, temporarily relax layer-shell keyboard
+            // mode if applicable, open the dialog, restore the mode + emit ColorChanged in
+            // the completion callback. The dialog is rebuilt per click so each open uses
+            // the latest current color as its initial value.
+            let btn_for_click = btn.clone();
+            let current_for_click = current.clone();
+            let swatch_for_click = swatch.clone();
+            let cb = callback.clone();
+            btn.connect_clicked(move |_| {
+                open_color_dialog(
+                    &btn_for_click,
+                    current_for_click.clone(),
+                    swatch_for_click.clone(),
+                    cb.clone(),
+                );
+            });
+
+            widget.append(&btn);
+            Some(ColorPickerUi {
+                button: btn,
+                swatch,
+                current,
+            })
+        } else {
+            None
+        };
 
         // Trailing actions: separator + spacer + toggles + buttons.
         let trailing = spec.show_undo
@@ -654,6 +761,7 @@ impl Toolbar {
             cursor,
             passthrough,
             capture,
+            color,
             shortcuts,
             callback,
         });
@@ -707,6 +815,26 @@ impl Toolbar {
             btn.block_signal(id);
             btn.set_active(on);
             btn.unblock_signal(id);
+        }
+    }
+
+    /// Update the color-picker swatch without firing `ColorChanged`. Used by external
+    /// state changes — e.g. selecting a different tool — so the swatch always reflects
+    /// the active tool's color. The next time the user opens the picker, the dialog will
+    /// also be seeded with this color (it reads from `current` at open time).
+    pub fn set_color(&self, color: [f32; 4]) {
+        if let Some(ui) = &self.state.color {
+            ui.current.set(array_to_rgba(color));
+            ui.swatch.queue_draw();
+        }
+    }
+
+    /// Enable or disable the color-picker button (e.g. when a tool with hardcoded
+    /// appearance like Blur / Crop / Redact is active). No-op when the picker isn't
+    /// present in this toolbar.
+    pub fn set_color_picker_sensitive(&self, sensitive: bool) {
+        if let Some(ui) = &self.state.color {
+            ui.button.set_sensitive(sensitive);
         }
     }
 
@@ -859,6 +987,239 @@ fn make_unfocusable<W: IsA<gtk4::Widget>>(w: &W) {
     w.set_can_focus(false);
 }
 
+/// `gdk::RGBA` → packed `[f32; 4]` matching the canvas's tool storage format.
+fn rgba_to_array(c: &gdk4::RGBA) -> [f32; 4] {
+    [c.red(), c.green(), c.blue(), c.alpha()]
+}
+
+/// Inverse of [`rgba_to_array`].
+fn array_to_rgba(c: [f32; 4]) -> gdk4::RGBA {
+    gdk4::RGBA::new(c[0], c[1], c[2], c[3])
+}
+
+/// Format an RGBA color as `#rrggbb` (opaque) or `#rrggbbaa` (with alpha < 1). Exported
+/// (within the module) so tests can keep their parity checks; not used by the runtime
+/// picker UI any more — `ColorDialog` handles its own presentation.
+#[cfg(test)]
+fn rgba_to_hex(c: &gdk4::RGBA) -> String {
+    let to_byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let r = to_byte(c.red());
+    let g = to_byte(c.green());
+    let b = to_byte(c.blue());
+    let a = to_byte(c.alpha());
+    if a == 255 {
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+    }
+}
+
+/// Paint the alpha-aware preview used by the color-picker trigger button: a 4 px
+/// checkerboard background (so translucent colors are distinguishable from opaque grey)
+/// with the RGBA color on top.
+fn draw_color_swatch(cr: &gtk4::cairo::Context, w: f64, h: f64, c: gdk4::RGBA) {
+    let cell = 4.0_f64;
+    let cols = (w / cell).ceil() as i32;
+    let rows = (h / cell).ceil() as i32;
+    for j in 0..rows {
+        for i in 0..cols {
+            let dark = (i + j) % 2 == 0;
+            let s = if dark { 0.78 } else { 1.0 };
+            cr.set_source_rgb(s, s, s);
+            cr.rectangle(f64::from(i) * cell, f64::from(j) * cell, cell, cell);
+            let _ = cr.fill();
+        }
+    }
+    cr.set_source_rgba(
+        c.red() as f64,
+        c.green() as f64,
+        c.blue() as f64,
+        c.alpha() as f64,
+    );
+    cr.rectangle(0.0, 0.0, w, h);
+    let _ = cr.fill();
+}
+
+/// Open a `gtk4::ColorDialog` so the user can pick a color, handling the layer-shell
+/// stacking + keyboard issues that otherwise leave the dialog uninteractive. Caller passes
+/// the shared state cells so the completion callback can publish the picked color.
+///
+/// Why this is non-trivial: the screenshot selector and the live draw overlay both run at
+/// `Layer::Overlay`, which on Hyprland (and any wlr-layer-shell compositor) sits **above**
+/// every regular `xdg_toplevel`. The dialog opens as a toplevel, so without intervention
+/// it appears behind the overlay (invisible) or — if it forces itself visible — still has
+/// pointer / keyboard events stolen by the layer surface above it.
+///
+/// Flow:
+/// 1. Walk `btn` → root `Window`, then enumerate every window in the same `Application`.
+/// 2. For each window that is a layer-shell window, snapshot its current `Layer` +
+///    `KeyboardMode` and demote it to `Layer::Background` / `KeyboardMode::None` so the
+///    dialog can sit above and grab input. We do **all** of them (not just `btn`'s root)
+///    because multi-monitor setups have one layer-shell window per output; leaving even
+///    one at `Overlay` would still steal events.
+/// 3. Build a `ColorDialog` (alpha-enabled, modal, titled "Pick a Color") seeded with the
+///    current color and call `choose_rgba` with `None` as parent — the dialog must NOT be
+///    transient-for any of the (now-demoted) layer-shell surfaces.
+/// 4. In the completion callback: restore every saved layer + keyboard mode regardless of
+///    success / cancel. On `Ok(rgba)` push the picked color into `current`, redraw the
+///    swatch, and emit `ColorChanged`. `Err` (cancel / Esc) is ignored silently.
+fn open_color_dialog(
+    btn: &gtk4::Button,
+    current: Rc<Cell<gdk4::RGBA>>,
+    swatch: gtk4::DrawingArea,
+    callback: Callback,
+) {
+    use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+
+    // Walk up to the toplevel. If the button isn't realised yet (no root) bail silently.
+    let Some(root_window) = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok()) else {
+        return;
+    };
+
+    // Demote every layer-shell window in this application so the dialog can sit above
+    // them and receive input. Each saved tuple is (window, prior_layer, prior_keyboard).
+    let saved: Vec<(gtk4::Window, Layer, KeyboardMode)> =
+        if let Some(app) = root_window.application() {
+            app.windows()
+                .into_iter()
+                .filter(|w| w.is_layer_window())
+                .map(|w| {
+                    let layer = w.layer();
+                    let mode = w.keyboard_mode();
+                    w.set_layer(Layer::Background);
+                    w.set_keyboard_mode(KeyboardMode::None);
+                    (w, layer, mode)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+    let dialog = gtk4::ColorDialog::builder()
+        .with_alpha(true)
+        .title("Pick a Color")
+        .modal(true)
+        .build();
+    let initial = current.get();
+
+    dialog.choose_rgba(
+        // No parent: layer-shell surfaces aren't valid transient-for targets for xdg
+        // toplevels, and we've already demoted them out of the way.
+        None::<&gtk4::Window>,
+        Some(&initial),
+        gtk4::gio::Cancellable::NONE,
+        move |result| {
+            // Restore every demoted layer-shell window regardless of OK/Cancel so the
+            // user gets their overlay back the moment the dialog closes.
+            for (w, layer, mode) in &saved {
+                w.set_layer(*layer);
+                w.set_keyboard_mode(*mode);
+            }
+            let Ok(rgba) = result else {
+                return;
+            };
+            current.set(rgba);
+            swatch.queue_draw();
+            if let Some(f) = callback.borrow().as_ref() {
+                f(ToolbarAction::ColorChanged(rgba_to_array(&rgba)));
+            }
+        },
+    );
+
+    // GtkColorDialog owns its window internally and ships it with a stack that is
+    // size-homogeneous plus internal GtkScrolledWindows. When the user clicks "+" to
+    // switch to the custom-color editor, the window keeps the palette geometry and a
+    // scrollbar appears instead of growing to fit. We can't influence the window at
+    // creation time, but we can find it via the toplevel list after `choose_rgba` and
+    // tweak its widget tree so it refits naturally on every visible-child swap.
+    schedule_color_dialog_refit(3);
+}
+
+/// Try to locate the just-opened color dialog and apply [`refit_color_dialog`].
+/// The dialog window is created and mapped asynchronously by GTK; retry on a short
+/// timeout up to `remaining` times, then give up silently.
+fn schedule_color_dialog_refit(remaining: u32) {
+    gtk4::glib::idle_add_local_once(move || {
+        if let Some(dlg) = find_color_dialog_window() {
+            refit_color_dialog(&dlg);
+        } else if remaining > 0 {
+            gtk4::glib::timeout_add_local_once(
+                std::time::Duration::from_millis(50),
+                move || schedule_color_dialog_refit(remaining - 1),
+            );
+        }
+    });
+}
+
+/// Scan the application's toplevels for a window titled exactly `"Pick a Color"` —
+/// the title we set on the `ColorDialog`. Returns the first match.
+fn find_color_dialog_window() -> Option<gtk4::Window> {
+    for obj in gtk4::Window::list_toplevels() {
+        let Ok(win) = obj.downcast::<gtk4::Window>() else {
+            continue;
+        };
+        if win
+            .title()
+            .map(|t| t.as_str() == "Pick a Color")
+            .unwrap_or(false)
+        {
+            return Some(win);
+        }
+    }
+    None
+}
+
+/// Walk every descendant of `root` in DFS order via the `first_child` / `next_sibling`
+/// chain. Used to find the chooser's internal `GtkStack` and `GtkScrolledWindow`s.
+fn walk_descendants(root: &gtk4::Widget, visit: &mut dyn FnMut(&gtk4::Widget)) {
+    visit(root);
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        walk_descendants(&c, visit);
+        child = c.next_sibling();
+    }
+}
+
+/// Mutate the dialog window so it refits to the chooser's currently-visible page:
+///
+/// * `set_resizable(false)` — non-resizable GTK windows re-allocate to the child's
+///   natural size on every `check-resize`.
+/// * Suppress every nested `GtkScrolledWindow`: no scrollbars, and propagate the
+///   child's natural size up so the window's natural size includes the full content.
+/// * Make the internal `GtkStack` non-homogeneous so it reports the *visible* child's
+///   natural size rather than the max of palette and custom-editor pages.
+/// * Connect `notify::visible-child` as belt-and-braces: on every swap, reset the
+///   default size and queue a resize so the window definitively refits.
+fn refit_color_dialog(dlg: &gtk4::Window) {
+    dlg.set_resizable(false);
+
+    let mut stack: Option<gtk4::Stack> = None;
+    walk_descendants(dlg.upcast_ref(), &mut |w| {
+        if let Some(sw) = w.downcast_ref::<gtk4::ScrolledWindow>() {
+            sw.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Never);
+            sw.set_propagate_natural_height(true);
+            sw.set_propagate_natural_width(true);
+        } else if stack.is_none()
+            && let Some(s) = w.downcast_ref::<gtk4::Stack>()
+        {
+            stack = Some(s.clone());
+        }
+    });
+
+    if let Some(s) = stack {
+        s.set_hhomogeneous(false);
+        s.set_vhomogeneous(false);
+        s.set_interpolate_size(false);
+        let dlg_weak = dlg.downgrade();
+        s.connect_visible_child_notify(move |_| {
+            if let Some(dlg) = dlg_weak.upgrade() {
+                dlg.set_default_size(-1, -1);
+                dlg.queue_resize();
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,5 +1269,18 @@ mod tests {
                 "Edit-mode toolbar (EDITOR_TOOLS) is missing {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn rgba_to_hex_drops_alpha_when_opaque() {
+        let c = gdk4::RGBA::new(1.0, 0.0, 0.5, 1.0);
+        assert_eq!(rgba_to_hex(&c), "#ff0080");
+    }
+
+    #[test]
+    fn rgba_to_hex_includes_alpha_when_translucent() {
+        let c = gdk4::RGBA::new(0.0, 1.0, 0.0, 0.5);
+        // 0.5 * 255 rounds to 128 (0x80).
+        assert_eq!(rgba_to_hex(&c), "#00ff0080");
     }
 }

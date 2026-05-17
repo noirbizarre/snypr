@@ -349,6 +349,7 @@ fn spawn_monitor_overlay(
             tools: EDITOR_TOOLS,
             show_undo: true,
             show_save: true,
+            show_color_picker: true,
             initial_tool: Some(shared.current_tool.get()),
             ..Default::default()
         })
@@ -358,6 +359,7 @@ fn spawn_monitor_overlay(
             show_undo: true,
             show_clear: true,
             show_passthrough_toggle: true,
+            show_color_picker: true,
             initial_tool: Some(shared.current_tool.get()),
             initial_passthrough: shared.passthrough.get(),
             ..Default::default()
@@ -425,14 +427,47 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
     let canvas_weak = canvas.downgrade();
     let edit = shared.edit.clone();
     let app_weak = shared.app_weak.clone();
+
+    // Seed the picker with the initial tool's color + correct sensitivity. Done up front so
+    // the picker doesn't show its built-in default before the user touches a tool button.
+    let initial_kind = current_tool.get();
+    if let Some(color) = canvas.tool_color(initial_kind) {
+        toolbar.set_color(color);
+    }
+    toolbar.set_color_picker_sensitive(kind_is_colorable(initial_kind));
+
     toolbar.connect(move |action| match action {
         ToolbarAction::ToolSelected(kind) => {
             current_tool.set(kind);
             for c in canvases.borrow().iter() {
                 c.canvas.set_tool(kind);
             }
+            // Push the new tool's stored color into every peer toolbar's swatch (silently),
+            // and toggle picker sensitivity for tools with hardcoded appearance.
+            let color = canvases
+                .borrow()
+                .first()
+                .and_then(|c| c.canvas.tool_color(kind));
+            let colorable = kind_is_colorable(kind);
             for t in toolbars.borrow().iter() {
                 t.set_tool(kind);
+                if let Some(c) = color {
+                    t.set_color(c);
+                }
+                t.set_color_picker_sensitive(colorable);
+            }
+        }
+        ToolbarAction::ColorChanged(color) => {
+            let kind = current_tool.get();
+            if !kind_is_colorable(kind) {
+                return;
+            }
+            for c in canvases.borrow().iter() {
+                c.canvas.set_tool_color(kind, color);
+            }
+            // Sync peer toolbars on other monitors so their swatches reflect the new color.
+            for t in toolbars.borrow().iter() {
+                t.set_color(color);
             }
         }
         ToolbarAction::Undo => {
@@ -474,6 +509,21 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
         }
         _ => {}
     });
+}
+
+/// Tools whose appearance is driven by the picker. Blur, Crop and Redact have hardcoded
+/// rendering and disable the picker when active.
+fn kind_is_colorable(kind: ToolKind) -> bool {
+    matches!(
+        kind,
+        ToolKind::Rect
+            | ToolKind::Ellipse
+            | ToolKind::Arrow
+            | ToolKind::Highlight
+            | ToolKind::Freehand
+            | ToolKind::Number
+            | ToolKind::Text
+    )
 }
 
 /// Compose every per-monitor canvas into its slice, then stitch the slices back into a single

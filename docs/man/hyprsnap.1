@@ -73,6 +73,10 @@ daemon-managed overlay instead of spawning a new process.
 .SS editor (in-place annotation overlay)
 Opened by \fBscreenshot \-\-edit\fR or by a Shift-click / \fBShift+Enter\fR on the
 selector's Capture button. Save with \fBCtrl+S\fR or \fBEnter\fR; \fBEsc\fR quits.
+A color picker (with alpha) on the toolbar drives the color of the currently selected
+tool; each tool remembers its own color and the picker is disabled for tools with
+hardcoded appearance (\fBBlur\fR, \fBCrop\fR, \fBRedact\fR). The same picker is also
+available in the live \fBdraw\fR overlay.
 .SS selector
 The interactive selector (used by \fBscreenshot\fR without an explicit selection flag)
 shows a floating toolbar with Full / Screen / Window / Region modes, a cursor toggle, and
