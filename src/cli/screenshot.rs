@@ -1,6 +1,6 @@
-//! `screenshot` subcommand — capture and write to sinks.
+//! `screenshot` subcommand — capture and write to sinks (optionally via the annotation editor).
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::Args as ClapArgs;
 
 use super::SinkSpec;
@@ -15,7 +15,7 @@ pub struct Args {
     #[arg(long, group = "selection")]
     pub full: bool,
     /// Capture each connected output to a separate file.
-    #[arg(long, group = "selection")]
+    #[arg(long, group = "selection", conflicts_with = "edit")]
     pub per_output: bool,
     /// Capture only the currently focused monitor.
     #[arg(long, group = "selection")]
@@ -32,6 +32,11 @@ pub struct Args {
     /// Launch an interactive selector overlay.
     #[arg(short, long, group = "selection")]
     pub interactive: bool,
+
+    /// Open the annotation editor on the captured image before writing to sinks.
+    /// Incompatible with `--per-output` (one editor session per N frames doesn't compose).
+    #[arg(long, alias = "annotate")]
+    pub edit: bool,
 
     /// Sink(s) to receive the image. Repeatable.
     #[arg(long = "to", value_name = "SINK")]
@@ -61,7 +66,7 @@ pub async fn run(args: Args) -> Result<()> {
         tokio::time::sleep(delay).await;
     }
 
-    let paths = execute(ctx, selection, args.cursor, sinks).await?;
+    let paths = execute(ctx, selection, args.cursor, sinks, args.edit).await?;
     for p in &paths {
         println!("{}", p.display());
     }
@@ -71,12 +76,23 @@ pub async fn run(args: Args) -> Result<()> {
 /// handler. Resolves compositor-aware selections, captures, encodes, and writes — returning the
 /// file paths produced by `OutputSink`s (clipboard sinks contribute nothing). `delay` and arg
 /// parsing live one level up since they're CLI-specific concerns.
+///
+/// When `edit == true`, the captured image is handed to the annotation editor (in-memory, no
+/// PNG round-trip) and the editor's save action fans the result out to `sinks` instead. The
+/// editor path rejects `Selection::PerOutput` since the editor operates on a single image.
 pub async fn execute(
     ctx: crate::context::Ctx,
     selection: Selection,
     cursor: bool,
     sinks: Vec<SinkSpec>,
+    edit: bool,
 ) -> Result<Vec<std::path::PathBuf>> {
+    if edit && matches!(selection, Selection::PerOutput) {
+        bail!(
+            "`--edit` is incompatible with `--per-output` (the annotation editor operates on a single image)"
+        );
+    }
+
     // Resolve compositor-aware selections up front (Hyprland IPC + interactive overlay) so the
     // rest of the pipeline only ever sees concrete Region/Output/Full/PerOutput variants. The
     // interactive selector can also override `cursor` via its toolbar toggle.
@@ -97,7 +113,8 @@ pub async fn execute(
     // `--per-output` skips stitching entirely: each captured frame is encoded and written to its
     // own file (or copied to its own clipboard entry), with the output name interpolated into
     // the filename template. Templates that lack `{output}` get one auto-inserted to avoid the
-    // multiple frames collapsing onto the same path.
+    // multiple frames collapsing onto the same path. The `--edit` guard at the top of this
+    // function ensures we never end up here in editor mode.
     if matches!(selection, Selection::PerOutput) {
         let mut all_paths = Vec::new();
         for img in &images {
@@ -119,6 +136,24 @@ pub async fn execute(
     }
 
     let stitched = crate::capture::region::stitch(&images, &selection)?;
+
+    if edit {
+        // Editor path: hand the stitched RGBA buffer to the annotation canvas in-memory so we
+        // skip a PNG encode + decode round-trip. The editor itself re-encodes on save and fans
+        // the bytes out to whichever sinks the caller supplied.
+        #[cfg(feature = "ui")]
+        {
+            let base = base_from_captured(&stitched);
+            return crate::ui::editor::run_with_base(ctx, base, sinks).await;
+        }
+        #[cfg(not(feature = "ui"))]
+        {
+            anyhow::bail!(
+                "`--edit` requires the `ui` cargo feature; rebuild with it or drop the flag"
+            );
+        }
+    }
+
     let ctx_fname = crate::config::FilenameContext {
         output: None,
         selection: Some(selection_label(&selection)),
@@ -127,6 +162,34 @@ pub async fn execute(
     let png = crate::output::encode_png(&stitched, ctx.config.output.compression)?;
     let paths = outputs.write_png(&png).await?;
     Ok(paths)
+}
+
+/// Convert a screencopy `CapturedImage` (BGRA, possibly with padded stride) into a tight RGBA
+/// [`DocumentBase`] ready for the annotation canvas. Lives here so the editor branch of
+/// `execute` can call it directly without going through `crate::ui`.
+#[cfg(feature = "ui")]
+fn base_from_captured(img: &crate::capture::CapturedImage) -> crate::annotate::DocumentBase {
+    let w = img.width as usize;
+    let h = img.height as usize;
+    let row = w * 4;
+    let stride = img.stride as usize;
+    let mut rgba = vec![0u8; row * h];
+    for y in 0..h {
+        let src = &img.pixels[y * stride..y * stride + row];
+        let dst = &mut rgba[y * row..(y + 1) * row];
+        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+            d[0] = s[2];
+            d[1] = s[1];
+            d[2] = s[0];
+            d[3] = s[3];
+        }
+    }
+    crate::annotate::DocumentBase {
+        pixels: std::sync::Arc::from(rgba.into_boxed_slice()),
+        width: img.width,
+        height: img.height,
+        stride: img.width * 4,
+    }
 }
 
 /// Short label for the filename `{selection}` token.
@@ -277,6 +340,7 @@ mod humantime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
@@ -284,5 +348,39 @@ mod tests {
     #[case("10,20,100x200", crate::capture::region::Rect { x: 10, y: 20, w: 100, h: 200 })]
     fn parses_region(#[case] s: &str, #[case] expected: crate::capture::region::Rect) {
         assert_eq!(parse_region(s).unwrap(), expected);
+    }
+
+    /// Minimal top-level parser to exercise `screenshot::Args` through clap.
+    #[derive(Debug, Parser)]
+    struct Harness {
+        #[command(subcommand)]
+        cmd: HarnessCmd,
+    }
+
+    #[derive(Debug, clap::Subcommand)]
+    enum HarnessCmd {
+        Screenshot(Args),
+    }
+
+    #[test]
+    fn parses_edit_flag() {
+        let cli = Harness::try_parse_from(["test", "screenshot", "--edit"]).unwrap();
+        let HarnessCmd::Screenshot(args) = cli.cmd;
+        assert!(args.edit);
+    }
+
+    #[test]
+    fn parses_annotate_alias() {
+        let cli = Harness::try_parse_from(["test", "screenshot", "--annotate"]).unwrap();
+        let HarnessCmd::Screenshot(args) = cli.cmd;
+        assert!(args.edit);
+    }
+
+    #[test]
+    fn edit_conflicts_with_per_output() {
+        let err =
+            Harness::try_parse_from(["test", "screenshot", "--edit", "--per-output"]).unwrap_err();
+        // Clap emits an ArgumentConflict error for `conflicts_with` violations.
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

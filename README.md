@@ -12,17 +12,16 @@ Screen capture talks the `zwlr_screencopy_manager_v1` Wayland protocol directly;
 
 ## Status
 
-The five subcommands are wired end-to-end. All nine annotation tools (Rect, Arrow, Highlight,
+The four subcommands are wired end-to-end. All nine annotation tools (Rect, Arrow, Highlight,
 Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on screen and
 flatten to PNG through Cairo on save.
 
 | Subcommand    | Status                                                                            |
 | ------------- | --------------------------------------------------------------------------------- |
-| `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`       |
+| `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the annotation editor before sinks |
 | `annotate`    | Editor with Rect / Arrow / Highlight / Freehand / Number / Text / Blur / Redact / Crop tools |
-| `capture`     | Selector → wlr-screencopy → editor (in-memory base) → sinks                       |
 | `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools    |
-| `daemon`      | IPC server: `Ping`, `Screenshot`; tray (StatusNotifierItem) when enabled in config|
+| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`; tray (StatusNotifierItem) when enabled in config |
 
 ## Build
 
@@ -63,7 +62,7 @@ hyprsnap screenshot --focused
 hyprsnap screenshot --region 100,200,800x600 --to file
 
 # Interactive region selector → annotation editor → sinks.
-hyprsnap capture --to clipboard --to file
+hyprsnap screenshot --edit --to clipboard --to file
 
 # Live draw-on-screen overlay (R/A/H/F/N/X tools, Ctrl+Z undo, P passthrough, Esc quit).
 hyprsnap draw
@@ -80,7 +79,7 @@ hyprsnap --via-daemon screenshot --full
 
 ### Interactive selector
 
-The selector (used by `capture` and the default `screenshot`) shows a floating
+The selector (used by `screenshot --edit` and the default `screenshot`) shows a floating
 toolbar on the primary monitor with four modes — **Full**, **Screen**, **Window**,
 **Region** — plus a cursor toggle and a **Capture** button. Keyboard shortcuts:
 `1/2/3/4` switch modes, drag with the mouse in Region mode, click on a monitor in
@@ -111,7 +110,7 @@ A ready-to-paste sample lives in [`docs/hyprland.conf.example`](docs/hyprland.co
 
 ```hyprlang
 # ~/.config/hypr/hyprland.conf
-bind = SUPER,        Print, exec, hyprsnap capture --to clipboard --to file
+bind = SUPER,        Print, exec, hyprsnap screenshot --edit --to clipboard --to file
 bind = SUPER SHIFT,  Print, exec, hyprsnap screenshot --full --to file
 bind = SUPER CTRL,   Print, exec, hyprsnap screenshot --focused --to clipboard
 bind = SUPER ALT,    Print, exec, hyprsnap draw

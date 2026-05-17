@@ -12,17 +12,18 @@ use crate::capture::Selection;
 use crate::capture::region::Rect;
 use crate::cli::SinkSpec as CliSinkSpec;
 use crate::context::Ctx;
-use crate::ipc::{CaptureRequest, Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
+use crate::ipc::{Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
 
 /// Per-daemon mutable state that survives across IPC clients. Shared via `Arc` between the
-/// accept loop and every spawned handler so concurrent `Capture` / `DrawToggle` requests can
-/// coordinate.
+/// accept loop and every spawned handler so concurrent `Screenshot --edit` / `DrawToggle`
+/// requests can coordinate.
 #[derive(Default)]
 struct DaemonState {
-    /// Serialises Capture-over-IPC handlers — GTK's `Application::run` is per-process, so two
-    /// editor windows from two clients would clash. Acquired with `try_lock` so a second client
-    /// gets an immediate "busy" error instead of queuing.
-    capture: Mutex<()>,
+    /// Serialises the editor-bearing screenshot path — GTK's `Application::run` is per-process,
+    /// so two editor windows from two clients would clash. Acquired with `try_lock` so a second
+    /// client gets an immediate "busy" error instead of queuing. Headless screenshots (no
+    /// `--edit`) never touch this lock.
+    editor: Mutex<()>,
     /// `Some(tx)` while a daemon-managed draw overlay is alive. A `DrawToggle` request flips
     /// this: present → fire `tx` to tear it down; absent → spawn a fresh overlay.
     overlay: Mutex<Option<oneshot::Sender<()>>>,
@@ -132,11 +133,19 @@ async fn handle_tray_action(
     let state = state.clone();
     match action {
         TrayAction::Quit => return true,
-        TrayAction::Screenshot => {
+        TrayAction::Screenshot { edit } => {
             tokio::spawn(async move {
                 let sinks = ctx.config.default_sinks();
+                // Editor flow uses the interactive selector so users can pick a region before
+                // annotating; the plain screenshot goes straight to a full-desktop capture.
+                let selection = if edit {
+                    Selection::Interactive
+                } else {
+                    Selection::Full
+                };
                 let result =
-                    crate::cli::screenshot::execute(ctx, Selection::Full, false, sinks).await;
+                    run_screenshot_with_optional_lock(&ctx, &state, selection, false, sinks, edit)
+                        .await;
                 match result {
                     Ok(paths) => {
                         for p in &paths {
@@ -144,15 +153,6 @@ async fn handle_tray_action(
                         }
                     }
                     Err(err) => tracing::warn!(error = ?err, "tray screenshot failed"),
-                }
-            });
-        }
-        TrayAction::Capture => {
-            tokio::spawn(async move {
-                if let Err(err) =
-                    run_capture_with_lock(&ctx, &state, ctx.config.default_sinks(), false).await
-                {
-                    tracing::warn!(error = ?err, "tray capture failed");
                 }
             });
         }
@@ -202,8 +202,7 @@ async fn handle_client(ctx: Ctx, state: Arc<DaemonState>, stream: UnixStream) ->
 async fn dispatch(ctx: Ctx, state: Arc<DaemonState>, req: Request) -> Response {
     let result = match req {
         Request::Ping => Ok(Response::Ok),
-        Request::Screenshot(req) => run_screenshot(ctx, req).await,
-        Request::Capture(req) => run_capture(ctx, state, req).await,
+        Request::Screenshot(req) => run_screenshot(ctx, state, req).await,
         Request::DrawToggle => toggle_overlay(&ctx, &state).await.map(|_| Response::Ok),
     };
     match result {
@@ -214,26 +213,27 @@ async fn dispatch(ctx: Ctx, state: Arc<DaemonState>, req: Request) -> Response {
     }
 }
 
-async fn run_capture(ctx: Ctx, state: Arc<DaemonState>, req: CaptureRequest) -> Result<Response> {
-    let sinks = sinks_from_specs(req.sinks, &ctx);
-    let paths = run_capture_with_lock(&ctx, &state, sinks, req.cursor).await?;
-    Ok(Response::Paths { paths })
-}
-
-/// Acquire `state.capture` with `try_lock` so concurrent IPC clients get an immediate "busy"
-/// error rather than serializing behind a GTK editor that may sit open for minutes. The lock
-/// is released when the returned guard drops, i.e. after `run_capture_flow` returns.
-async fn run_capture_with_lock(
+/// Acquire `state.editor` with `try_lock` (only when `edit` is true) so a second editor request
+/// gets an immediate "busy" error rather than queuing behind a GTK editor window that may sit
+/// open for minutes. Headless screenshots bypass the lock entirely so multiple concurrent
+/// `hyprsnap screenshot` calls keep working.
+async fn run_screenshot_with_optional_lock(
     ctx: &Ctx,
     state: &Arc<DaemonState>,
-    sinks: Vec<CliSinkSpec>,
+    selection: Selection,
     cursor: bool,
+    sinks: Vec<CliSinkSpec>,
+    edit: bool,
 ) -> Result<Vec<PathBuf>> {
-    let _guard = state
-        .capture
-        .try_lock()
-        .map_err(|_| anyhow::anyhow!("another capture session is already in progress"))?;
-    crate::ui::run_capture_flow(ctx.clone(), sinks, cursor).await
+    if edit {
+        let _guard = state
+            .editor
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("another editor session is already in progress"))?;
+        crate::cli::screenshot::execute(ctx.clone(), selection, cursor, sinks, true).await
+    } else {
+        crate::cli::screenshot::execute(ctx.clone(), selection, cursor, sinks, false).await
+    }
 }
 
 /// Toggle the daemon-managed draw overlay: kill the running instance if present, otherwise
@@ -265,10 +265,16 @@ async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response>
     Ok(Response::Ok)
 }
 
-async fn run_screenshot(ctx: Ctx, req: ScreenshotRequest) -> Result<Response> {
+async fn run_screenshot(
+    ctx: Ctx,
+    state: Arc<DaemonState>,
+    req: ScreenshotRequest,
+) -> Result<Response> {
     let selection = selection_from_spec(req.selection);
     let sinks = sinks_from_specs(req.sinks, &ctx);
-    let paths = crate::cli::screenshot::execute(ctx, selection, req.cursor, sinks).await?;
+    let paths =
+        run_screenshot_with_optional_lock(&ctx, &state, selection, req.cursor, sinks, req.edit)
+            .await?;
     Ok(Response::Paths { paths })
 }
 

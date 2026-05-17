@@ -4,7 +4,7 @@
 # to get a complete set of screenshot / capture / draw shortcuts.
 
 # Interactive region selector, then annotation editor; saves to file AND clipboard.
-bind = SUPER,        Print, exec, hyprsnap capture --to clipboard --to file
+bind = SUPER,        Print, exec, hyprsnap screenshot --edit --to clipboard --to file
 
 # Full desktop, stitched across every output, written to the configured directory.
 bind = SUPER SHIFT,  Print, exec, hyprsnap screenshot --full --to file

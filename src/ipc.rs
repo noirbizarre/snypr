@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 pub enum Request {
     Ping,
     Screenshot(ScreenshotRequest),
-    Capture(CaptureRequest),
     DrawToggle,
 }
 
@@ -17,12 +16,10 @@ pub enum Request {
 pub struct ScreenshotRequest {
     pub selection: SelectionSpec,
     pub cursor: bool,
-    pub sinks: Vec<SinkSpec>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CaptureRequest {
-    pub cursor: bool,
+    /// Open the annotation editor between capture and sinks. Defaults to `false` so legacy
+    /// clients (and tests) keep parsing.
+    #[serde(default)]
+    pub edit: bool,
     pub sinks: Vec<SinkSpec>,
 }
 
@@ -75,7 +72,14 @@ mod tests {
     #[case(Request::Screenshot(ScreenshotRequest {
         selection: SelectionSpec::Full,
         cursor: false,
+        edit: false,
         sinks: vec![SinkSpec::Clipboard],
+    }))]
+    #[case(Request::Screenshot(ScreenshotRequest {
+        selection: SelectionSpec::Interactive,
+        cursor: true,
+        edit: true,
+        sinks: vec![SinkSpec::File { path: None }],
     }))]
     fn round_trips_requests(#[case] req: Request) {
         let json = serde_json::to_string(&req).unwrap();

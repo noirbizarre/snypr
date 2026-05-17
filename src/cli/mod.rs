@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 pub mod annotate;
-pub mod capture;
 pub mod daemon;
 pub mod draw;
 pub mod screenshot;
@@ -34,12 +33,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Capture the screen and write it to the configured sinks.
+    /// Capture the screen and write it to the configured sinks. Pass `--edit` to open the
+    /// annotation editor between capture and sinks.
     Screenshot(screenshot::Args),
     /// Open the annotation editor on an existing image.
     Annotate(annotate::Args),
-    /// Capture, then open the annotation editor before writing the result.
-    Capture(capture::Args),
     /// Open a transparent overlay to draw on top of the screen.
     Draw(draw::Args),
     /// Run a long-lived daemon listening on the IPC socket.
@@ -98,16 +96,14 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match command {
         Command::Screenshot(args) => screenshot::run(args).await,
         Command::Annotate(args) => annotate::run(args).await,
-        Command::Capture(args) => capture::run(args).await,
         Command::Draw(args) => draw::run(args).await,
         Command::Daemon(args) => daemon::run(args).await,
     }
 }
 
 /// Forward a `Command` to a running `hyprsnap daemon` over the IPC socket instead of executing
-/// locally. The screenshot subcommand is the one currently implemented server-side; the others
-/// either don't make sense via IPC (annotate is purely local; daemon obviously) or are flagged
-/// as "not yet" so the user knows to run them locally.
+/// locally. `screenshot` (with or without `--edit`) and `draw` round-trip through the daemon;
+/// `annotate` and `daemon` itself don't make sense over IPC and are rejected up-front.
 async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
     use anyhow::{Context as _, anyhow, bail};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -156,14 +152,11 @@ fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
                 crate::ipc::ScreenshotRequest {
                     selection: crate::daemon::selection_to_spec(&selection),
                     cursor: args.cursor,
+                    edit: args.edit,
                     sinks,
                 },
             ))
         }
-        Command::Capture(args) => Ok(crate::ipc::Request::Capture(crate::ipc::CaptureRequest {
-            cursor: args.cursor,
-            sinks: crate::daemon::sinks_to_specs(&args.to),
-        })),
         Command::Draw(_) => Ok(crate::ipc::Request::DrawToggle),
         Command::Annotate(_) => bail!("`annotate` is local-only; do not pass --via-daemon"),
         Command::Daemon(_) => bail!("`daemon` is the server; cannot be invoked via --via-daemon"),
@@ -218,8 +211,8 @@ mod tests {
     fn cli_parses_all_subcommands() {
         for args in [
             vec!["hyprsnap", "screenshot", "--full"],
+            vec!["hyprsnap", "screenshot", "--edit"],
             vec!["hyprsnap", "annotate", "/tmp/x.png"],
-            vec!["hyprsnap", "capture"],
             vec!["hyprsnap", "draw"],
             vec!["hyprsnap", "daemon"],
         ] {

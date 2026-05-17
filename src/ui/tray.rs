@@ -2,9 +2,9 @@
 //!
 //! The tray is hosted by `hyprsnap daemon` when `[tray].enabled = true` in the config. Menu
 //! activations are translated into [`TrayAction`]s and forwarded over a tokio MPSC channel to
-//! the daemon's main select-loop, which dispatches the actual screenshot / capture / overlay
-//! work on its own runtime. Keeping ksni at arm's length like this avoids tangling its sync
-//! `activate` callbacks with our async pipeline.
+//! the daemon's main select-loop, which dispatches the actual screenshot / overlay work on its
+//! own runtime. Keeping ksni at arm's length like this avoids tangling its sync `activate`
+//! callbacks with our async pipeline.
 
 use anyhow::{Context as _, Result};
 use tokio::sync::mpsc::UnboundedSender;
@@ -12,10 +12,9 @@ use tokio::sync::mpsc::UnboundedSender;
 /// Side-effect requested by the user via the tray menu.
 #[derive(Debug, Clone, Copy)]
 pub enum TrayAction {
-    /// Take a full-desktop screenshot using the configured default sinks.
-    Screenshot,
-    /// Run the capture flow: interactive selector → annotation editor → sinks.
-    Capture,
+    /// Take a screenshot using the configured default sinks. When `edit` is true the result is
+    /// piped through the annotation editor before reaching the sinks.
+    Screenshot { edit: bool },
     /// Open the live draw-on-screen overlay.
     OpenDraw,
     /// Tear the daemon down.
@@ -60,14 +59,18 @@ impl ksni::Tray for HyprSnapTray {
             StandardItem {
                 label: "Screenshot (full)".into(),
                 icon_name: "camera-photo".into(),
-                activate: Box::new(|this: &mut Self| this.send(TrayAction::Screenshot)),
+                activate: Box::new(|this: &mut Self| {
+                    this.send(TrayAction::Screenshot { edit: false })
+                }),
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: "Capture (region + annotate)".into(),
+                label: "Annotate region…".into(),
                 icon_name: "edit-cut".into(),
-                activate: Box::new(|this: &mut Self| this.send(TrayAction::Capture)),
+                activate: Box::new(|this: &mut Self| {
+                    this.send(TrayAction::Screenshot { edit: true })
+                }),
                 ..Default::default()
             }
             .into(),

@@ -15,7 +15,8 @@ and other wlroots-based compositors. It captures pixels via the
 .TP
 .BR \-\-via-daemon
 Forward the command to a running \fBhyprsnap daemon\fR over its Unix socket instead of
-performing it locally. Only \fBscreenshot\fR is currently supported over IPC.
+performing it locally. \fBscreenshot\fR (with or without \fB\-\-edit\fR) and \fBdraw\fR
+round-trip through the daemon.
 .TP
 .BR \-\-config " " \fIPATH\fR
 Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR.
@@ -24,13 +25,15 @@ Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR.
 Increase log verbosity (repeatable).
 .SH COMMANDS
 .SS screenshot
-Capture pixels and pipe them to one or more sinks without opening the editor.
+Capture pixels and pipe them to one or more sinks. With \fB\-\-edit\fR the captured image
+is handed to the annotation editor before reaching the sinks.
 .TP
 .BR \-\-full
 Stitch the bounding box covering every output into a single image.
 .TP
 .BR \-\-per\-output
 Produce one file per output. Requires a filename template containing \fB{output}\fR.
+Incompatible with \fB\-\-edit\fR.
 .TP
 .BR \-\-focused
 Capture the currently focused window, queried over Hyprland's IPC.
@@ -47,6 +50,10 @@ Capture an explicit logical-pixel region.
 .BR \-\-interactive
 Open the selector overlay and let the user draw a region.
 .TP
+.BR \-\-edit ", " \-\-annotate
+Open the annotation editor on the captured image before writing to sinks. Incompatible
+with \fB\-\-per\-output\fR.
+.TP
 .BR \-\-to " " \fISINK\fR
 Add an output sink. May be passed multiple times. Recognised forms:
 \fBfile\fR (write to the configured directory), \fBfile=\fIPATH\fR (write to \fIPATH\fR),
@@ -57,9 +64,6 @@ Include the hardware cursor in the capture.
 .TP
 .BR \-\-delay " " \fIMS\fR
 Wait \fIMS\fR milliseconds before capturing.
-.SS capture
-Run the full pipeline: interactive selector \(-> wlr-screencopy \(-> annotation editor
-\(-> sinks. Sink flags match \fBscreenshot\fR.
 .SS annotate
 Open the annotation editor on an existing image:
 .RS
@@ -74,7 +78,7 @@ passthrough, \fBEsc\fR quit.
 .SS daemon
 Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. When
 \fI[tray].enabled = true\fR in the config, also registers a StatusNotifierItem with
-Screenshot / Capture / Draw / Quit menu items.
+Screenshot / Annotate / Draw / Quit menu items.
 .SH CONFIGURATION
 .B hyprsnap
 reads \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR. Every field is optional; see the
