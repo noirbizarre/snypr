@@ -57,6 +57,21 @@ pub enum OverlayMode {
     },
 }
 
+/// External commands sent from the daemon (or any other tokio context) to a live overlay.
+///
+/// Today we only carry passthrough toggles, but the channel is wired as `mpsc` so future
+/// commands (cursor change, tool swap, …) can slot in without breaking the GTK plumbing.
+#[derive(Debug, Clone, Copy)]
+pub enum OverlayCommand {
+    /// Flip pointer passthrough on/off as if the user had pressed the toolbar button.
+    /// Useful from a Hyprland global keybind when keyboard is detached from the surface
+    /// (passthrough turns `KeyboardMode` to `None`, so the overlay can't see `P` itself).
+    TogglePassthrough,
+}
+
+/// Channel used by the daemon to send [`OverlayCommand`]s into a running overlay.
+pub type OverlayCommandRx = tokio::sync::mpsc::UnboundedReceiver<OverlayCommand>;
+
 /// Launch the overlay. Returns once the user presses `Esc`, hits Save (Edit mode), or the
 /// supplied `shutdown` receiver fires.
 ///
@@ -66,11 +81,12 @@ pub async fn run(
     ctx: Ctx,
     mode: OverlayMode,
     shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+    commands: Option<OverlayCommandRx>,
 ) -> Result<Vec<PathBuf>> {
     let written: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::sync_channel::<Result<()>>(1);
     let collected = written.clone();
-    tokio::task::spawn_blocking(move || run_gtk(ctx, mode, tx, shutdown, collected))
+    tokio::task::spawn_blocking(move || run_gtk(ctx, mode, tx, shutdown, commands, collected))
         .await
         .map_err(|e| anyhow!("overlay task panicked: {e}"))??;
     rx.recv()
@@ -97,6 +113,7 @@ fn run_gtk(
     mode: OverlayMode,
     tx: mpsc::SyncSender<Result<()>>,
     shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+    commands: Option<OverlayCommandRx>,
     collected: Arc<Mutex<Vec<PathBuf>>>,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
@@ -108,12 +125,14 @@ fn run_gtk(
     // first activation drains.
     let shutdown_cell: Rc<RefCell<Option<tokio::sync::oneshot::Receiver<()>>>> =
         Rc::new(RefCell::new(shutdown));
+    let commands_cell: Rc<RefCell<Option<OverlayCommandRx>>> = Rc::new(RefCell::new(commands));
     let mode_cell: Rc<RefCell<Option<OverlayMode>>> = Rc::new(RefCell::new(Some(mode)));
     let collected_cell = collected.clone();
 
     {
         let tx = tx.clone();
         let shutdown_cell = shutdown_cell.clone();
+        let commands_cell = commands_cell.clone();
         app.connect_activate(move |app| {
             let Some(mode) = mode_cell.borrow_mut().take() else {
                 return;
@@ -122,6 +141,9 @@ fn run_gtk(
                 Ok(shared) => {
                     if let Some(rx) = shutdown_cell.borrow_mut().take() {
                         attach_shutdown(&shared, rx);
+                    }
+                    if let Some(rx) = commands_cell.borrow_mut().take() {
+                        attach_commands(&shared, rx);
                     }
                 }
                 Err(err) => {
@@ -153,6 +175,26 @@ fn attach_shutdown(shared: &Shared, rx: tokio::sync::oneshot::Receiver<()>) {
         // the overlay doesn't outlive the daemon-side state.
         let _ = rx.await;
         tear_down(&windows, &app_weak);
+    });
+}
+
+/// Wire an external command receiver into the GTK main context. Used by the daemon to inject
+/// [`OverlayCommand`]s — most importantly `TogglePassthrough`, which lets a Hyprland global
+/// keybind flip the overlay back to interactive when `KeyboardMode::None` has detached the
+/// surface from the keyboard.
+fn attach_commands(shared: &Shared, mut rx: OverlayCommandRx) {
+    let passthrough = shared.passthrough.clone();
+    let windows = shared.windows.clone();
+    let toolbars = shared.toolbars.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                OverlayCommand::TogglePassthrough => {
+                    let next = !passthrough.get();
+                    apply_passthrough_state(&passthrough, &windows, &toolbars, next);
+                }
+            }
+        }
     });
 }
 
@@ -403,6 +445,7 @@ fn spawn_monitor_overlay(
     install_keys(&window, shared);
     toolbar.install_shortcuts(&window);
 
+    let toolbar_widget = toolbar.widget().clone();
     shared.canvases.borrow_mut().push(MonitorCanvas {
         canvas: canvas.clone(),
         slice,
@@ -410,19 +453,53 @@ fn spawn_monitor_overlay(
     shared.toolbars.borrow_mut().push(toolbar);
     shared.windows.borrow_mut().push(window.clone());
 
-    // Apply the initial passthrough state once the GTK surface exists. We can't take the
-    // GdkSurface before the caller's batched `present()`, hence the deferred lambda — it
-    // fires on the next main-loop iteration, which always lands after the present pass.
-    if shared.edit.is_none() {
-        let passthrough = shared.passthrough.clone();
-        let window_weak = window.downgrade();
-        glib::idle_add_local_once(move || {
-            if let Some(window) = window_weak.upgrade() {
-                apply_passthrough(&window, passthrough.get());
-            }
-        });
-    }
+    // GDK4's Wayland backend recomputes wl_surface::set_input_region every frame from the
+    // widget allocation, so a one-shot set_input_region call gets clobbered on the next
+    // paint. Install a frame-clock::after-paint handler that re-asserts the desired region
+    // on every frame, driven by the shared passthrough cell. The handler covers Draw and
+    // Edit alike — Edit just keeps the full-window region every frame, a no-op.
+    install_passthrough_for_surface(&window, toolbar_widget, shared.passthrough.clone());
     Some(window)
+}
+
+/// Flip pointer passthrough on every window managed by this overlay.
+///
+/// Single source of truth shared by the toolbar's own `PassthroughToggled` action and the
+/// daemon-driven [`OverlayCommand::TogglePassthrough`]. Beside flipping the shared cell and
+/// asking each surface to re-render (so the per-frame `after-paint` handler picks the new
+/// state up immediately), this also flips `KeyboardMode` between `Exclusive` and `None`:
+/// Hyprland binds the pointer to a keyboard-`Exclusive` layer surface, so an empty input
+/// region alone is not enough to let clicks reach the apps below — the keyboard grab has to
+/// go away as well. Trade-off: the overlay's keyboard shortcuts (e.g. `P`) stop working
+/// while passthrough is on; the daemon IPC `PassthroughToggle` is the user's recovery path,
+/// typically bound to a Hyprland global keybind.
+fn apply_passthrough_state(
+    passthrough: &Rc<Cell<bool>>,
+    windows: &WindowRegistry,
+    toolbars: &ToolbarRegistry,
+    on: bool,
+) {
+    passthrough.set(on);
+    let mode = if on {
+        // `None` rather than `OnDemand`: with `OnDemand` Hyprland would still re-grab the
+        // pointer the first time the toolbar gets focus. We want the surface fully detached
+        // from the keyboard until the user explicitly toggles back.
+        KeyboardMode::None
+    } else {
+        KeyboardMode::Exclusive
+    };
+    for w in windows.borrow().iter() {
+        w.set_keyboard_mode(mode);
+        if let Some(s) = w.surface() {
+            // queue_render asks for the next frame immediately rather than waiting for damage;
+            // the after-paint handler will then re-derive the input region from `on`.
+            s.queue_render();
+        }
+    }
+    for t in toolbars.borrow().iter() {
+        t.set_passthrough(on);
+    }
+    tracing::info!(passthrough = on, "overlay passthrough toggled");
 }
 
 /// Wire toolbar actions back into the per-overlay shared state. Tool / Clear / Passthrough
@@ -492,14 +569,7 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             }
         }
         ToolbarAction::PassthroughToggled(on) => {
-            passthrough.set(on);
-            for w in windows.borrow().iter() {
-                apply_passthrough(w, on);
-            }
-            for t in toolbars.borrow().iter() {
-                t.set_passthrough(on);
-            }
-            tracing::info!(passthrough = on, "overlay passthrough toggled");
+            apply_passthrough_state(&passthrough, &windows, &toolbars, on);
         }
         ToolbarAction::Save => {
             let Some(edit) = edit.as_ref() else {
@@ -604,21 +674,110 @@ fn install_keys(window: &gtk4::ApplicationWindow, shared: &Shared) {
     window.add_controller(key);
 }
 
-/// Toggle pointer passthrough on a single overlay window. An empty input region tells the
-/// compositor to forward pointer events to the surface beneath; `None` restores the default
-/// (the window absorbs everything inside its bounds).
-fn apply_passthrough(window: &gtk4::ApplicationWindow, passthrough: bool) {
-    let Some(surface) = window.surface() else {
-        return;
-    };
-    if passthrough {
-        let empty = cairo::Region::create();
-        surface.set_input_region(Some(&empty));
+/// Hook a per-frame input-region reassertion onto `window`'s surface, driven by `passthrough`.
+///
+/// GDK4's Wayland backend re-derives `wl_surface::set_input_region` every paint from the
+/// widget tree, which clobbers any manual one-shot call. We connect to the surface's frame
+/// clock `after-paint` signal so we get to set the region *after* GDK's per-frame
+/// recompute. The handler reads the shared `Cell` so all per-monitor handlers stay in
+/// lockstep with the toggle without any cross-talk.
+///
+/// While passthrough is *on*, the region is shrunk to the toolbar widget's allocated bounds
+/// (computed in window/surface coordinates) so the toolbar stays clickable — that's the
+/// only escape hatch out of passthrough mode when the keyboard has been detached via
+/// `KeyboardMode::None`. While passthrough is *off*, the full surface absorbs every event.
+///
+/// The surface usually exists by the time we reach this — `install_passthrough_for_surface`
+/// is called from `spawn_monitor_overlay` after `present()` is queued in the caller's
+/// batched present pass — but we defer via `connect_realize` if it isn't, so this stays
+/// robust against future ordering changes.
+fn install_passthrough_for_surface(
+    window: &gtk4::ApplicationWindow,
+    toolbar: gtk4::Widget,
+    passthrough: Rc<Cell<bool>>,
+) {
+    fn attach(
+        window: &gtk4::ApplicationWindow,
+        surface: &gdk4::Surface,
+        toolbar: gtk4::Widget,
+        passthrough: Rc<Cell<bool>>,
+    ) {
+        let clock = surface.frame_clock();
+        let surface_weak = surface.downgrade();
+        let window_weak = window.downgrade();
+        let toolbar_weak = toolbar.downgrade();
+        let pt = passthrough.clone();
+        clock.connect_after_paint(move |_| {
+            if let (Some(s), Some(w), Some(tb)) = (
+                surface_weak.upgrade(),
+                window_weak.upgrade(),
+                toolbar_weak.upgrade(),
+            ) {
+                apply_passthrough_to(&s, &w, &tb, pt.get());
+            }
+        });
+        // Apply once immediately so the very first frame already has the right region —
+        // we don't have to wait for the first `after-paint` to fire.
+        apply_passthrough_to(surface, window, &toolbar, passthrough.get());
+    }
+
+    if let Some(s) = window.surface() {
+        attach(window, &s, toolbar, passthrough);
+    } else {
+        let cell = std::cell::RefCell::new(Some((toolbar, passthrough)));
+        window.connect_realize(move |w| {
+            if let (Some((tb, pt)), Some(s)) = (cell.borrow_mut().take(), w.surface()) {
+                attach(w, &s, tb, pt);
+            }
+        });
+    }
+}
+
+/// Set the surface's input region. When `passthrough` is off, the full surface absorbs all
+/// pointer events. When it is on, only the toolbar widget's bounding box absorbs events;
+/// everything else (the transparent canvas) falls through to the application underneath.
+///
+/// Keeping the toolbar clickable in passthrough mode is what lets the user — or anyone
+/// without a Hyprland keybind wired to the IPC — recover: a click on the toolbar's
+/// passthrough button flips the cell back, the next frame restores the full input region,
+/// and `KeyboardMode::Exclusive` re-enables every other shortcut.
+fn apply_passthrough_to(
+    surface: &gdk4::Surface,
+    window: &gtk4::ApplicationWindow,
+    toolbar: &gtk4::Widget,
+    passthrough: bool,
+) {
+    let region = if passthrough {
+        toolbar_input_region(window, toolbar).unwrap_or_else(cairo::Region::create)
     } else {
         let r = cairo::RectangleInt::new(0, 0, surface.width(), surface.height());
-        let region = cairo::Region::create_rectangle(&r);
-        surface.set_input_region(Some(&region));
+        cairo::Region::create_rectangle(&r)
+    };
+    surface.set_input_region(Some(&region));
+}
+
+/// Compute the toolbar widget's allocation expressed in the window's coordinate space and
+/// wrap it in a single-rectangle `cairo::Region`. Returns `None` when the widget hasn't
+/// been allocated yet (first frame between realize and the layer-shell map ack) so the
+/// caller can fall back to an empty region (full passthrough, just for that frame).
+fn toolbar_input_region(
+    window: &gtk4::ApplicationWindow,
+    toolbar: &gtk4::Widget,
+) -> Option<cairo::Region> {
+    let bounds = toolbar.compute_bounds(window)?;
+    // graphene::Rect uses f32; round outward so we never clip the visible chrome. A 1-pixel
+    // slack on each side absorbs subpixel positioning without leaking real estate to the
+    // surface beyond what the eye sees.
+    let x = bounds.x().floor() as i32;
+    let y = bounds.y().floor() as i32;
+    let w = bounds.width().ceil() as i32;
+    let h = bounds.height().ceil() as i32;
+    if w <= 0 || h <= 0 {
+        return None;
     }
+    Some(cairo::Region::create_rectangle(&cairo::RectangleInt::new(
+        x, y, w, h,
+    )))
 }
 
 fn tear_down(windows: &WindowRegistry, app_weak: &glib::WeakRef<gtk4::Application>) {

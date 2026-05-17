@@ -9,6 +9,14 @@ pub struct Args {
     #[arg(long)]
     pub passthrough: bool,
 
+    /// Toggle pointer passthrough on the currently running daemon-managed overlay instead
+    /// of spawning one. Implies `--via-daemon` (and is meaningless without it). Bind to a
+    /// Hyprland global keybind so users can flip passthrough back off when the overlay's
+    /// own `P` shortcut is unreachable (passthrough mode detaches the surface from the
+    /// keyboard).
+    #[arg(long, conflicts_with = "passthrough", requires = "via_daemon")]
+    pub toggle_passthrough: bool,
+
     /// Route the command through a running daemon instead of running locally.
     #[arg(long)]
     pub via_daemon: bool,
@@ -29,6 +37,7 @@ pub async fn run(args: Args) -> Result<()> {
         OverlayMode::Draw {
             passthrough: args.passthrough,
         },
+        None,
         None,
     )
     .await?;

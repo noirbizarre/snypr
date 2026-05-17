@@ -14,6 +14,14 @@ use crate::cli::SinkSpec as CliSinkSpec;
 use crate::context::Ctx;
 use crate::ipc::{Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
 
+/// Handle to a daemon-spawned draw overlay. Holds the channels needed to drive it from
+/// outside the GTK thread: a oneshot to tear it down, and an mpsc to inject runtime
+/// commands (passthrough toggles, future tool changes, …).
+struct OverlayHandle {
+    shutdown: oneshot::Sender<()>,
+    commands: tokio::sync::mpsc::UnboundedSender<crate::ui::overlay::OverlayCommand>,
+}
+
 /// Per-daemon mutable state that survives across IPC clients. Shared via `Arc` between the
 /// accept loop and every spawned handler so concurrent `Screenshot --edit` / `DrawToggle`
 /// requests can coordinate.
@@ -24,9 +32,10 @@ struct DaemonState {
     /// client gets an immediate "busy" error instead of queuing. Headless screenshots (no
     /// `--edit`) never touch this lock.
     editor: Mutex<()>,
-    /// `Some(tx)` while a daemon-managed draw overlay is alive. A `DrawToggle` request flips
-    /// this: present → fire `tx` to tear it down; absent → spawn a fresh overlay.
-    overlay: Mutex<Option<oneshot::Sender<()>>>,
+    /// `Some(handle)` while a daemon-managed draw overlay is alive. A `DrawToggle` request
+    /// flips this: present → fire `shutdown` to tear it down; absent → spawn a fresh overlay.
+    /// A `PassthroughToggle` request reads the `commands` channel instead.
+    overlay: Mutex<Option<OverlayHandle>>,
 }
 
 /// Default IPC socket path: `$XDG_RUNTIME_DIR/hyprsnap.sock`.
@@ -209,6 +218,9 @@ async fn dispatch(ctx: Ctx, state: Arc<DaemonState>, req: Request) -> Response {
         Request::Ping => Ok(Response::Ok),
         Request::Screenshot(req) => run_screenshot(ctx, state, req).await,
         Request::DrawToggle => toggle_overlay(&ctx, &state).await.map(|_| Response::Ok),
+        Request::PassthroughToggle => toggle_overlay_passthrough(&state)
+            .await
+            .map(|_| Response::Ok),
     };
     match result {
         Ok(resp) => resp,
@@ -216,6 +228,21 @@ async fn dispatch(ctx: Ctx, state: Arc<DaemonState>, req: Request) -> Response {
             message: format!("{err:#}"),
         },
     }
+}
+
+/// Send a [`crate::ui::overlay::OverlayCommand::TogglePassthrough`] to a live daemon-managed
+/// overlay. Errors when no overlay is alive — the user is expected to wire this to a
+/// Hyprland global keybind that's only meaningful when an overlay is up.
+async fn toggle_overlay_passthrough(state: &Arc<DaemonState>) -> Result<()> {
+    let guard = state.overlay.lock().await;
+    let handle = guard
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no draw overlay is currently running"))?;
+    handle
+        .commands
+        .send(crate::ui::overlay::OverlayCommand::TogglePassthrough)
+        .map_err(|_| anyhow::anyhow!("overlay command channel closed"))?;
+    Ok(())
 }
 
 /// Acquire `state.editor` with `try_lock` (only when `edit` is true) so a second editor request
@@ -247,29 +274,34 @@ async fn run_screenshot_with_optional_lock(
 /// the overlay actually exits so a follow-up toggle starts a new one.
 async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response> {
     let mut guard = state.overlay.lock().await;
-    if let Some(tx) = guard.take() {
+    if let Some(handle) = guard.take() {
         // Sender ignores its return value: if the receiver was already dropped (overlay died on
         // its own) the next branch would have been taken instead. Either way the slot is now
         // empty and a follow-up toggle will spawn a new overlay.
-        let _ = tx.send(());
+        let _ = handle.shutdown.send(());
         return Ok(Response::Ok);
     }
-    let (tx, rx) = oneshot::channel();
-    *guard = Some(tx);
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    *guard = Some(OverlayHandle {
+        shutdown: shutdown_tx,
+        commands: cmd_tx,
+    });
     let ctx = ctx.clone();
     let state = state.clone();
     tokio::spawn(async move {
         if let Err(err) = crate::ui::overlay::run(
             ctx,
             crate::ui::overlay::OverlayMode::Draw { passthrough: false },
-            Some(rx),
+            Some(shutdown_rx),
+            Some(cmd_rx),
         )
         .await
         {
             tracing::warn!(error = ?err, "overlay task failed");
         }
-        // Drop the stored sender so the *next* DrawToggle spawns a fresh overlay instead of
-        // sending into a dead channel.
+        // Drop the stored handle so the *next* DrawToggle spawns a fresh overlay instead of
+        // sending into dead channels.
         let mut guard = state.overlay.lock().await;
         *guard = None;
     });

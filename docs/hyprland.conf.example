@@ -20,6 +20,12 @@ bind = SUPER CTRL,   Print, exec, hyprsnap screenshot --focused --to clipboard
 # pointer passthrough, Ctrl+L to clear, Esc to quit.
 bind = SUPER ALT,    Print, exec, hyprsnap draw
 
+# Toggle pointer passthrough on a running draw overlay from outside it.
+# Required because passthrough mode detaches the surface from the keyboard,
+# so the overlay's own `P` shortcut can't switch it back. The daemon must be
+# running (see `exec-once` below) for this binding to do anything.
+bind = SUPER ALT,    P,     exec, hyprsnap draw --via-daemon --toggle-passthrough
+
 # Autostart the daemon so `hyprsnap screenshot --via-daemon ...` (and friends)
 # work. Add `--systray` if you want a StatusNotifierItem tray icon as well.
 exec-once = hyprsnap daemon --systray

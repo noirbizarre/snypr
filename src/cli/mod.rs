@@ -149,7 +149,13 @@ fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
                 },
             ))
         }
-        Command::Draw(_) => Ok(crate::ipc::Request::DrawToggle),
+        Command::Draw(args) => {
+            if args.toggle_passthrough {
+                Ok(crate::ipc::Request::PassthroughToggle)
+            } else {
+                Ok(crate::ipc::Request::DrawToggle)
+            }
+        }
         Command::Daemon(_) => {
             unreachable!(
                 "daemon never reaches build_request: --via-daemon is rejected at parse time"

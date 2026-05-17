@@ -133,6 +133,11 @@ bind = SUPER SHIFT,  Print, exec, hyprsnap screenshot --full --to file
 bind = SUPER CTRL,   Print, exec, hyprsnap screenshot --focused --to clipboard
 bind = SUPER ALT,    Print, exec, hyprsnap draw
 
+# Toggle pointer passthrough on a running draw overlay. Useful because
+# passthrough mode detaches the surface from the keyboard, so the overlay's
+# own `P` shortcut can't turn passthrough back off — a global keybind can.
+bind = SUPER ALT,    P,     exec, hyprsnap draw --via-daemon --toggle-passthrough
+
 # Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
 exec-once = hyprsnap daemon --systray
 ```

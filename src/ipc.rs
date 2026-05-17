@@ -10,6 +10,10 @@ pub enum Request {
     Ping,
     Screenshot(ScreenshotRequest),
     DrawToggle,
+    /// Flip pointer passthrough on the currently running daemon-managed draw overlay.
+    /// Errors when no overlay is alive. Bind to a Hyprland global keybind so users can
+    /// recover from passthrough mode (which detaches the surface from the keyboard).
+    PassthroughToggle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +73,7 @@ mod tests {
     #[rstest]
     #[case(Request::Ping)]
     #[case(Request::DrawToggle)]
+    #[case(Request::PassthroughToggle)]
     #[case(Request::Screenshot(ScreenshotRequest {
         selection: SelectionSpec::Full,
         cursor: false,

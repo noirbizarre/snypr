@@ -1143,10 +1143,9 @@ fn schedule_color_dialog_refit(remaining: u32) {
         if let Some(dlg) = find_color_dialog_window() {
             refit_color_dialog(&dlg);
         } else if remaining > 0 {
-            gtk4::glib::timeout_add_local_once(
-                std::time::Duration::from_millis(50),
-                move || schedule_color_dialog_refit(remaining - 1),
-            );
+            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+                schedule_color_dialog_refit(remaining - 1)
+            });
         }
     });
 }
