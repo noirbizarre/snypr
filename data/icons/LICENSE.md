@@ -1,6 +1,6 @@
 # Bundled icon assets
 
-The symbolic SVG icons under `data/icons/symbolic/` are sourced from the GNOME
+The symbolic SVG icons under `data/icons/scalable/` are sourced from the GNOME
 [icon-development-kit](https://gitlab.gnome.org/Teams/Design/icon-development-kit)
 and are dedicated to the public domain under
 [Creative Commons Zero v1.0 Universal (CC0 1.0)](https://creativecommons.org/publicdomain/zero/1.0/).

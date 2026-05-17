@@ -8,14 +8,14 @@ user's icon theme. To add one more:
 
 1. Pick the icon you want from the [GNOME Icon Library](https://flathub.org/apps/org.gnome.design.IconLibrary)
    app — every icon shown there is CC0 1.0 and safe to vendor here under MIT.
-2. Save the SVG to `data/icons/symbolic/actions/<name>-symbolic.svg`.
+2. Save the SVG to `data/icons/scalable/actions/<name>-symbolic.svg`.
    - Use the **freedesktop** name (e.g. `document-save-symbolic`). GTK will then
      resolve `Image::from_icon_name("document-save-symbolic")` to your file
      before falling back to the system theme.
 3. Add one `<file>` line to `data/icons.gresource.xml`:
 
    ```xml
-   <file alias="<name>-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/actions/<name>-symbolic.svg</file>
+   <file alias="<name>-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/<name>-symbolic.svg</file>
    ```
 
 4. `cargo build` — `build.rs` recompiles the gresource automatically and

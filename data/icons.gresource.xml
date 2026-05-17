@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
-  <gresource prefix="/re/noirbizar/HyprSnap/icons/symbolic/actions">
-    <file alias="draw-line-symbolic.svg" preprocess="xml-stripblanks">icons/symbolic/actions/draw-line-symbolic.svg</file>
+  <gresource prefix="/re/noirbizar/HyprSnap/icons/scalable/actions">
+    <file alias="draw-line-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/draw-line-symbolic.svg</file>
   </gresource>
 </gresources>
