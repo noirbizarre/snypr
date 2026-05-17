@@ -49,6 +49,10 @@ pub struct Args {
     /// Include the mouse cursor in the capture.
     #[arg(long)]
     pub cursor: bool,
+
+    /// Route the command through a running daemon instead of running locally.
+    #[arg(long)]
+    pub via_daemon: bool,
 }
 
 pub async fn run(args: Args) -> Result<()> {

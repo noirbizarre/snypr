@@ -23,10 +23,6 @@ pub struct Cli {
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Route the command through a running daemon instead of running locally.
-    #[arg(long, global = true)]
-    pub via_daemon: bool,
-
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -90,10 +86,11 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         // No subcommand → default to an interactive screenshot.
         Command::Screenshot(screenshot::Args::default())
     });
-    if cli.via_daemon {
-        return dispatch_via_daemon(command).await;
-    }
     match command {
+        Command::Screenshot(args) if args.via_daemon => {
+            dispatch_via_daemon(Command::Screenshot(args)).await
+        }
+        Command::Draw(args) if args.via_daemon => dispatch_via_daemon(Command::Draw(args)).await,
         Command::Screenshot(args) => screenshot::run(args).await,
         Command::Annotate(args) => annotate::run(args).await,
         Command::Draw(args) => draw::run(args).await,
@@ -102,8 +99,8 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
 }
 
 /// Forward a `Command` to a running `hyprsnap daemon` over the IPC socket instead of executing
-/// locally. `screenshot` (with or without `--edit`) and `draw` round-trip through the daemon;
-/// `annotate` and `daemon` itself don't make sense over IPC and are rejected up-front.
+/// locally. Only `screenshot` (with or without `--edit`) and `draw` accept `--via-daemon`;
+/// `annotate` and `daemon` reject the flag at parse time.
 async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
     use anyhow::{Context as _, anyhow, bail};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -143,7 +140,6 @@ async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
 }
 
 fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
-    use anyhow::bail;
     match command {
         Command::Screenshot(args) => {
             let selection = screenshot::parse_selection(&args)?;
@@ -158,8 +154,11 @@ fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
             ))
         }
         Command::Draw(_) => Ok(crate::ipc::Request::DrawToggle),
-        Command::Annotate(_) => bail!("`annotate` is local-only; do not pass --via-daemon"),
-        Command::Daemon(_) => bail!("`daemon` is the server; cannot be invoked via --via-daemon"),
+        Command::Annotate(_) | Command::Daemon(_) => {
+            unreachable!(
+                "annotate/daemon never reach build_request: --via-daemon is rejected at parse time"
+            )
+        }
     }
 }
 
@@ -215,8 +214,39 @@ mod tests {
             vec!["hyprsnap", "annotate", "/tmp/x.png"],
             vec!["hyprsnap", "draw"],
             vec!["hyprsnap", "daemon"],
+            vec!["hyprsnap", "daemon", "--systray"],
         ] {
             Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} -> {e}"));
         }
+    }
+
+    #[test]
+    fn via_daemon_accepted_on_screenshot_and_draw() {
+        for args in [
+            vec!["hyprsnap", "screenshot", "--via-daemon"],
+            vec!["hyprsnap", "screenshot", "--full", "--via-daemon"],
+            vec!["hyprsnap", "draw", "--via-daemon"],
+        ] {
+            Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} -> {e}"));
+        }
+    }
+
+    #[test]
+    fn via_daemon_rejected_on_annotate_and_daemon() {
+        for args in [
+            vec!["hyprsnap", "annotate", "/tmp/x.png", "--via-daemon"],
+            vec!["hyprsnap", "daemon", "--via-daemon"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "expected parse failure for {args:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn via_daemon_is_not_global() {
+        // Placing `--via-daemon` before the subcommand must fail now that it's no longer global.
+        assert!(Cli::try_parse_from(["hyprsnap", "--via-daemon", "screenshot"]).is_err());
     }
 }

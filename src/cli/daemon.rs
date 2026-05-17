@@ -11,6 +11,10 @@ pub struct Args {
     /// Override the socket path. Defaults to `$XDG_RUNTIME_DIR/hyprsnap.sock`.
     #[arg(long, value_name = "PATH")]
     pub socket: Option<std::path::PathBuf>,
+
+    /// Expose a StatusNotifierItem (system tray) icon while the daemon is running.
+    #[arg(long)]
+    pub systray: bool,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -19,5 +23,5 @@ pub async fn run(args: Args) -> Result<()> {
     let path = args
         .socket
         .unwrap_or_else(crate::daemon::default_socket_path);
-    crate::daemon::serve(ctx, path).await
+    crate::daemon::serve(ctx, path, args.systray).await
 }

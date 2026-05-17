@@ -37,7 +37,7 @@ pub fn default_socket_path() -> PathBuf {
     dir.join("hyprsnap.sock")
 }
 
-pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
+pub async fn serve(ctx: Ctx, socket: PathBuf, systray: bool) -> Result<()> {
     if socket.exists() {
         std::fs::remove_file(&socket)
             .with_context(|| format!("removing stale socket {}", socket.display()))?;
@@ -51,9 +51,14 @@ pub async fn serve(ctx: Ctx, socket: PathBuf) -> Result<()> {
     // Optional StatusNotifierItem tray. Held in scope here so its Drop runs when the daemon
     // exits. The handle is unused beyond that — actions are funnelled back over `tray_rx`.
     #[cfg(feature = "tray")]
-    let (mut tray_rx, _tray_handle) = setup_tray(&ctx).await?;
+    let (mut tray_rx, _tray_handle) = setup_tray(systray).await?;
     #[cfg(not(feature = "tray"))]
-    let mut tray_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
+    let mut tray_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = {
+        if systray {
+            tracing::warn!("--systray ignored: built without the `tray` feature");
+        }
+        None
+    };
 
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
@@ -103,12 +108,12 @@ async fn recv_optional<T>(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<T
 
 #[cfg(feature = "tray")]
 async fn setup_tray(
-    ctx: &Ctx,
+    enabled: bool,
 ) -> Result<(
     Option<tokio::sync::mpsc::UnboundedReceiver<crate::ui::tray::TrayAction>>,
     Option<ksni::Handle<crate::ui::tray::HyprSnapTray>>,
 )> {
-    if !ctx.config.tray.enabled {
+    if !enabled {
         return Ok((None, None));
     }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

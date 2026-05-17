@@ -8,6 +8,10 @@ pub struct Args {
     /// Open the overlay with input passthrough enabled (clicks fall through).
     #[arg(long)]
     pub passthrough: bool,
+
+    /// Route the command through a running daemon instead of running locally.
+    #[arg(long)]
+    pub via_daemon: bool,
 }
 
 #[cfg(feature = "ui")]

@@ -72,11 +72,11 @@ hyprsnap draw
 # Open the in-place annotation overlay on an existing image.
 hyprsnap annotate ~/Pictures/shot.png
 
-# Run the daemon (StatusNotifierItem tray + IPC server).
+# Run the daemon (IPC server; add `--systray` for a StatusNotifierItem icon).
 hyprsnap daemon
 
 # Take a screenshot via the running daemon instead of spawning a fresh process.
-hyprsnap --via-daemon screenshot --full
+hyprsnap screenshot --full --via-daemon
 ```
 
 ### Interactive selector
@@ -117,8 +117,8 @@ bind = SUPER SHIFT,  Print, exec, hyprsnap screenshot --full --to file
 bind = SUPER CTRL,   Print, exec, hyprsnap screenshot --focused --to clipboard
 bind = SUPER ALT,    Print, exec, hyprsnap draw
 
-# Autostart the daemon (enables the tray and `--via-daemon`).
-exec-once = hyprsnap daemon
+# Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
+exec-once = hyprsnap daemon --systray
 ```
 
 ## Configuration
@@ -137,9 +137,6 @@ compression        = "balanced"
 
 [capture]
 cursor = false
-
-[tray]
-enabled = false
 
 [keybinds.editor]
 save = "<Ctrl>s"

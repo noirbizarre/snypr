@@ -13,11 +13,6 @@ and other wlroots-based compositors. It captures pixels via the
 \fIgtk4-layer-shell\fR, and draws annotations on a GTK4 canvas.
 .SH GLOBAL OPTIONS
 .TP
-.BR \-\-via-daemon
-Forward the command to a running \fBhyprsnap daemon\fR over its Unix socket instead of
-performing it locally. \fBscreenshot\fR (with or without \fB\-\-edit\fR) and \fBdraw\fR
-round-trip through the daemon.
-.TP
 .BR \-\-config " " \fIPATH\fR
 Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR.
 .TP
@@ -65,6 +60,10 @@ Include the hardware cursor in the capture.
 .TP
 .BR \-\-delay " " \fIMS\fR
 Wait \fIMS\fR milliseconds before capturing.
+.TP
+.BR \-\-via-daemon
+Forward the request to a running \fBhyprsnap daemon\fR over its Unix socket instead of
+executing locally.
 .SS annotate
 Open the in-place annotation overlay on an existing image. The overlay anchors on the
 focused monitor and writes back to the source path on Ctrl+S (unless \fB\-\-to\fR is
@@ -77,11 +76,11 @@ supplied):
 Launch the live draw-on-screen overlay. Keys: \fBR\fR rectangle, \fBA\fR arrow,
 \fBH\fR highlight, \fBF\fR freehand, \fBN\fR numbered marker, \fBT\fR text,
 \fBX\fR redact, \fBCtrl+Z\fR undo, \fBCtrl+L\fR clear all, \fBP\fR toggle pointer
-passthrough, \fBEsc\fR quit.
+passthrough, \fBEsc\fR quit. Also accepts \fB\-\-via-daemon\fR to toggle a
+daemon-managed overlay instead of spawning a new process.
 .SS daemon
-Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. When
-\fI[tray].enabled = true\fR in the config, also registers a StatusNotifierItem with
-Screenshot / Annotate / Draw / Quit menu items.
+Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. Pass \fB\-\-systray\fR to
+also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
 .SH CONFIGURATION
 .B hyprsnap
 reads \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR. Every field is optional; see the

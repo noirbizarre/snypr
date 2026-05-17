@@ -15,7 +15,6 @@ pub struct Config {
     pub output: OutputConfig,
     pub capture: CaptureConfig,
     pub keybinds: KeybindConfig,
-    pub tray: TrayConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -100,12 +99,6 @@ impl Default for KeybindConfig {
             overlay,
         }
     }
-}
-
-#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct TrayConfig {
-    pub enabled: bool,
 }
 
 impl Config {

@@ -1,6 +1,6 @@
 //! System tray icon (StatusNotifierItem) via `ksni`.
 //!
-//! The tray is hosted by `hyprsnap daemon` when `[tray].enabled = true` in the config. Menu
+//! The tray is hosted by `hyprsnap daemon --systray`. Menu
 //! activations are translated into [`TrayAction`]s and forwarded over a tokio MPSC channel to
 //! the daemon's main select-loop, which dispatches the actual screenshot / overlay work on its
 //! own runtime. Keeping ksni at arm's length like this avoids tangling its sync `activate`
