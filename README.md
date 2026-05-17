@@ -18,8 +18,8 @@ flatten to PNG through Cairo on save.
 
 | Subcommand    | Status                                                                            |
 | ------------- | --------------------------------------------------------------------------------- |
-| `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the annotation editor before sinks |
-| `annotate`    | Editor with Rect / Arrow / Highlight / Freehand / Number / Text / Blur / Redact / Crop tools |
+| `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the in-place annotation overlay before sinks |
+| `annotate`    | In-place overlay with Rect / Arrow / Highlight / Freehand / Number / Text / Blur / Redact / Crop tools |
 | `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools    |
 | `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`; tray (StatusNotifierItem) when enabled in config |
 
@@ -61,13 +61,13 @@ hyprsnap screenshot --focused
 # Explicit region (logical pixels): X,Y,WxH.
 hyprsnap screenshot --region 100,200,800x600 --to file
 
-# Interactive region selector → annotation editor → sinks.
+# Interactive region selector → in-place annotation overlay → sinks.
 hyprsnap screenshot --edit --to clipboard --to file
 
 # Live draw-on-screen overlay (R/A/H/F/N/X tools, Ctrl+Z undo, P passthrough, Esc quit).
 hyprsnap draw
 
-# Open the annotation editor on an existing image.
+# Open the in-place annotation overlay on an existing image.
 hyprsnap annotate ~/Pictures/shot.png
 
 # Run the daemon (StatusNotifierItem tray + IPC server).

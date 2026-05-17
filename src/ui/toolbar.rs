@@ -701,9 +701,22 @@ mod tests {
     }
 
     #[test]
-    fn overlay_excludes_blur_and_crop() {
+    fn overlay_draw_preset_excludes_blur_and_crop() {
         let kinds: std::collections::HashSet<_> = OVERLAY_TOOLS.iter().map(|e| e.kind).collect();
         assert!(!kinds.contains(&ToolKind::Blur));
         assert!(!kinds.contains(&ToolKind::Crop));
+    }
+
+    #[test]
+    fn overlay_edit_preset_uses_full_editor_toolset() {
+        // The in-place edit overlay shares EDITOR_TOOLS so users get every annotation tool
+        // (incl. Blur + Crop, which need an underlying base) when annotating a captured frame.
+        let kinds: std::collections::HashSet<_> = EDITOR_TOOLS.iter().map(|e| e.kind).collect();
+        for kind in [ToolKind::Blur, ToolKind::Crop] {
+            assert!(
+                kinds.contains(&kind),
+                "Edit-mode toolbar (EDITOR_TOOLS) is missing {kind:?}"
+            );
+        }
     }
 }

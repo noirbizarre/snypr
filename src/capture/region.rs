@@ -240,6 +240,66 @@ fn to_logical_size(img: &CapturedImage) -> CapturedImage {
     }
 }
 
+/// Bounding box of every captured image in compositor logical coordinates. Used by callers
+/// that need to know where a stitched buffer sits on the virtual desktop (e.g. the in-place
+/// annotation overlay, which has to align per-monitor slices back to the original capture).
+///
+/// Returns `None` if `images` is empty. Images without `source` metadata are placed at
+/// `(0, 0)` with their device-pixel size — matching what `stitch` does internally.
+pub fn bbox(images: &[CapturedImage]) -> Option<Rect> {
+    images
+        .iter()
+        .map(|i| {
+            let (x, y, w, h) = i
+                .source
+                .as_ref()
+                .map(|o| (o.logical.x, o.logical.y, o.logical.w, o.logical.h))
+                .unwrap_or((0, 0, i.width, i.height));
+            Rect { x, y, w, h }
+        })
+        .reduce(|a, b| a.union(&b))
+}
+
+/// Copy a sub-rectangle out of a tightly-packed RGBA/BGRA buffer.
+///
+/// `base_origin` is the buffer's top-left in logical coordinates; `slice` is the rectangle to
+/// extract in the same coordinate space. Pixels are copied row-by-row so the result has a
+/// tight stride (`slice.w * 4`). The byte order is preserved as-is — caller decides RGBA vs
+/// BGRA semantics.
+///
+/// Returns `None` if the slice doesn't intersect the buffer or has zero area.
+pub fn slice_pixels(
+    pixels: &[u8],
+    base_width: u32,
+    base_height: u32,
+    base_stride: u32,
+    base_origin: (i32, i32),
+    slice: Rect,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let base_rect = Rect {
+        x: base_origin.0,
+        y: base_origin.1,
+        w: base_width,
+        h: base_height,
+    };
+    let clipped = base_rect.intersect(&slice)?;
+    if clipped.w == 0 || clipped.h == 0 {
+        return None;
+    }
+    let off_x = (clipped.x - base_origin.0) as usize;
+    let off_y = (clipped.y - base_origin.1) as usize;
+    let src_stride = base_stride as usize;
+    let dst_w = clipped.w as usize;
+    let dst_h = clipped.h as usize;
+    let dst_stride = dst_w * 4;
+    let mut out = Vec::with_capacity(dst_stride * dst_h);
+    for y in 0..dst_h {
+        let s = (off_y + y) * src_stride + off_x * 4;
+        out.extend_from_slice(&pixels[s..s + dst_stride]);
+    }
+    Some((out, clipped.w, clipped.h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +509,116 @@ mod tests {
         assert_eq!(out.pixels[4], 0x11);
         assert_eq!(out.pixels[8], 0x22);
         assert_eq!(out.pixels[12], 0x22);
+    }
+
+    #[test]
+    fn bbox_unions_image_logical_rects() {
+        let left = solid_image(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+            0,
+        );
+        let right = solid_image(
+            Rect {
+                x: 4,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+            0,
+        );
+        assert_eq!(
+            bbox(&[left, right]),
+            Some(Rect {
+                x: 0,
+                y: 0,
+                w: 8,
+                h: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn bbox_returns_none_for_empty_input() {
+        assert_eq!(bbox(&[]), None);
+    }
+
+    #[test]
+    fn slice_pixels_extracts_subrect() {
+        // 4x2 buffer with two horizontal halves (0xAA | 0xBB), tight RGBA stride.
+        let mut buf = Vec::with_capacity(4 * 2 * 4);
+        for _y in 0..2 {
+            for _x in 0..2 {
+                buf.extend_from_slice(&[0xAA, 0xAA, 0xAA, 0xFF]);
+            }
+            for _x in 0..2 {
+                buf.extend_from_slice(&[0xBB, 0xBB, 0xBB, 0xFF]);
+            }
+        }
+        let (out, w, h) = slice_pixels(
+            &buf,
+            4,
+            2,
+            4 * 4,
+            (10, 20),
+            Rect {
+                x: 12,
+                y: 20,
+                w: 2,
+                h: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (2, 2));
+        // Right half columns 2..=3 of the original (right side, 0xBB).
+        assert_eq!(out[0], 0xBB);
+        assert_eq!(out[4], 0xBB);
+    }
+
+    #[test]
+    fn slice_pixels_clips_against_buffer() {
+        // 2x2 buffer at origin (0,0); requesting (1,1, 4x4) clips to (1,1, 1x1).
+        let buf = vec![0xCC; 2 * 2 * 4];
+        let (out, w, h) = slice_pixels(
+            &buf,
+            2,
+            2,
+            2 * 4,
+            (0, 0),
+            Rect {
+                x: 1,
+                y: 1,
+                w: 4,
+                h: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(out.len(), 4);
+    }
+
+    #[test]
+    fn slice_pixels_returns_none_for_disjoint_rect() {
+        let buf = vec![0; 16];
+        assert!(
+            slice_pixels(
+                &buf,
+                2,
+                2,
+                8,
+                (0, 0),
+                Rect {
+                    x: 10,
+                    y: 10,
+                    w: 2,
+                    h: 2,
+                },
+            )
+            .is_none()
+        );
     }
 }

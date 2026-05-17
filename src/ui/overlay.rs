@@ -1,22 +1,24 @@
-//! Live "draw on screen" overlay (Draw-On-Gnome equivalent).
+//! Layer-shell overlay used by both the live "draw on screen" flow and the in-place
+//! annotation-editing flow (`screenshot --edit`, `annotate <file>`).
 //!
 //! Spawns one `gtk4_layer_shell` window per monitor at `Layer::Overlay`. Each hosts an
-//! [`AnnotationCanvas`] sized to its monitor so the user can sketch directly on top of their
-//! desktop, plus a floating bottom-center [`crate::ui::Toolbar`] with tool toggles, undo,
-//! clear, and a passthrough toggle. The keyboard is grabbed exclusively while the overlay is
-//! alive so the user's tool shortcuts always reach us, even when input passthrough lets pointer
-//! events fall through to whatever app is underneath.
+//! [`AnnotationCanvas`] sized to its monitor, plus a floating bottom-center
+//! [`crate::ui::Toolbar`]. The keyboard is grabbed exclusively while the overlay is alive so
+//! the user's tool shortcuts always reach us, even when input passthrough lets pointer events
+//! fall through to whatever app is underneath.
 //!
-//! Shortcuts (mirrored on every monitor's toolbar):
-//!   * `R / A / H / F / N / T / X` — switch tool
-//!   * `Ctrl+Z` — undo last layer
-//!   * `Ctrl+L` — clear all layers
-//!   * `P` — toggle pointer passthrough
-//!   * `Esc` — quit
+//! Two modes are supported via [`OverlayMode`]:
 //!
-//! Crop and Blur are intentionally omitted (no underlying pixels to operate on).
+//! * [`OverlayMode::Draw`] — Draw-On-Gnome equivalent: transparent canvases, pointer
+//!   passthrough toggle, Undo/Clear shortcuts. The overlay stays alive until the user presses
+//!   `Esc` (or an external shutdown receiver fires) and writes nothing.
+//! * [`OverlayMode::Edit`] — annotate an existing image (captured or loaded from disk) in
+//!   place. Each per-monitor canvas renders its slice of the base image; the toolbar adds a
+//!   Save button that composes every per-monitor canvas, stitches the slices back together,
+//!   fans the result out to the configured sinks, and tears the overlay down.
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -25,68 +27,114 @@ use gtk4::cairo;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use crate::annotate::ToolKind;
+use crate::annotate::{Document, DocumentBase, ToolKind};
+use crate::capture::CapturedImage;
+use crate::capture::region::{Rect, slice_pixels};
+use crate::cli::SinkSpec;
 use crate::context::Ctx;
 use crate::ui::canvas::AnnotationCanvas;
-use crate::ui::toolbar::{OVERLAY_TOOLS, Toolbar, ToolbarAction, ToolbarSpec};
+use crate::ui::save::{SaveFn, sinks_save_fn};
+use crate::ui::toolbar::{EDITOR_TOOLS, OVERLAY_TOOLS, Toolbar, ToolbarAction, ToolbarSpec};
 
-/// Launch the live overlay. Returns once the user presses `Esc` (or the GTK loop otherwise
-/// exits). `initial_passthrough` matches the `--passthrough` CLI flag. When `shutdown` is
-/// provided, completing the receiver (e.g. from the daemon's DrawToggle handler) tears the
-/// overlay down from outside the GTK loop.
+/// How the overlay should behave on this invocation.
+pub enum OverlayMode {
+    /// Live draw on top of the desktop (today's `hyprsnap draw` flow).
+    Draw {
+        /// Open the overlay with pointer passthrough enabled (clicks fall through).
+        passthrough: bool,
+    },
+    /// In-place annotation editor for a captured (or loaded) image. The overlay's per-monitor
+    /// canvases each render the slice of `base` that falls inside their monitor, the toolbar
+    /// grows a Save button, and the result is fanned out to `sinks` on save.
+    Edit {
+        base: DocumentBase,
+        /// Top-left of `base` in compositor logical coordinates. Per-monitor slices are
+        /// computed by intersecting each monitor's geometry with the rect
+        /// `(origin, base.size)`.
+        origin: (i32, i32),
+        sinks: Vec<SinkSpec>,
+    },
+}
+
+/// Launch the overlay. Returns once the user presses `Esc`, hits Save (Edit mode), or the
+/// supplied `shutdown` receiver fires.
+///
+/// In Draw mode the returned vector is always empty. In Edit mode it contains the paths the
+/// save closure wrote to (clipboard sinks contribute nothing).
 pub async fn run(
-    _ctx: Ctx,
-    initial_passthrough: bool,
+    ctx: Ctx,
+    mode: OverlayMode,
     shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
-) -> Result<()> {
+) -> Result<Vec<PathBuf>> {
+    let written: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::sync_channel::<Result<()>>(1);
-    tokio::task::spawn_blocking(move || run_gtk(tx, initial_passthrough, shutdown))
+    let collected = written.clone();
+    tokio::task::spawn_blocking(move || run_gtk(ctx, mode, tx, shutdown, collected))
         .await
         .map_err(|e| anyhow!("overlay task panicked: {e}"))??;
     rx.recv()
-        .map_err(|e| anyhow!("overlay channel closed without a result: {e}"))?
+        .map_err(|e| anyhow!("overlay channel closed without a result: {e}"))??;
+    Ok(std::mem::take(&mut written.lock().unwrap()))
 }
 
-type CanvasRegistry = Rc<RefCell<Vec<AnnotationCanvas>>>;
+type CanvasRegistry = Rc<RefCell<Vec<MonitorCanvas>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 type ToolbarRegistry = Rc<RefCell<Vec<Toolbar>>>;
 type ResultSender = Arc<Mutex<Option<mpsc::SyncSender<Result<()>>>>>;
 
+/// Per-monitor canvas paired with the region of the unified Edit-mode buffer it owns. In Draw
+/// mode `slice` is `None` and the canvas is empty + transparent.
+struct MonitorCanvas {
+    canvas: AnnotationCanvas,
+    /// Top-left + size of this canvas's pixels in the unified `base` coordinate space. Only
+    /// set in Edit mode.
+    slice: Option<Rect>,
+}
+
 fn run_gtk(
+    ctx: Ctx,
+    mode: OverlayMode,
     tx: mpsc::SyncSender<Result<()>>,
-    initial_passthrough: bool,
     shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+    collected: Arc<Mutex<Vec<PathBuf>>>,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
         .build();
     let tx: ResultSender = Arc::new(Mutex::new(Some(tx)));
 
-    // Wrap the shutdown receiver in a Cell so the activate handler can take ownership the
-    // first time it fires (Application::connect_activate is Fn, not FnOnce).
+    // `connect_activate` is Fn, so we wrap moveable state in interior-mutability cells that the
+    // first activation drains.
     let shutdown_cell: Rc<RefCell<Option<tokio::sync::oneshot::Receiver<()>>>> =
         Rc::new(RefCell::new(shutdown));
+    let mode_cell: Rc<RefCell<Option<OverlayMode>>> = Rc::new(RefCell::new(Some(mode)));
+    let collected_cell = collected.clone();
 
     {
         let tx = tx.clone();
         let shutdown_cell = shutdown_cell.clone();
-        app.connect_activate(move |app| match build_overlays(app, initial_passthrough) {
-            Ok(shared) => {
-                if let Some(rx) = shutdown_cell.borrow_mut().take() {
-                    attach_shutdown(&shared, rx);
+        app.connect_activate(move |app| {
+            let Some(mode) = mode_cell.borrow_mut().take() else {
+                return;
+            };
+            match build_overlays(app, ctx.clone(), mode, collected_cell.clone()) {
+                Ok(shared) => {
+                    if let Some(rx) = shutdown_cell.borrow_mut().take() {
+                        attach_shutdown(&shared, rx);
+                    }
                 }
-            }
-            Err(err) => {
-                send_once(&tx, Err(err));
-                app.quit();
+                Err(err) => {
+                    send_once(&tx, Err(err));
+                    app.quit();
+                }
             }
         });
     }
 
     let exit = app.run_with_args::<&str>(&[]);
     let code: i32 = exit.into();
-    // Treat a normal quit (Esc or external shutdown) as success. If the channel still has a
-    // slot, fill it so the caller's recv() doesn't dangle.
+    // Treat a normal quit (Esc / Save / external shutdown) as success. If the channel still has
+    // a slot, fill it so the caller's recv() doesn't dangle.
     send_once(&tx, Ok(()));
     if code != 0 {
         bail!("GTK exited with status {code}");
@@ -115,7 +163,12 @@ fn send_once(tx: &ResultSender, msg: Result<()>) {
     }
 }
 
-fn build_overlays(app: &gtk4::Application, initial_passthrough: bool) -> Result<Shared> {
+fn build_overlays(
+    app: &gtk4::Application,
+    ctx: Ctx,
+    mode: OverlayMode,
+    collected: Arc<Mutex<Vec<PathBuf>>>,
+) -> Result<Shared> {
     crate::ui::style::install();
 
     let display = gdk4::Display::default().ok_or_else(|| anyhow!("no GDK display available"))?;
@@ -125,15 +178,44 @@ fn build_overlays(app: &gtk4::Application, initial_passthrough: bool) -> Result<
         bail!("no monitors reported by GDK");
     }
 
+    let (initial_passthrough, edit) = match mode {
+        OverlayMode::Draw { passthrough } => (passthrough, None),
+        OverlayMode::Edit {
+            base,
+            origin,
+            sinks,
+        } => {
+            // Save closure is built once, shared across every monitor's toolbar. The
+            // `selection_label` populates the `{selection}` token in the filename template.
+            let save = sinks_save_fn(ctx.config.clone(), sinks, "edit", collected);
+            (
+                false,
+                Some(EditState {
+                    base: Arc::new(base),
+                    origin,
+                    save,
+                }),
+            )
+        }
+    };
+
+    let initial_tool = if edit.is_some() {
+        ToolKind::Rect
+    } else {
+        ToolKind::Freehand
+    };
+
     let shared = Shared {
         passthrough: Rc::new(Cell::new(initial_passthrough)),
-        current_tool: Rc::new(Cell::new(ToolKind::Freehand)),
+        current_tool: Rc::new(Cell::new(initial_tool)),
         canvases: Rc::new(RefCell::new(Vec::new())),
         windows: Rc::new(RefCell::new(Vec::new())),
         toolbars: Rc::new(RefCell::new(Vec::new())),
         app_weak: app.downgrade(),
+        edit: edit.map(Rc::new),
     };
 
+    let mut opened_any = false;
     for i in 0..n {
         let Some(obj) = monitors_list.item(i) else {
             continue;
@@ -141,9 +223,23 @@ fn build_overlays(app: &gtk4::Application, initial_passthrough: bool) -> Result<
         let Ok(monitor) = obj.downcast::<gdk4::Monitor>() else {
             continue;
         };
-        spawn_monitor_overlay(app, &monitor, &shared);
+        if spawn_monitor_overlay(app, &monitor, &shared) {
+            opened_any = true;
+        }
+    }
+
+    if !opened_any {
+        bail!("no monitor intersected the requested edit region; nothing to annotate");
     }
     Ok(shared)
+}
+
+/// State that's only present in Edit mode. `Rc`-shared so the per-monitor save handler can
+/// reach it without taking ownership of `Shared`.
+struct EditState {
+    base: Arc<DocumentBase>,
+    origin: (i32, i32),
+    save: SaveFn,
 }
 
 struct Shared {
@@ -155,12 +251,44 @@ struct Shared {
     windows: WindowRegistry,
     toolbars: ToolbarRegistry,
     app_weak: glib::WeakRef<gtk4::Application>,
+    edit: Option<Rc<EditState>>,
 }
 
-fn spawn_monitor_overlay(app: &gtk4::Application, monitor: &gdk4::Monitor, shared: &Shared) {
+/// Build (or skip) one overlay window for a monitor. Returns `true` when a window was opened.
+/// In Edit mode, monitors whose geometry doesn't intersect the captured rect are skipped so
+/// only the relevant displays light up.
+fn spawn_monitor_overlay(
+    app: &gtk4::Application,
+    monitor: &gdk4::Monitor,
+    shared: &Shared,
+) -> bool {
     let geo = monitor.geometry();
     let mon_w = geo.width().max(1);
     let mon_h = geo.height().max(1);
+    let mon_rect = Rect {
+        x: geo.x(),
+        y: geo.y(),
+        w: mon_w as u32,
+        h: mon_h as u32,
+    };
+
+    // Edit-mode bail-out: if this monitor doesn't intersect the captured base, don't open a
+    // window at all (otherwise the user sees a stray transparent overlay grabbing keyboard
+    // focus on monitors that have nothing to annotate).
+    let slice = if let Some(edit) = shared.edit.as_ref() {
+        let base_rect = Rect {
+            x: edit.origin.0,
+            y: edit.origin.1,
+            w: edit.base.width,
+            h: edit.base.height,
+        };
+        match mon_rect.intersect(&base_rect) {
+            Some(s) => Some(s),
+            None => return false,
+        }
+    } else {
+        None
+    };
 
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
@@ -184,25 +312,72 @@ fn spawn_monitor_overlay(app: &gtk4::Application, monitor: &gdk4::Monitor, share
     window.set_default_size(mon_w, mon_h);
 
     let canvas = AnnotationCanvas::new();
-    canvas.set_empty((mon_w as u32, mon_h as u32));
-    canvas.set_transparent(true);
+    if let (Some(edit), Some(slice)) = (shared.edit.as_ref(), slice) {
+        // Slice the unified base into this monitor's portion. The canvas widget is sized to
+        // the monitor's full logical rect (so layer-shell anchoring lines up); inside the
+        // canvas, the document is sized to the slice and rendered at the intra-monitor
+        // offset.
+        let (pixels, sw, sh) = slice_pixels(
+            &edit.base.pixels,
+            edit.base.width,
+            edit.base.height,
+            edit.base.stride,
+            edit.origin,
+            slice,
+        )
+        .expect("slice intersects (checked above)");
+        let slice_base = DocumentBase {
+            pixels: std::sync::Arc::from(pixels.into_boxed_slice()),
+            width: sw,
+            height: sh,
+            stride: sw * 4,
+        };
+        canvas.set_document(Document::with_base(slice_base));
+        canvas.set_transparent(true);
+    } else {
+        canvas.set_empty((mon_w as u32, mon_h as u32));
+        canvas.set_transparent(true);
+    }
     canvas.set_tool(shared.current_tool.get());
 
-    // Floating bottom-center toolbar per monitor. Each monitor gets its own instance, but
-    // actions propagate to every canvas via the `Shared` state, and we mirror state changes
-    // back to the other monitors' toolbars so the UI stays consistent.
-    let toolbar = Toolbar::new(ToolbarSpec {
-        tools: OVERLAY_TOOLS,
-        show_undo: true,
-        show_clear: true,
-        show_passthrough_toggle: true,
-        initial_tool: Some(shared.current_tool.get()),
-        initial_passthrough: shared.passthrough.get(),
-        ..Default::default()
-    });
+    // Edit mode shows the full editor toolset (incl. Blur + Crop) plus a Save button. Draw
+    // mode keeps the slimmer overlay set and adds the passthrough toggle + Clear shortcut.
+    let toolbar = if shared.edit.is_some() {
+        Toolbar::new(ToolbarSpec {
+            tools: EDITOR_TOOLS,
+            show_undo: true,
+            show_save: true,
+            initial_tool: Some(shared.current_tool.get()),
+            ..Default::default()
+        })
+    } else {
+        Toolbar::new(ToolbarSpec {
+            tools: OVERLAY_TOOLS,
+            show_undo: true,
+            show_clear: true,
+            show_passthrough_toggle: true,
+            initial_tool: Some(shared.current_tool.get()),
+            initial_passthrough: shared.passthrough.get(),
+            ..Default::default()
+        })
+    };
     wire_toolbar(&toolbar, shared, &canvas);
 
     let overlay = gtk4::Overlay::new();
+
+    // For Edit mode, anchor the document to its slice's intra-monitor offset so the captured
+    // pixels sit exactly where they were on the user's desktop. The canvas widget itself is
+    // sized to the slice, not the monitor.
+    if let Some(slice) = slice {
+        let offset_x = slice.x - geo.x();
+        let offset_y = slice.y - geo.y();
+        canvas.set_halign(gtk4::Align::Start);
+        canvas.set_valign(gtk4::Align::Start);
+        canvas.set_margin_start(offset_x);
+        canvas.set_margin_top(offset_y);
+        canvas.set_size_request(slice.w as i32, slice.h as i32);
+    }
+
     overlay.set_child(Some(&canvas));
     toolbar.widget().set_halign(gtk4::Align::Center);
     toolbar.widget().set_valign(gtk4::Align::End);
@@ -213,24 +388,32 @@ fn spawn_monitor_overlay(app: &gtk4::Application, monitor: &gdk4::Monitor, share
     install_keys(&window, shared);
     toolbar.install_shortcuts(&window);
 
-    shared.canvases.borrow_mut().push(canvas);
+    shared.canvases.borrow_mut().push(MonitorCanvas {
+        canvas: canvas.clone(),
+        slice,
+    });
     shared.toolbars.borrow_mut().push(toolbar);
     shared.windows.borrow_mut().push(window.clone());
     window.present();
 
     // Apply the initial passthrough state once the GTK surface exists. We can't take the
     // GdkSurface before `present()`, hence the deferred lambda.
-    let passthrough = shared.passthrough.clone();
-    let window_weak = window.downgrade();
-    glib::idle_add_local_once(move || {
-        if let Some(window) = window_weak.upgrade() {
-            apply_passthrough(&window, passthrough.get());
-        }
-    });
+    if shared.edit.is_none() {
+        let passthrough = shared.passthrough.clone();
+        let window_weak = window.downgrade();
+        glib::idle_add_local_once(move || {
+            if let Some(window) = window_weak.upgrade() {
+                apply_passthrough(&window, passthrough.get());
+            }
+        });
+    }
+    true
 }
 
 /// Wire toolbar actions back into the per-overlay shared state. Tool / Clear / Passthrough
-/// propagate across monitors so all toolbars stay in lockstep with the canvases.
+/// propagate across monitors so all toolbars stay in lockstep with the canvases. Save (Edit
+/// mode only) composes every per-monitor canvas, stitches the slices back into a single
+/// buffer at the original base size, fans the result out to sinks, and tears down.
 fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
     let canvases = shared.canvases.clone();
     let windows = shared.windows.clone();
@@ -238,11 +421,13 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
     let passthrough = shared.passthrough.clone();
     let current_tool = shared.current_tool.clone();
     let canvas_weak = canvas.downgrade();
+    let edit = shared.edit.clone();
+    let app_weak = shared.app_weak.clone();
     toolbar.connect(move |action| match action {
         ToolbarAction::ToolSelected(kind) => {
             current_tool.set(kind);
             for c in canvases.borrow().iter() {
-                c.set_tool(kind);
+                c.canvas.set_tool(kind);
             }
             for t in toolbars.borrow().iter() {
                 t.set_tool(kind);
@@ -255,7 +440,7 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
         }
         ToolbarAction::Clear => {
             for c in canvases.borrow().iter() {
-                c.clear_layers();
+                c.canvas.clear_layers();
             }
         }
         ToolbarAction::PassthroughToggled(on) => {
@@ -268,8 +453,77 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             }
             tracing::info!(passthrough = on, "overlay passthrough toggled");
         }
+        ToolbarAction::Save => {
+            let Some(edit) = edit.as_ref() else {
+                return;
+            };
+            match compose_edit(&canvases.borrow(), edit) {
+                Ok(stitched) => match (edit.save)(&stitched) {
+                    Ok(paths) => {
+                        for p in &paths {
+                            println!("{}", p.display());
+                        }
+                        tear_down(&windows, &app_weak);
+                    }
+                    Err(err) => tracing::error!(error = ?err, "save failed"),
+                },
+                Err(err) => tracing::error!(error = ?err, "composing edit failed"),
+            }
+        }
         _ => {}
     });
+}
+
+/// Compose every per-monitor canvas into its slice, then stitch the slices back into a single
+/// `CapturedImage` matching the original `base` rectangle. Strokes that straddle two monitors
+/// are *not* unified — each canvas owns its own layers, so a stroke drawn on monitor A and
+/// continued on monitor B appears as two separate layers in the final image.
+fn compose_edit(canvases: &[MonitorCanvas], edit: &EditState) -> Result<CapturedImage> {
+    let base = &edit.base;
+    let dst_stride = (base.width as usize) * 4;
+    let mut buf = vec![0u8; dst_stride * base.height as usize];
+
+    // Start from the original BGRA-equivalent base so any monitor we didn't touch (or any
+    // pixel a slice didn't cover) still shows the captured pixels. `DocumentBase` is RGBA;
+    // we swizzle to BGRA on the fly to match `encode_png`'s expectations.
+    let src_stride = base.stride as usize;
+    for y in 0..base.height as usize {
+        for x in 0..base.width as usize {
+            let s = y * src_stride + x * 4;
+            let d = y * dst_stride + x * 4;
+            buf[d] = base.pixels[s + 2];
+            buf[d + 1] = base.pixels[s + 1];
+            buf[d + 2] = base.pixels[s];
+            buf[d + 3] = base.pixels[s + 3];
+        }
+    }
+
+    for mc in canvases {
+        let Some(slice) = mc.slice else { continue };
+        let composed = mc
+            .canvas
+            .compose()
+            .map_err(|e| anyhow!("composing per-monitor canvas: {e}"))?;
+        let off_x = (slice.x - edit.origin.0) as usize;
+        let off_y = (slice.y - edit.origin.1) as usize;
+        let copy_w = (composed.width as usize).min(base.width as usize - off_x);
+        let copy_h = (composed.height as usize).min(base.height as usize - off_y);
+        let src_stride = composed.stride as usize;
+        let copy_bytes = copy_w * 4;
+        for y in 0..copy_h {
+            let s = y * src_stride;
+            let d = (off_y + y) * dst_stride + off_x * 4;
+            buf[d..d + copy_bytes].copy_from_slice(&composed.pixels[s..s + copy_bytes]);
+        }
+    }
+
+    Ok(CapturedImage {
+        width: base.width,
+        height: base.height,
+        stride: dst_stride as u32,
+        pixels: std::sync::Arc::from(buf.into_boxed_slice()),
+        source: None,
+    })
 }
 
 /// Window-level keys not owned by the toolbar (Esc to quit).

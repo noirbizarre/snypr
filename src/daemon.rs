@@ -254,7 +254,13 @@ async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response>
     let ctx = ctx.clone();
     let state = state.clone();
     tokio::spawn(async move {
-        if let Err(err) = crate::ui::overlay::run(ctx, false, Some(rx)).await {
+        if let Err(err) = crate::ui::overlay::run(
+            ctx,
+            crate::ui::overlay::OverlayMode::Draw { passthrough: false },
+            Some(rx),
+        )
+        .await
+        {
             tracing::warn!(error = ?err, "overlay task failed");
         }
         // Drop the stored sender so the *next* DrawToggle spawns a fresh overlay instead of

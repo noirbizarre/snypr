@@ -138,13 +138,32 @@ pub async fn execute(
     let stitched = crate::capture::region::stitch(&images, &selection)?;
 
     if edit {
-        // Editor path: hand the stitched RGBA buffer to the annotation canvas in-memory so we
-        // skip a PNG encode + decode round-trip. The editor itself re-encodes on save and fans
-        // the bytes out to whichever sinks the caller supplied.
+        // Editor path: hand the stitched RGBA buffer to the in-place annotation overlay
+        // (one layer-shell window per intersecting monitor) so the user keeps their on-screen
+        // context. Skips a PNG encode + decode round-trip; the overlay re-encodes on save and
+        // fans the bytes out to whichever sinks the caller supplied.
         #[cfg(feature = "ui")]
         {
             let base = base_from_captured(&stitched);
-            return crate::ui::editor::run_with_base(ctx, base, sinks).await;
+            // Where the stitched buffer sits on the virtual desktop. For Region, the stitch
+            // call already cropped to the rect; otherwise the buffer spans the captured
+            // images' bounding box.
+            let origin = match &selection {
+                Selection::Region(r) => (r.x, r.y),
+                _ => crate::capture::region::bbox(&images)
+                    .map(|b| (b.x, b.y))
+                    .unwrap_or((0, 0)),
+            };
+            return crate::ui::overlay::run(
+                ctx,
+                crate::ui::overlay::OverlayMode::Edit {
+                    base,
+                    origin,
+                    sinks,
+                },
+                None,
+            )
+            .await;
         }
         #[cfg(not(feature = "ui"))]
         {

@@ -16,10 +16,19 @@ pub async fn run(args: Args) -> Result<()> {
 
     use crate::config::Config;
     use crate::context::Context;
+    use crate::ui::overlay::{OverlayMode, run as run_overlay};
 
     let config = Config::load_default().context("loading configuration")?;
     let ctx = Context::new(config).await?;
-    crate::ui::overlay::run(ctx, args.passthrough, None).await
+    let _ = run_overlay(
+        ctx,
+        OverlayMode::Draw {
+            passthrough: args.passthrough,
+        },
+        None,
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(not(feature = "ui"))]

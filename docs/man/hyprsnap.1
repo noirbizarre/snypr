@@ -26,7 +26,7 @@ Increase log verbosity (repeatable).
 .SH COMMANDS
 .SS screenshot
 Capture pixels and pipe them to one or more sinks. With \fB\-\-edit\fR the captured image
-is handed to the annotation editor before reaching the sinks.
+is handed to the in-place annotation overlay before reaching the sinks.
 .TP
 .BR \-\-full
 Stitch the bounding box covering every output into a single image.
@@ -51,8 +51,9 @@ Capture an explicit logical-pixel region.
 Open the selector overlay and let the user draw a region.
 .TP
 .BR \-\-edit ", " \-\-annotate
-Open the annotation editor on the captured image before writing to sinks. Incompatible
-with \fB\-\-per\-output\fR.
+Open the in-place annotation overlay on the captured image before writing to sinks. The
+overlay opens one layer-shell window per intersecting monitor so the captured pixels are
+edited where they live on the desktop. Incompatible with \fB\-\-per\-output\fR.
 .TP
 .BR \-\-to " " \fISINK\fR
 Add an output sink. May be passed multiple times. Recognised forms:
@@ -65,7 +66,9 @@ Include the hardware cursor in the capture.
 .BR \-\-delay " " \fIMS\fR
 Wait \fIMS\fR milliseconds before capturing.
 .SS annotate
-Open the annotation editor on an existing image:
+Open the in-place annotation overlay on an existing image. The overlay anchors on the
+focused monitor and writes back to the source path on Ctrl+S (unless \fB\-\-to\fR is
+supplied):
 .RS
 .B hyprsnap annotate
 \fIIMAGE\fR

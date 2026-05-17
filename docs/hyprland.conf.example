@@ -3,7 +3,7 @@
 # Drop this into ~/.config/hypr/hyprland.conf (or `source =` it from there)
 # to get a complete set of screenshot / capture / draw shortcuts.
 
-# Interactive region selector, then annotation editor; saves to file AND clipboard.
+# Interactive region selector, then in-place annotation overlay; saves to file AND clipboard.
 bind = SUPER,        Print, exec, hyprsnap screenshot --edit --to clipboard --to file
 
 # Full desktop, stitched across every output, written to the configured directory.

@@ -1,6 +1,6 @@
 //! Annotation document model, tool trait, and rendering helpers.
 //!
-//! UI integration lives in [`crate::ui::canvas`] and [`crate::ui::editor`]. This module is
+//! UI integration lives in [`crate::ui::canvas`] and [`crate::ui::overlay`]. This module is
 //! kept UI-free so the document model can be unit-tested without GTK.
 
 pub mod render;
