@@ -62,6 +62,12 @@ pub const EDITOR_TOOLS: &[ToolEntry] = &[
         icon: "view-paged-symbolic",
     },
     ToolEntry {
+        kind: ToolKind::Ellipse,
+        label: "Ellipse",
+        key: gdk4::Key::o,
+        icon: "media-record-symbolic",
+    },
+    ToolEntry {
         kind: ToolKind::Arrow,
         label: "Arrow",
         key: gdk4::Key::a,
@@ -120,6 +126,12 @@ pub const OVERLAY_TOOLS: &[ToolEntry] = &[
         key: gdk4::Key::r,
         icon: "edit-select-all-symbolic",
         // icon: "view-paged-symbolic",
+    },
+    ToolEntry {
+        kind: ToolKind::Ellipse,
+        label: "Ellipse",
+        key: gdk4::Key::o,
+        icon: "media-record-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Arrow,
@@ -864,6 +876,7 @@ mod tests {
         let kinds: std::collections::HashSet<_> = EDITOR_TOOLS.iter().map(|e| e.kind).collect();
         for kind in [
             ToolKind::Rect,
+            ToolKind::Ellipse,
             ToolKind::Arrow,
             ToolKind::Highlight,
             ToolKind::Freehand,

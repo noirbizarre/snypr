@@ -7,16 +7,16 @@ A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https:
 HyprSnap pulls together what currently requires three separate tools on a Wayland desktop:
 
 - **Capture** — like [`grim`](https://sr.ht/~emersion/grim/) / [HyprCapture](https://github.com/gfhdhytghd/HyprCapture), but native and integrated.
-- **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, highlight, blur, text, freehand, numbered marker, redact, crop.
+- **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, ellipse, highlight, blur, text, freehand, numbered marker, redact, crop.
 - **Draw live on the screen** — like [Draw-On-Gnome](https://github.com/daveprowse/Draw-On-Gnome) but on wlroots / Hyprland, ideal for streaming and Google Meet presentations.
 
 Screen capture talks the `zwlr_screencopy_manager_v1` Wayland protocol directly; UI is GTK4 with `gtk4-layer-shell`, and the annotation canvas uses GSK render nodes for GPU-accelerated drawing.
 
 ## Status
 
-The four subcommands are wired end-to-end. All nine annotation tools (Rect, Arrow, Highlight,
-Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on screen and
-flatten to PNG through Cairo on save.
+The four subcommands are wired end-to-end. All ten annotation tools (Rect, Ellipse, Arrow,
+Highlight, Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on
+screen and flatten to PNG through Cairo on save.
 
 | Subcommand    | Status                                                                            |
 | ------------- | --------------------------------------------------------------------------------- |
@@ -65,7 +65,7 @@ hyprsnap screenshot --region 100,200,800x600 --to file
 # Interactive region selector → in-place annotation overlay → sinks.
 hyprsnap screenshot --edit --to clipboard --to file
 
-# Live draw-on-screen overlay (R/A/H/F/N/X tools, Ctrl+Z undo, P passthrough, Esc quit).
+# Live draw-on-screen overlay (R/O/A/H/F/N/X tools, Ctrl+Z undo, P passthrough, Esc quit).
 hyprsnap draw
 
 # Run the daemon (IPC server; add `--systray` for a StatusNotifierItem icon).
@@ -90,6 +90,7 @@ Region mode, click on a monitor in Screen mode, then press `Enter` (Capture) or
 | Key      | Action                       |
 | -------- | ---------------------------- |
 | `R`      | Rectangle tool               |
+| `O`      | Ellipse tool                 |
 | `A`      | Arrow tool                   |
 | `H`      | Highlight tool               |
 | `F`      | Freehand tool                |

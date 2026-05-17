@@ -21,6 +21,7 @@ use gtk4::subclass::prelude::*;
 use crate::annotate::render::{arrowhead, drag_rect};
 use crate::annotate::tools::arrow::ArrowTool;
 use crate::annotate::tools::blur::BlurTool;
+use crate::annotate::tools::ellipse::EllipseTool;
 use crate::annotate::tools::freehand::FreehandTool;
 use crate::annotate::tools::highlight::HighlightTool;
 use crate::annotate::tools::number::NumberTool;
@@ -217,6 +218,27 @@ fn rect_path(r: &Rect) -> gsk::Path {
     pb.to_path()
 }
 
+/// Path builder helper for an outlined ellipse inscribed in `r`. GSK exposes
+/// `add_circle` but no native ellipse, so we stitch one out of four cubic Bézier arcs
+/// using the standard 0.5522847 corner constant — accurate to ~0.027 % of the radius.
+fn ellipse_path(r: &Rect) -> gsk::Path {
+    const K: f32 = 0.552_284_8;
+    let cx = r.x as f32 + r.w as f32 / 2.0;
+    let cy = r.y as f32 + r.h as f32 / 2.0;
+    let rx = r.w as f32 / 2.0;
+    let ry = r.h as f32 / 2.0;
+    let ox = rx * K;
+    let oy = ry * K;
+    let pb = gsk::PathBuilder::new();
+    pb.move_to(cx + rx, cy);
+    pb.cubic_to(cx + rx, cy + oy, cx + ox, cy + ry, cx, cy + ry);
+    pb.cubic_to(cx - ox, cy + ry, cx - rx, cy + oy, cx - rx, cy);
+    pb.cubic_to(cx - rx, cy - oy, cx - ox, cy - ry, cx, cy - ry);
+    pb.cubic_to(cx + ox, cy - ry, cx + rx, cy - oy, cx + rx, cy);
+    pb.close();
+    pb.to_path()
+}
+
 fn line_path(from: (f64, f64), to: (f64, f64)) -> gsk::Path {
     let pb = gsk::PathBuilder::new();
     pb.move_to(from.0 as f32, from.1 as f32);
@@ -277,6 +299,15 @@ fn snapshot_tool(
             if let Some(t) = tool.as_any().downcast_ref::<RectTool>() {
                 snap.append_stroke(
                     &rect_path(&t.bounds),
+                    &solid_stroke(t.stroke_width as f64),
+                    &rgba(t.stroke),
+                );
+            }
+        }
+        ToolKind::Ellipse => {
+            if let Some(t) = tool.as_any().downcast_ref::<EllipseTool>() {
+                snap.append_stroke(
+                    &ellipse_path(&t.bounds),
                     &solid_stroke(t.stroke_width as f64),
                     &rgba(t.stroke),
                 );
@@ -403,6 +434,14 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
             let r = drag_rect(p.from, p.to);
             snap.append_stroke(
                 &rect_path(&r),
+                &dashed_stroke(2.0, &[6.0, 4.0]),
+                &rgba([1.0, 0.0, 0.0, 0.85]),
+            );
+        }
+        ToolKind::Ellipse => {
+            let r = drag_rect(p.from, p.to);
+            snap.append_stroke(
+                &ellipse_path(&r),
                 &dashed_stroke(2.0, &[6.0, 4.0]),
                 &rgba([1.0, 0.0, 0.0, 0.85]),
             );
@@ -647,6 +686,12 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     let r = drag_rect(stroke.from, stroke.to);
                     if r.w >= 2 && r.h >= 2 {
                         doc.push_layer(Box::new(RectTool::new(r)));
+                    }
+                }
+                ToolKind::Ellipse => {
+                    let r = drag_rect(stroke.from, stroke.to);
+                    if r.w >= 2 && r.h >= 2 {
+                        doc.push_layer(Box::new(EllipseTool::new(r)));
                     }
                 }
                 ToolKind::Arrow => {

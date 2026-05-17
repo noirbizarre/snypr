@@ -77,6 +77,7 @@ pub trait Tool: std::fmt::Debug + Send + Sync {
 pub enum ToolKind {
     Arrow,
     Rect,
+    Ellipse,
     Text,
     Blur,
     Highlight,
