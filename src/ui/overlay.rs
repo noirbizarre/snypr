@@ -216,7 +216,7 @@ fn build_overlays(
         edit: edit.map(Rc::new),
     };
 
-    let mut opened_any = false;
+    let mut windows = Vec::with_capacity(n as usize);
     for i in 0..n {
         let Some(obj) = monitors_list.item(i) else {
             continue;
@@ -224,13 +224,20 @@ fn build_overlays(
         let Ok(monitor) = obj.downcast::<gdk4::Monitor>() else {
             continue;
         };
-        if spawn_monitor_overlay(app, &monitor, &shared) {
-            opened_any = true;
+        if let Some(w) = spawn_monitor_overlay(app, &monitor, &shared) {
+            windows.push(w);
         }
     }
 
-    if !opened_any {
+    if windows.is_empty() {
         bail!("no monitor intersected the requested edit region; nothing to annotate");
+    }
+    // Two-phase: every per-monitor window is fully built above, so the loop below can
+    // commit the initial Wayland surfaces back-to-back without GTK doing any widget /
+    // pixel-slice work in between. The compositor then maps every layer surface in the
+    // same frame instead of one-monitor-at-a-time staircase pop-in (see §23).
+    for w in &windows {
+        w.present();
     }
     Ok(shared)
 }
@@ -255,14 +262,18 @@ struct Shared {
     edit: Option<Rc<EditState>>,
 }
 
-/// Build (or skip) one overlay window for a monitor. Returns `true` when a window was opened.
-/// In Edit mode, monitors whose geometry doesn't intersect the captured rect are skipped so
-/// only the relevant displays light up.
+/// Build (or skip) one overlay window for a monitor. Returns `Some(window)` when a window
+/// was built, `None` when the monitor should be skipped (Edit mode only: monitor doesn't
+/// intersect the captured rect).
+///
+/// The returned window is fully wired but **not yet presented** — the caller batches the
+/// `present()` calls across all monitors so the compositor maps every layer surface in the
+/// same frame instead of in a staircase (see §23).
 fn spawn_monitor_overlay(
     app: &gtk4::Application,
     monitor: &gdk4::Monitor,
     shared: &Shared,
-) -> bool {
+) -> Option<gtk4::ApplicationWindow> {
     let geo = monitor.geometry();
     let mon_w = geo.width().max(1);
     let mon_h = geo.height().max(1);
@@ -285,7 +296,7 @@ fn spawn_monitor_overlay(
         };
         match mon_rect.intersect(&base_rect) {
             Some(s) => Some(s),
-            None => return false,
+            None => return None,
         }
     } else {
         None
@@ -398,10 +409,10 @@ fn spawn_monitor_overlay(
     });
     shared.toolbars.borrow_mut().push(toolbar);
     shared.windows.borrow_mut().push(window.clone());
-    window.present();
 
     // Apply the initial passthrough state once the GTK surface exists. We can't take the
-    // GdkSurface before `present()`, hence the deferred lambda.
+    // GdkSurface before the caller's batched `present()`, hence the deferred lambda — it
+    // fires on the next main-loop iteration, which always lands after the present pass.
     if shared.edit.is_none() {
         let passthrough = shared.passthrough.clone();
         let window_weak = window.downgrade();
@@ -411,7 +422,7 @@ fn spawn_monitor_overlay(
             }
         });
     }
-    true
+    Some(window)
 }
 
 /// Wire toolbar actions back into the per-overlay shared state. Tool / Clear / Passthrough

@@ -178,6 +178,7 @@ fn build_overlays(app: &gtk4::Application, tx: &Sender, initial_cursor: bool) ->
         initial_cursor,
     };
 
+    let mut windows = Vec::with_capacity(n as usize);
     for i in 0..n {
         let Some(obj) = monitors_list.item(i) else {
             continue;
@@ -190,7 +191,12 @@ fn build_overlays(app: &gtk4::Application, tx: &Sender, initial_cursor: bool) ->
             connector: monitor.connector().map(|s| s.to_string()),
         };
         shared.monitors.borrow_mut().push(info.clone());
-        spawn_monitor_overlay(app, &monitor, info, &shared);
+        windows.push(spawn_monitor_overlay(app, &monitor, info, &shared));
+    }
+    // Two-phase: build every per-monitor selector window above, then commit them in a
+    // tight loop so the compositor maps them in the same frame (see §23).
+    for w in &windows {
+        w.present();
     }
     Ok(())
 }
@@ -200,7 +206,7 @@ fn spawn_monitor_overlay(
     monitor: &gdk4::Monitor,
     info: MonitorInfo,
     shared: &SharedState,
-) {
+) -> gtk4::ApplicationWindow {
     let geo = monitor.geometry();
     let mon_w = geo.width();
     let mon_h = geo.height();
@@ -260,7 +266,7 @@ fn spawn_monitor_overlay(
 
     shared.areas.borrow_mut().push(area.clone());
     shared.windows.borrow_mut().push(window.clone());
-    window.present();
+    window
 }
 
 /// Build a per-monitor floating toolbar and wire its actions back into the shared selection
