@@ -343,19 +343,17 @@ struct ColorPickerUi {
     current: Rc<Cell<gdk4::RGBA>>,
 }
 
-/// Live state for the stroke-style picker. The trigger is a `MenuButton` so the
-/// popover is managed by GTK (no manual `popup()`/`popdown()` plumbing); the
-/// popover hosts three grouped `ToggleButton`s laid out horizontally as a
-/// segmented control — one per [`StrokeStyle`] — each showing a `DrawingArea`
-/// sample of its style. The trigger button's child is a separate small
-/// `DrawingArea` that previews the *currently selected* style, mirroring the
-/// color-picker swatch pattern.
+/// Live state for the stroke-style picker. Three grouped `ToggleButton`s laid
+/// out horizontally as an inline segmented control. We previously used a
+/// `MenuButton` + `Popover` here, but popover children on layer-shell windows
+/// holding `KeyboardMode::Exclusive` don't reliably receive pointer events on
+/// Hyprland — the click was routed as "outside the popover", auto-closing it
+/// without ever reaching the toggles. Inlining the toggles avoids the popup
+/// surface entirely.
 struct StylePickerUi {
-    button: gtk4::MenuButton,
-    /// Sample-line preview drawn with the current style. Redrawn whenever
-    /// [`Toolbar::set_stroke_style`] is called.
-    swatch: gtk4::DrawingArea,
-    current: Rc<Cell<StrokeStyle>>,
+    /// Container holding the three toggle buttons. Used by
+    /// [`Toolbar::set_style_picker_sensitive`] to enable/disable the whole group.
+    container: gtk4::Box,
     /// Three `(style, toggle, handler)` tuples — kept in declaration order so
     /// `set_stroke_style` can flip the right toggle without re-emitting the
     /// `StrokeStyleChanged` action (via `block_signal`).
@@ -571,11 +569,12 @@ impl Toolbar {
         // Stroke-style picker (optional) — sits next to the color picker because it
         // shares the same "modifies the active tool's appearance" semantics.
         //
-        // Unlike the color picker we don't need any layer-shell demotion: the menu is
-        // a popover (a popup surface anchored to the parent layer-shell surface), not
-        // a toplevel, so it receives input correctly even while the toolbar window
-        // holds `KeyboardMode::Exclusive`. That's why we use `MenuButton` + `Popover`
-        // here rather than a custom dialog like `ColorDialog`.
+        // Three grouped `ToggleButton`s in a horizontal `linked` Box, inlined directly
+        // into the toolbar (no popover). Popovers on layer-shell parents holding
+        // `KeyboardMode::Exclusive` proved unreliable on Hyprland: clicks on popover
+        // children were sometimes routed as "outside the popover", auto-closing it
+        // without ever dispatching to the toggle. Inlining removes the popup surface
+        // entirely and is also one fewer click to change style.
         let style = if spec.show_style_picker {
             // Separator only if we didn't already add one for the color picker (the
             // color picker emits its own leading separator when tools precede it).
@@ -583,44 +582,16 @@ impl Toolbar {
                 widget.append(&separator());
             }
 
-            let current = Rc::new(Cell::new(StrokeStyle::Solid));
-
-            // Sample-line preview, sized to match the color swatch (16×16) for visual
-            // uniformity in the toolbar.
-            let swatch = gtk4::DrawingArea::new();
-            swatch.set_content_width(20);
-            swatch.set_content_height(16);
-            swatch.set_size_request(20, 16);
-            swatch.set_halign(gtk4::Align::Center);
-            swatch.set_valign(gtk4::Align::Center);
-            swatch.set_hexpand(false);
-            swatch.set_vexpand(false);
-            let current_for_draw = current.clone();
-            swatch.set_draw_func(move |_, cr, w, h| {
-                draw_style_swatch(cr, w as f64, h as f64, current_for_draw.get());
-            });
-
-            let popover = gtk4::Popover::new();
-            popover.set_has_arrow(true);
-            // Three toggles laid out horizontally, given the `linked` style class so the
-            // theme renders them as a segmented control. The group makes the toggles
-            // mutually exclusive — clicking one auto-deactivates the others, which also
-            // triggers their `toggled` signals (handled with an early-return on the
-            // de-activated transition below).
-            let popover_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-            popover_box.add_css_class("linked");
-            popover_box.set_margin_top(4);
-            popover_box.set_margin_bottom(4);
-            popover_box.set_margin_start(4);
-            popover_box.set_margin_end(4);
+            let container = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            container.add_css_class("linked");
 
             let mut toggles: Vec<(StrokeStyle, gtk4::ToggleButton, glib::SignalHandlerId)> =
                 Vec::new();
             let mut toggle_group: Option<gtk4::ToggleButton> = None;
             for (style, tooltip) in [
-                (StrokeStyle::Solid, "Solid"),
-                (StrokeStyle::Dashed, "Dashed"),
-                (StrokeStyle::Dotted, "Dotted"),
+                (StrokeStyle::Solid, "Solid stroke"),
+                (StrokeStyle::Dashed, "Dashed stroke"),
+                (StrokeStyle::Dotted, "Dotted stroke"),
             ] {
                 let toggle = gtk4::ToggleButton::new();
                 let sample = gtk4::DrawingArea::new();
@@ -642,41 +613,23 @@ impl Toolbar {
                     toggle.set_active(true);
                 }
                 let cb = callback.clone();
-                let current_for_toggle = current.clone();
-                let swatch_for_toggle = swatch.clone();
-                let popover_for_toggle = popover.clone();
                 let id = toggle.connect_toggled(move |t| {
-                    // GtkToggleButton's group semantics fire `toggled` on both the newly
+                    // GtkToggleButton group semantics fire `toggled` on both the newly
                     // deactivated and newly activated buttons; only react to activation
                     // so we don't emit a spurious `StrokeStyleChanged` for the old style.
                     if !t.is_active() {
                         return;
                     }
-                    current_for_toggle.set(style);
-                    swatch_for_toggle.queue_draw();
-                    popover_for_toggle.popdown();
                     if let Some(f) = cb.borrow().as_ref() {
                         f(ToolbarAction::StrokeStyleChanged(style));
                     }
                 });
-                popover_box.append(&toggle);
+                container.append(&toggle);
                 toggles.push((style, toggle, id));
             }
-            popover.set_child(Some(&popover_box));
 
-            let btn = gtk4::MenuButton::new();
-            btn.set_child(Some(&swatch));
-            btn.set_popover(Some(&popover));
-            btn.set_tooltip_text(Some("Stroke style"));
-            make_unfocusable(&btn);
-            widget.append(&btn);
-
-            Some(StylePickerUi {
-                button: btn,
-                swatch,
-                current,
-                toggles,
-            })
+            widget.append(&container);
+            Some(StylePickerUi { container, toggles })
         } else {
             None
         };
@@ -995,7 +948,7 @@ impl Toolbar {
         }
     }
 
-    /// Update the style-picker toggles + swatch without firing `StrokeStyleChanged`.
+    /// Update the style-picker toggles without firing `StrokeStyleChanged`.
     /// Used by external state changes (e.g. selecting a different tool) so the
     /// picker always reflects the active tool's stored style.
     ///
@@ -1004,13 +957,9 @@ impl Toolbar {
     /// `toggled` signals on peers) can't trigger a spurious
     /// `StrokeStyleChanged` callback. We then activate only the matching toggle —
     /// GTK auto-deactivates the others via the group, but those side-effects are
-    /// silenced by the blocked handlers. A previous version of this method called
-    /// `set_active(false)` then `set_active(true)` per toggle which could leave the
-    /// group temporarily with zero active toggles and not always recover.
+    /// silenced by the blocked handlers.
     pub fn set_stroke_style(&self, style: StrokeStyle) {
         if let Some(ui) = &self.state.style {
-            ui.current.set(style);
-            ui.swatch.queue_draw();
             for (_, toggle, id) in &ui.toggles {
                 toggle.block_signal(id);
             }
@@ -1023,12 +972,12 @@ impl Toolbar {
         }
     }
 
-    /// Enable or disable the style-picker button (mirrors
+    /// Enable or disable the entire style-picker segmented control (mirrors
     /// [`Self::set_color_picker_sensitive`] for tools whose stroke style is
     /// hardcoded — Highlight / Number / Text / Blur / Crop / Redact).
     pub fn set_style_picker_sensitive(&self, sensitive: bool) {
         if let Some(ui) = &self.state.style {
-            ui.button.set_sensitive(sensitive);
+            ui.container.set_sensitive(sensitive);
         }
     }
 
