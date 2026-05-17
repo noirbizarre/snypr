@@ -130,6 +130,9 @@ directory          = "/home/me/Pictures/Screenshots"
 filename_template  = "hyprsnap_{date}_{time}_{output}.png"
 default_sinks      = ["file", "clipboard"]
 use_utc            = false
+# PNG compression preset: "fast" (largest, fastest), "balanced" (default), or "best"
+# (smallest, ~10x slower than fast). Balanced typically halves file size vs fast.
+compression        = "balanced"
 
 [capture]
 cursor = false

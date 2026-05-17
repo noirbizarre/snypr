@@ -111,7 +111,7 @@ pub async fn execute(
                 selection: Some("output"),
             };
             let outputs = Outputs::from_specs_per_output(&sinks, &ctx.config, &ctx_fname)?;
-            let png = crate::output::encode_png(img)?;
+            let png = crate::output::encode_png(img, ctx.config.output.compression)?;
             let paths = outputs.write_png(&png).await?;
             all_paths.extend(paths);
         }
@@ -124,7 +124,7 @@ pub async fn execute(
         selection: Some(selection_label(&selection)),
     };
     let outputs = Outputs::from_specs(&sinks, &ctx.config, &ctx_fname)?;
-    let png = crate::output::encode_png(&stitched)?;
+    let png = crate::output::encode_png(&stitched, ctx.config.output.compression)?;
     let paths = outputs.write_png(&png).await?;
     Ok(paths)
 }

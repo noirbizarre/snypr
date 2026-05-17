@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::capture::CapturedImage;
 use crate::cli::SinkSpec;
-use crate::config::{Config, FilenameContext};
+use crate::config::{Config, FilenameContext, PngCompression};
 
 #[async_trait]
 pub trait OutputSink: Send + Sync {
@@ -85,8 +85,9 @@ impl Outputs {
     }
 }
 
-/// Encode a `CapturedImage` to PNG bytes (BGRA → RGBA swizzle).
-pub fn encode_png(img: &CapturedImage) -> Result<Vec<u8>> {
+/// Encode a `CapturedImage` to PNG bytes (BGRA → RGBA swizzle) using the supplied
+/// compression preset. See [`PngCompression`] for the speed/size trade-offs.
+pub fn encode_png(img: &CapturedImage, compression: PngCompression) -> Result<Vec<u8>> {
     let width = img.width as usize;
     let height = img.height as usize;
     let row_bytes = width * 4;
@@ -128,12 +129,18 @@ pub fn encode_png(img: &CapturedImage) -> Result<Vec<u8>> {
     {
         use image::codecs::png::{CompressionType, FilterType, PngEncoder};
         use image::{ExtendedColorType, ImageEncoder};
-        // `NoFilter` skips per-row filter heuristics that would otherwise scan every byte
-        // five times; combined with `CompressionType::Fast` this brings a 19 MP screenshot
-        // encode to sub-second territory in release builds, ~1-2 s in dev (provided the
-        // image/png/miniz_oxide packages are built at -O3 via [profile.dev.package.*]).
-        let encoder =
-            PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::NoFilter);
+        // Trade-off picked by the config preset. `Fast` skips per-row filter heuristics and
+        // uses the lowest deflate level — the original behaviour, fastest but largest. The
+        // other presets let miniz_oxide pick filters/levels for substantially smaller files
+        // at the cost of more CPU. Even `Best` typically encodes a 4K screenshot in a few
+        // seconds in release builds (the image/png/miniz_oxide packages are built at -O3 via
+        // `[profile.dev.package.*]` so dev builds stay tolerable too).
+        let (ctype, ftype) = match compression {
+            PngCompression::Fast => (CompressionType::Fast, FilterType::NoFilter),
+            PngCompression::Balanced => (CompressionType::Default, FilterType::Adaptive),
+            PngCompression::Best => (CompressionType::Best, FilterType::Adaptive),
+        };
+        let encoder = PngEncoder::new_with_quality(&mut out, ctype, ftype);
         encoder
             .write_image(&rgba, img.width, img.height, ExtendedColorType::Rgba8)
             .context("encoding PNG")?;
@@ -160,7 +167,37 @@ mod tests {
 
     #[test]
     fn encodes_png_with_correct_header() {
-        let png = encode_png(&pixel_image()).unwrap();
+        let png = encode_png(&pixel_image(), PngCompression::Fast).unwrap();
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    #[test]
+    fn balanced_is_smaller_than_fast() {
+        // A 256x256 gradient compresses very differently across presets.
+        let mut pixels = vec![0u8; 256 * 256 * 4];
+        for y in 0..256u32 {
+            for x in 0..256u32 {
+                let i = ((y * 256 + x) * 4) as usize;
+                pixels[i] = x as u8; // B
+                pixels[i + 1] = y as u8; // G
+                pixels[i + 2] = ((x + y) / 2) as u8; // R
+                pixels[i + 3] = 0xFF;
+            }
+        }
+        let img = CapturedImage {
+            width: 256,
+            height: 256,
+            stride: 256 * 4,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+            source: None,
+        };
+        let fast = encode_png(&img, PngCompression::Fast).unwrap();
+        let balanced = encode_png(&img, PngCompression::Balanced).unwrap();
+        assert!(
+            balanced.len() < fast.len(),
+            "balanced ({}) should be smaller than fast ({})",
+            balanced.len(),
+            fast.len()
+        );
     }
 }

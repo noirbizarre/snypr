@@ -46,7 +46,7 @@ pub async fn run_standalone(ctx: Ctx, image: PathBuf, sinks: Vec<SinkSpec>) -> R
     // XDG dirs or template expansion.
     let save_path = resolve_save_path(&ctx.config, &sinks, &image)?;
     let title = format!("HyprSnap — annotate ({})", save_path.display());
-    let save = path_save_fn(save_path);
+    let save = path_save_fn(save_path, ctx.config.output.compression);
 
     let setup = EditorSetup { base, title, save };
     tokio::task::spawn_blocking(move || run_gtk(setup))
@@ -107,9 +107,9 @@ fn resolve_save_path(
 }
 
 /// Build a synchronous save closure that writes the composed PNG to a fixed path.
-fn path_save_fn(path: PathBuf) -> SaveFn {
+fn path_save_fn(path: PathBuf, compression: crate::config::PngCompression) -> SaveFn {
     Arc::new(move |img: &CapturedImage| {
-        let png = crate::output::encode_png(img)?;
+        let png = crate::output::encode_png(img, compression)?;
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -138,7 +138,7 @@ fn sinks_save_fn(
         sinks
     };
     Arc::new(move |img: &CapturedImage| {
-        let png = crate::output::encode_png(img)?;
+        let png = crate::output::encode_png(img, config.output.compression)?;
         let ctx = FilenameContext {
             output: img.source.as_ref().map(|o| o.name.as_str()),
             selection: Some("capture"),

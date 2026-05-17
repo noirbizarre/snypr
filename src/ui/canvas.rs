@@ -170,10 +170,11 @@ impl AnnotationCanvas {
         })
     }
 
-    /// Convenience: compose + PNG-encode the document in one go.
-    pub fn compose_png(&self) -> Result<Vec<u8>> {
+    /// Convenience: compose + PNG-encode the document in one go using the supplied
+    /// compression preset.
+    pub fn compose_png(&self, compression: crate::config::PngCompression) -> Result<Vec<u8>> {
         let img = self.compose()?;
-        crate::output::encode_png(&img)
+        crate::output::encode_png(&img, compression)
     }
 }
 

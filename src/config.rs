@@ -29,6 +29,26 @@ pub struct OutputConfig {
     pub default_sinks: Vec<String>,
     /// Use UTC instead of the local timezone in `{ts}`, `{date}`, `{time}`.
     pub use_utc: bool,
+    /// PNG compression preset. Trades encode time for file size.
+    pub compression: PngCompression,
+}
+
+/// PNG encoder preset. Maps to `(image::codecs::png::CompressionType, FilterType)` in
+/// [`crate::output::encode_png`].
+///
+/// * `Fast` — `CompressionType::Fast` + `FilterType::NoFilter`. ~5x larger files than `Best`
+///   but encodes a 4K screenshot in well under a second. Original default.
+/// * `Balanced` — `CompressionType::Default` + `FilterType::Adaptive`. ~30-50% smaller than
+///   `Fast` for typical screenshots; encode time ~3-4x slower. Sensible all-rounder.
+/// * `Best` — `CompressionType::Best` + `FilterType::Adaptive`. Smallest files miniz_oxide
+///   can produce without invoking zopfli; ~10x slower than `Fast`.
+#[derive(Debug, Default, Copy, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PngCompression {
+    Fast,
+    #[default]
+    Balanced,
+    Best,
 }
 
 impl Default for OutputConfig {
@@ -38,6 +58,7 @@ impl Default for OutputConfig {
             filename_template: "hyprsnap_{ts}.png".to_owned(),
             default_sinks: vec!["file".to_owned()],
             use_utc: false,
+            compression: PngCompression::default(),
         }
     }
 }
