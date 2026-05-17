@@ -290,9 +290,14 @@ async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response>
     let ctx = ctx.clone();
     let state = state.clone();
     tokio::spawn(async move {
+        let sinks = ctx.config.default_sinks();
         if let Err(err) = crate::ui::overlay::run(
             ctx,
-            crate::ui::overlay::OverlayMode::Draw { passthrough: false },
+            crate::ui::overlay::OverlayMode::Draw {
+                passthrough: false,
+                sinks,
+                cursor: false,
+            },
             Some(shutdown_rx),
             Some(cmd_rx),
         )

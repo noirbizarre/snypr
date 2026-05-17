@@ -3,6 +3,8 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
+use super::SinkSpec;
+
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Open the overlay with input passthrough enabled (clicks fall through).
@@ -16,6 +18,18 @@ pub struct Args {
     /// keyboard).
     #[arg(long, conflicts_with = "passthrough", requires = "via_daemon")]
     pub toggle_passthrough: bool,
+
+    /// Sink(s) to receive the image when the user presses Ctrl+S / Save in the overlay.
+    /// Repeatable. When empty, falls back to `[output].sinks` from the config — same shape
+    /// as `screenshot`'s `--to`.
+    #[arg(long = "to", value_name = "SINK")]
+    pub to: Vec<SinkSpec>,
+
+    /// Include the mouse cursor in captures triggered by the overlay's Save action. The
+    /// zone selector that pops on Save can still toggle this per-save via its own cursor
+    /// button.
+    #[arg(long)]
+    pub cursor: bool,
 
     /// Route the command through a running daemon instead of running locally.
     #[arg(long)]
@@ -36,6 +50,8 @@ pub async fn run(args: Args) -> Result<()> {
         ctx,
         OverlayMode::Draw {
             passthrough: args.passthrough,
+            sinks: args.to,
+            cursor: args.cursor,
         },
         None,
         None,

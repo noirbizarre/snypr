@@ -43,6 +43,13 @@ pub enum OverlayMode {
     Draw {
         /// Open the overlay with pointer passthrough enabled (clicks fall through).
         passthrough: bool,
+        /// Sink(s) to receive the saved image when the user presses Ctrl+S / Save. An empty
+        /// vec means "use `config.default_sinks()`" — same fallback as `screenshot`.
+        sinks: Vec<SinkSpec>,
+        /// Include the mouse cursor in captures triggered by the overlay's Save action. The
+        /// interactive zone selector pop on Save can override this per-save via its own
+        /// toggle.
+        cursor: bool,
     },
     /// In-place annotation editor for a captured (or loaded) image. The overlay's per-monitor
     /// canvases each render the slice of `base` that falls inside their monitor, the toolbar
@@ -222,7 +229,11 @@ fn build_overlays(
     }
 
     let (initial_passthrough, edit) = match mode {
-        OverlayMode::Draw { passthrough } => (passthrough, None),
+        OverlayMode::Draw {
+            passthrough,
+            sinks: _,
+            cursor: _,
+        } => (passthrough, None),
         OverlayMode::Edit {
             base,
             origin,
