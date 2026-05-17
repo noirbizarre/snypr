@@ -229,6 +229,12 @@ src/
 └── config.rs    # TOML configuration
 ```
 
+## Acknowledgements
+
+Toolbar icons are sourced from the GNOME [icon-development-kit](https://gitlab.gnome.org/Teams/Design/icon-development-kit)
+and bundled under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
+See `data/icons/LICENSE.md` for details.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
