@@ -12,7 +12,7 @@ name = "hyprsnap"
 path = "src/main.rs"
 
 [features]
-default = ["ui", "tray"]
+default = ["ui", "tray", "notify"]
 ui = [
     "dep:gtk4",
     "dep:gdk4",
@@ -24,6 +24,9 @@ ui = [
     "dep:pango",
 ]
 tray = ["ui", "dep:ksni"]
+# Emit a desktop notification when hyprsnap exits with an error. Useful when launched from a
+# Hyprland keybind where stderr is detached.
+notify = ["dep:notify-rust"]
 # Reserved for tests that require a live Wayland compositor.
 integration-wayland = []
 
@@ -93,6 +96,9 @@ pango = { version = "0.22", optional = true }
 
 # Tray (optional)
 ksni = { version = "0.3", optional = true }
+
+# Desktop notifications (optional via `notify` feature)
+notify-rust = { version = "4", optional = true }
 
 [dev-dependencies]
 rstest = "0.23"
