@@ -19,7 +19,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 use gtk4::glib;
@@ -52,19 +52,54 @@ pub struct SelectorOutcome {
 
 /// Show the selector and return the chosen selection + cursor toggle. The toolbar's cursor
 /// toggle is seeded from `initial_cursor`.
+///
+/// Standalone entry point: stands up a private `gtk4::Application`, drives its main loop on a
+/// blocking thread, and tears the app down on commit / cancel. Use this from CLI flows that
+/// own the process. From inside an already-running overlay (e.g. the draw overlay's Save
+/// action), call [`pick_region_in_app`] instead so we don't try to spin up a second GTK app.
 pub async fn pick_region(_ctx: Ctx, initial_cursor: bool) -> Result<SelectorOutcome> {
-    let (tx, rx) = mpsc::sync_channel::<Result<SelectorOutcome>>(1);
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     tokio::task::spawn_blocking(move || run_gtk(tx, initial_cursor))
         .await
         .map_err(|e| anyhow!("selector task panicked: {e}"))??;
     let result = rx
-        .recv()
+        .await
         .map_err(|e| anyhow!("selector channel closed without a result: {e}"))?;
     if result.is_ok() {
         // Overlays are destroyed + flushed synchronously inside `commit()`, but Hyprland still
         // processes the unmap on its own event loop. A short grace window avoids the dimmed
         // veil leaking into the wlr-screencopy frame.
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    result
+}
+
+/// Embeddable entry point: build the selector inside an existing `gtk4::Application` and
+/// resolve when the user commits or cancels. The selector destroys its own per-monitor
+/// windows on resolve but does **not** call `app.quit()` — the caller's app keeps running so
+/// any sibling overlays (e.g. the draw overlay) stay alive.
+///
+/// Must be called from the GTK main context (typically via `glib::MainContext::spawn_local`).
+/// The 30 ms post-commit grace is honored here too so callers can immediately invoke
+/// `zwlr_screencopy` without the selector's dim veil leaking into the captured frame.
+pub async fn pick_region_in_app(
+    app: &gtk4::Application,
+    initial_cursor: bool,
+) -> Result<SelectorOutcome> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
+    let tx: Sender = Arc::new(Mutex::new(Some(tx)));
+    // Empty WeakRef → commit/cancel's `app.upgrade()` returns None → no `app.quit()` fires
+    // against the caller's app. Windows are still parented to `app` (required by GTK), but
+    // they're destroyed by `dismiss_overlays` so they don't keep the app alive on their own.
+    let quit_target: glib::WeakRef<gtk4::Application> = glib::WeakRef::new();
+    if let Err(err) = build_overlays(app, &tx, initial_cursor, quit_target) {
+        send_once(&tx, Err(err));
+    }
+    let result = rx
+        .await
+        .map_err(|e| anyhow!("selector channel closed without a result: {e}"))?;
+    if result.is_ok() {
+        glib::timeout_future(std::time::Duration::from_millis(30)).await;
     }
     result
 }
@@ -108,7 +143,7 @@ impl SharedSelection {
 }
 
 type SelectionCell = Rc<RefCell<SharedSelection>>;
-type Sender = Arc<Mutex<Option<mpsc::SyncSender<Result<SelectorOutcome>>>>>;
+type Sender = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<SelectorOutcome>>>>>;
 type AreaRegistry = Rc<RefCell<Vec<SelectorOverlay>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 type MonitorList = Rc<RefCell<Vec<MonitorInfo>>>;
@@ -128,7 +163,10 @@ fn redraw_all(areas: &AreaRegistry) {
     }
 }
 
-fn run_gtk(tx: mpsc::SyncSender<Result<SelectorOutcome>>, initial_cursor: bool) -> Result<()> {
+fn run_gtk(
+    tx: tokio::sync::oneshot::Sender<Result<SelectorOutcome>>,
+    initial_cursor: bool,
+) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
         .build();
@@ -137,7 +175,12 @@ fn run_gtk(tx: mpsc::SyncSender<Result<SelectorOutcome>>, initial_cursor: bool) 
     {
         let tx = tx.clone();
         app.connect_activate(move |app| {
-            if let Err(err) = build_overlays(app, &tx, initial_cursor) {
+            // Standalone: pass `app.downgrade()` as the quit target so commit / cancel tear
+            // down the private app once the user finishes (or escapes). The embeddable
+            // `pick_region_in_app` path passes an empty WeakRef to leave the caller's app
+            // alone.
+            let quit_target = app.downgrade();
+            if let Err(err) = build_overlays(app, &tx, initial_cursor, quit_target) {
                 send_once(&tx, Err(err));
                 app.quit();
             }
@@ -153,7 +196,12 @@ fn run_gtk(tx: mpsc::SyncSender<Result<SelectorOutcome>>, initial_cursor: bool) 
     Ok(())
 }
 
-fn build_overlays(app: &gtk4::Application, tx: &Sender, initial_cursor: bool) -> Result<()> {
+fn build_overlays(
+    app: &gtk4::Application,
+    tx: &Sender,
+    initial_cursor: bool,
+    quit_target: glib::WeakRef<gtk4::Application>,
+) -> Result<()> {
     crate::ui::style::install();
 
     let display = gdk4::Display::default().ok_or_else(|| anyhow!("no GDK display available"))?;
@@ -173,7 +221,7 @@ fn build_overlays(app: &gtk4::Application, tx: &Sender, initial_cursor: bool) ->
         windows: Rc::new(RefCell::new(Vec::new())),
         monitors: Rc::new(RefCell::new(Vec::new())),
         tx: tx.clone(),
-        app_weak: app.downgrade(),
+        app_weak: quit_target,
         toolbars: Rc::new(RefCell::new(Vec::new())),
         initial_cursor,
     };
@@ -351,6 +399,9 @@ struct SharedState {
     windows: WindowRegistry,
     monitors: MonitorList,
     tx: Sender,
+    /// Target of `app.quit()` from `commit` / `cancel`. Set to `app.downgrade()` by the
+    /// standalone path (`pick_region`), kept empty by the embeddable path
+    /// (`pick_region_in_app`) so the caller's app keeps running after the selector resolves.
     app_weak: glib::WeakRef<gtk4::Application>,
     toolbars: ToolbarRegistry,
     initial_cursor: bool,
