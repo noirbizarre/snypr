@@ -1,4 +1,6 @@
-# HyprSnap
+<p align="center">
+  <img src="docs/logo-text.png" alt="HyprSnap" />
+</p>
 
 A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https://hyprland.org/).
 
