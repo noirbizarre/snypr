@@ -100,6 +100,9 @@ ksni = { version = "0.3", optional = true }
 # Desktop notifications (optional via `notify` feature)
 notify-rust = { version = "4", optional = true }
 
+[build-dependencies]
+glib-build-tools = "0.22"
+
 [dev-dependencies]
 rstest = "0.23"
 pretty_assertions = "1"

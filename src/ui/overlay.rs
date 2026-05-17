@@ -143,6 +143,7 @@ fn run_gtk(
         let shutdown_cell = shutdown_cell.clone();
         let commands_cell = commands_cell.clone();
         app.connect_activate(move |app| {
+            crate::ui::install_icon_resources();
             let Some(mode) = mode_cell.borrow_mut().take() else {
                 return;
             };

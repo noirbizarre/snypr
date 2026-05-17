@@ -175,6 +175,7 @@ fn run_gtk(
     {
         let tx = tx.clone();
         app.connect_activate(move |app| {
+            crate::ui::install_icon_resources();
             // Standalone: pass `app.downgrade()` as the quit target so commit / cancel tear
             // down the private app once the user finishes (or escapes). The embeddable
             // `pick_region_in_app` path passes an empty WeakRef to leave the caller's app
