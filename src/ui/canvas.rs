@@ -30,7 +30,7 @@ use crate::annotate::tools::number::NumberTool;
 use crate::annotate::tools::rect::RectTool;
 use crate::annotate::tools::redact::RedactTool;
 use crate::annotate::tools::text::TextTool;
-use crate::annotate::{Document, DocumentBase, Tool, ToolKind};
+use crate::annotate::{Document, DocumentBase, StrokeStyle, Tool, ToolKind};
 use crate::capture::CapturedImage;
 use crate::capture::region::Rect;
 
@@ -78,6 +78,19 @@ impl AnnotationCanvas {
     /// only affects subsequent drags / clicks that produce a fresh tool instance.
     pub fn set_tool_color(&self, kind: ToolKind, color: [f32; 4]) {
         self.imp().tool_colors.borrow_mut().insert(kind, color);
+    }
+
+    /// Stroke dash style the given tool should use on the next drag commit. Returns
+    /// `None` for tools whose appearance isn't outline-driven (Highlight, Number,
+    /// Text, Blur, Crop, Redact) so the toolbar can disable its style picker for them.
+    pub fn tool_style(&self, kind: ToolKind) -> Option<StrokeStyle> {
+        self.imp().tool_styles.borrow().get(&kind).copied()
+    }
+
+    /// Override the stroke style stored for `kind`. Same persistence model as
+    /// [`Self::set_tool_color`] — affects future drags only, not committed layers.
+    pub fn set_tool_style(&self, kind: ToolKind, style: StrokeStyle) {
+        self.imp().tool_styles.borrow_mut().insert(kind, style);
     }
 
     /// Render with a transparent background when no base image is loaded. The annotation editor
@@ -302,6 +315,31 @@ fn dashed_stroke(width: f64, dash: &[f32]) -> gsk::Stroke {
     s
 }
 
+/// Build a `gsk::Stroke` honouring a [`StrokeStyle`].
+///
+/// * `Solid` skips dashing entirely.
+/// * `Dashed` uses width-relative on/off lengths (3w on, 2w off) so thick lines stay
+///   visually proportional rather than turning into a continuous line.
+/// * `Dotted` uses a `[0.0, gap]` dash pattern combined with the underlying round line
+///   cap: a 0-length segment with round caps rasterises as a single round dot, repeated
+///   every `gap`. The cap radius equals half the stroke width, so dot-to-dot spacing of
+///   `2w` reads as roughly equal-sized dots and gaps.
+fn styled_stroke(width: f64, style: StrokeStyle) -> gsk::Stroke {
+    let s = solid_stroke(width);
+    match style {
+        StrokeStyle::Solid => {}
+        StrokeStyle::Dashed => {
+            let w = width as f32;
+            s.set_dash(&[w * 3.0, w * 2.0]);
+        }
+        StrokeStyle::Dotted => {
+            let w = width as f32;
+            s.set_dash(&[0.0, w * 2.0]);
+        }
+    }
+    s
+}
+
 /// Append a committed [`Tool`] layer to the snapshot.
 fn snapshot_tool(
     snap: &gtk4::Snapshot,
@@ -314,7 +352,7 @@ fn snapshot_tool(
             if let Some(t) = tool.as_any().downcast_ref::<RectTool>() {
                 snap.append_stroke(
                     &rect_path(&t.bounds),
-                    &solid_stroke(t.stroke_width as f64),
+                    &styled_stroke(t.stroke_width as f64, t.stroke_style),
                     &rgba(t.stroke),
                 );
             }
@@ -323,7 +361,7 @@ fn snapshot_tool(
             if let Some(t) = tool.as_any().downcast_ref::<EllipseTool>() {
                 snap.append_stroke(
                     &ellipse_path(&t.bounds),
-                    &solid_stroke(t.stroke_width as f64),
+                    &styled_stroke(t.stroke_width as f64, t.stroke_style),
                     &rgba(t.stroke),
                 );
             }
@@ -331,9 +369,11 @@ fn snapshot_tool(
         ToolKind::Arrow => {
             if let Some(t) = tool.as_any().downcast_ref::<ArrowTool>() {
                 let color = rgba(t.stroke);
+                // Only the shaft honours `stroke_style`; the arrowhead always renders solid
+                // so a dashed/dotted arrow still terminates in a recognisable pointer.
                 snap.append_stroke(
                     &line_path(t.from, t.to),
-                    &solid_stroke(t.stroke_width as f64),
+                    &styled_stroke(t.stroke_width as f64, t.stroke_style),
                     &color,
                 );
                 let head = (t.stroke_width as f64 * 5.0).max(10.0);
@@ -348,7 +388,7 @@ fn snapshot_tool(
             if let Some(t) = tool.as_any().downcast_ref::<LineTool>() {
                 snap.append_stroke(
                     &line_path(t.from, t.to),
-                    &solid_stroke(t.stroke_width as f64),
+                    &styled_stroke(t.stroke_width as f64, t.stroke_style),
                     &rgba(t.stroke),
                 );
             }
@@ -362,7 +402,11 @@ fn snapshot_tool(
             if let Some(t) = tool.as_any().downcast_ref::<FreehandTool>()
                 && let Some(path) = polyline_path(&t.points)
             {
-                snap.append_stroke(&path, &solid_stroke(t.stroke_width as f64), &rgba(t.stroke));
+                snap.append_stroke(
+                    &path,
+                    &styled_stroke(t.stroke_width as f64, t.stroke_style),
+                    &rgba(t.stroke),
+                );
             }
         }
         ToolKind::Redact => {
@@ -456,6 +500,8 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
     match p.kind {
         ToolKind::Rect => {
             let r = drag_rect(p.from, p.to);
+            // Drag previews always use a marquee-style dash so the user can distinguish a
+            // live drag from a committed layer regardless of the tool's chosen style.
             snap.append_stroke(
                 &rect_path(&r),
                 &dashed_stroke(2.0, &[6.0, 4.0]),
@@ -472,7 +518,11 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
         }
         ToolKind::Arrow => {
             let color = rgba(p.color);
-            snap.append_stroke(&line_path(p.from, p.to), &solid_stroke(3.0), &color);
+            snap.append_stroke(
+                &line_path(p.from, p.to),
+                &styled_stroke(3.0, p.style),
+                &color,
+            );
             snap.append_fill(
                 &arrowhead_path(p.from, p.to, 15.0),
                 gsk::FillRule::Winding,
@@ -480,7 +530,11 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
             );
         }
         ToolKind::Line => {
-            snap.append_stroke(&line_path(p.from, p.to), &solid_stroke(3.0), &rgba(p.color));
+            snap.append_stroke(
+                &line_path(p.from, p.to),
+                &styled_stroke(3.0, p.style),
+                &rgba(p.color),
+            );
         }
         ToolKind::Highlight => {
             let r = drag_rect(p.from, p.to);
@@ -492,7 +546,7 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
         }
         ToolKind::Freehand => {
             if let Some(path) = polyline_path(&p.points) {
-                snap.append_stroke(&path, &solid_stroke(3.0), &rgba(p.color));
+                snap.append_stroke(&path, &styled_stroke(3.0, p.style), &rgba(p.color));
             }
         }
         ToolKind::Crop => {
@@ -555,6 +609,11 @@ pub struct PendingStroke {
     /// receive at drag-end; populated from [`AnnotationCanvas::tool_color`] at drag-begin
     /// (with a kind-specific fallback for colorless tools).
     color: [f32; 4],
+    /// Stroke dash style the preview (and committed layer) should use, seeded from
+    /// [`AnnotationCanvas::tool_style`] at drag-begin. Defaults to `Solid` for tools
+    /// that aren't styleable; the preview itself uses a fixed marquee dash for the
+    /// bounded shape tools and only honours this for line-like tools.
+    style: StrokeStyle,
 }
 
 mod imp {
@@ -574,6 +633,10 @@ mod imp {
         /// inserted for tools whose appearance is user-controlled — Blur, Crop and Redact
         /// stay hardcoded so the picker can disable itself for them.
         pub tool_colors: RefCell<HashMap<ToolKind, [f32; 4]>>,
+        /// Per-tool stroke style overrides driven by the toolbar's style picker. Same
+        /// model as `tool_colors`: only line-rendering tools (Rect/Ellipse/Arrow/Line/
+        /// Freehand) get entries; everything else stays implicit-Solid.
+        pub tool_styles: RefCell<HashMap<ToolKind, StrokeStyle>>,
     }
 
     impl Default for AnnotationCanvas {
@@ -587,6 +650,12 @@ mod imp {
             colors.insert(ToolKind::Highlight, [1.0, 1.0, 0.0, 0.35]);
             colors.insert(ToolKind::Number, [0.9, 0.1, 0.1, 1.0]);
             colors.insert(ToolKind::Text, [1.0, 0.95, 0.2, 1.0]);
+            let mut styles = HashMap::new();
+            styles.insert(ToolKind::Rect, StrokeStyle::Solid);
+            styles.insert(ToolKind::Ellipse, StrokeStyle::Solid);
+            styles.insert(ToolKind::Arrow, StrokeStyle::Solid);
+            styles.insert(ToolKind::Line, StrokeStyle::Solid);
+            styles.insert(ToolKind::Freehand, StrokeStyle::Solid);
             Self {
                 doc: RefCell::new(None),
                 base_texture: RefCell::new(None),
@@ -595,6 +664,7 @@ mod imp {
                 next_number: Cell::new(1),
                 transparent_background: Cell::new(false),
                 tool_colors: RefCell::new(colors),
+                tool_styles: RefCell::new(styles),
             }
         }
     }
@@ -694,12 +764,14 @@ fn install_drag(canvas: &AnnotationCanvas) {
                 ToolKind::Blur => [0.5, 0.5, 0.5, 0.25],
                 _ => [1.0, 0.0, 0.0, 0.85],
             });
+            let style = c.tool_style(kind).unwrap_or_default();
             c.imp().pending.replace(Some(PendingStroke {
                 kind,
                 from: (x, y),
                 to: (x, y),
                 points,
                 color,
+                style,
             }));
             c.queue_draw();
         });
@@ -744,6 +816,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                         if let Some(color) = c.tool_color(ToolKind::Rect) {
                             t.stroke = color;
                         }
+                        t.stroke_style = stroke.style;
                         doc.push_layer(Box::new(t));
                     }
                 }
@@ -754,6 +827,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                         if let Some(color) = c.tool_color(ToolKind::Ellipse) {
                             t.stroke = color;
                         }
+                        t.stroke_style = stroke.style;
                         doc.push_layer(Box::new(t));
                     }
                 }
@@ -765,6 +839,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                         if let Some(color) = c.tool_color(ToolKind::Arrow) {
                             t.stroke = color;
                         }
+                        t.stroke_style = stroke.style;
                         doc.push_layer(Box::new(t));
                     }
                 }
@@ -776,6 +851,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                         if let Some(color) = c.tool_color(ToolKind::Line) {
                             t.stroke = color;
                         }
+                        t.stroke_style = stroke.style;
                         doc.push_layer(Box::new(t));
                     }
                 }
@@ -803,6 +879,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                             points: stroke.points,
                             stroke: stroke_color,
                             stroke_width: 3.0,
+                            stroke_style: stroke.style,
                         }));
                     }
                 }

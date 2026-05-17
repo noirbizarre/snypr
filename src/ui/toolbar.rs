@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 
-use crate::annotate::ToolKind;
+use crate::annotate::{StrokeStyle, ToolKind};
 
 /// High-level mode picker used by the interactive selector. Resolved to a concrete
 /// `Selection` by the caller after the user clicks Capture (or commits).
@@ -232,6 +232,11 @@ pub struct ToolbarSpec {
     /// picks a new color; the caller is responsible for storing the choice on whatever
     /// canvas state it owns.
     pub show_color_picker: bool,
+    /// Show a stroke-style picker (Solid / Dashed / Dotted) that drives the dash
+    /// pattern of the currently selected tool. The toolbar emits
+    /// [`ToolbarAction::StrokeStyleChanged`] when the user picks a new style; the
+    /// caller is responsible for storing the choice on whatever canvas state it owns.
+    pub show_style_picker: bool,
     pub initial_tool: Option<ToolKind>,
     pub initial_mode: Option<ModeKind>,
     pub initial_cursor: bool,
@@ -252,6 +257,7 @@ impl ToolbarSpec {
             show_cursor_toggle: false,
             show_passthrough_toggle: false,
             show_color_picker: false,
+            show_style_picker: false,
             initial_tool: None,
             initial_mode: None,
             initial_cursor: false,
@@ -279,6 +285,9 @@ pub enum ToolbarAction {
     /// User picked a new color from the color picker. The caller applies it to the
     /// currently active tool (whichever it tracks).
     ColorChanged([f32; 4]),
+    /// User picked a new stroke style from the style picker. The caller applies it
+    /// to the currently active tool's `stroke_style` (analogous to `ColorChanged`).
+    StrokeStyleChanged(StrokeStyle),
 }
 
 type Callback = Rc<RefCell<Option<Box<dyn Fn(ToolbarAction) + 'static>>>>;
@@ -301,6 +310,9 @@ struct ToolbarState {
     /// or keyboard input while a layer-shell parent holds `KeyboardMode::Exclusive`.
     /// Popovers are popup surfaces of the parent layer-shell surface and work fine.
     color: Option<ColorPickerUi>,
+    /// Stroke-style picker UI (button + popover with three radios). Same lifecycle
+    /// model as `color`. Built only when [`ToolbarSpec::show_style_picker`] is set.
+    style: Option<StylePickerUi>,
     shortcuts: Vec<Shortcut>,
     callback: Callback,
 }
@@ -329,6 +341,24 @@ struct ColorPickerUi {
     button: gtk4::Button,
     swatch: gtk4::DrawingArea,
     current: Rc<Cell<gdk4::RGBA>>,
+}
+
+/// Live state for the stroke-style picker. The trigger is a `MenuButton` so the
+/// popover is managed by GTK (no manual `popup()`/`popdown()` plumbing); the
+/// popover hosts three radio `CheckButton`s — one per [`StrokeStyle`] — that
+/// share a group so exactly one stays active. The button's child is a tiny
+/// `DrawingArea` that previews the current style by drawing a horizontal sample
+/// line, mirroring the color-picker swatch pattern.
+struct StylePickerUi {
+    button: gtk4::MenuButton,
+    /// Sample-line preview drawn with the current style. Redrawn whenever
+    /// [`Toolbar::set_stroke_style`] is called.
+    swatch: gtk4::DrawingArea,
+    current: Rc<Cell<StrokeStyle>>,
+    /// Three `(style, radio, handler)` tuples — kept in declaration order so
+    /// `set_stroke_style` can flip the right radio without re-emitting the
+    /// `StrokeStyleChanged` action (via `block_signal`).
+    radios: Vec<(StrokeStyle, gtk4::CheckButton, glib::SignalHandlerId)>,
 }
 
 impl CaptureUi {
@@ -532,6 +562,103 @@ impl Toolbar {
                 button: btn,
                 swatch,
                 current,
+            })
+        } else {
+            None
+        };
+
+        // Stroke-style picker (optional) — sits next to the color picker because it
+        // shares the same "modifies the active tool's appearance" semantics.
+        //
+        // Unlike the color picker we don't need any layer-shell demotion: the menu is
+        // a popover (a popup surface anchored to the parent layer-shell surface), not
+        // a toplevel, so it receives input correctly even while the toolbar window
+        // holds `KeyboardMode::Exclusive`. That's why we use `MenuButton` + `Popover`
+        // here rather than a custom dialog like `ColorDialog`.
+        let style = if spec.show_style_picker {
+            // Separator only if we didn't already add one for the color picker (the
+            // color picker emits its own leading separator when tools precede it).
+            if color.is_none() && !spec.tools.is_empty() {
+                widget.append(&separator());
+            }
+
+            let current = Rc::new(Cell::new(StrokeStyle::Solid));
+
+            // Sample-line preview, sized to match the color swatch (16×16) for visual
+            // uniformity in the toolbar.
+            let swatch = gtk4::DrawingArea::new();
+            swatch.set_content_width(20);
+            swatch.set_content_height(16);
+            swatch.set_size_request(20, 16);
+            swatch.set_halign(gtk4::Align::Center);
+            swatch.set_valign(gtk4::Align::Center);
+            swatch.set_hexpand(false);
+            swatch.set_vexpand(false);
+            let current_for_draw = current.clone();
+            swatch.set_draw_func(move |_, cr, w, h| {
+                draw_style_swatch(cr, w as f64, h as f64, current_for_draw.get());
+            });
+
+            let popover = gtk4::Popover::new();
+            popover.set_has_arrow(true);
+            let popover_box = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            popover_box.set_margin_top(6);
+            popover_box.set_margin_bottom(6);
+            popover_box.set_margin_start(8);
+            popover_box.set_margin_end(8);
+
+            // Three radio buttons sharing a group. We attach a `toggled` handler to
+            // each but only react when the radio is *active* (radios fire twice per
+            // selection: once for the deactivated old, once for the activated new).
+            let mut radios: Vec<(StrokeStyle, gtk4::CheckButton, glib::SignalHandlerId)> =
+                Vec::new();
+            let mut radio_group: Option<gtk4::CheckButton> = None;
+            for (style, label) in [
+                (StrokeStyle::Solid, "Solid"),
+                (StrokeStyle::Dashed, "Dashed"),
+                (StrokeStyle::Dotted, "Dotted"),
+            ] {
+                let radio = gtk4::CheckButton::with_label(label);
+                if let Some(first) = &radio_group {
+                    radio.set_group(Some(first));
+                } else {
+                    radio_group = Some(radio.clone());
+                }
+                if style == StrokeStyle::Solid {
+                    radio.set_active(true);
+                }
+                let cb = callback.clone();
+                let current_for_radio = current.clone();
+                let swatch_for_radio = swatch.clone();
+                let popover_for_radio = popover.clone();
+                let id = radio.connect_toggled(move |r| {
+                    if !r.is_active() {
+                        return;
+                    }
+                    current_for_radio.set(style);
+                    swatch_for_radio.queue_draw();
+                    popover_for_radio.popdown();
+                    if let Some(f) = cb.borrow().as_ref() {
+                        f(ToolbarAction::StrokeStyleChanged(style));
+                    }
+                });
+                popover_box.append(&radio);
+                radios.push((style, radio, id));
+            }
+            popover.set_child(Some(&popover_box));
+
+            let btn = gtk4::MenuButton::new();
+            btn.set_child(Some(&swatch));
+            btn.set_popover(Some(&popover));
+            btn.set_tooltip_text(Some("Stroke style"));
+            make_unfocusable(&btn);
+            widget.append(&btn);
+
+            Some(StylePickerUi {
+                button: btn,
+                swatch,
+                current,
+                radios,
             })
         } else {
             None
@@ -774,6 +901,7 @@ impl Toolbar {
             passthrough,
             capture,
             color,
+            style,
             shortcuts,
             callback,
         });
@@ -846,6 +974,30 @@ impl Toolbar {
     /// present in this toolbar.
     pub fn set_color_picker_sensitive(&self, sensitive: bool) {
         if let Some(ui) = &self.state.color {
+            ui.button.set_sensitive(sensitive);
+        }
+    }
+
+    /// Update the style-picker radios + swatch without firing `StrokeStyleChanged`.
+    /// Used by external state changes (e.g. selecting a different tool) so the
+    /// picker always reflects the active tool's stored style.
+    pub fn set_stroke_style(&self, style: StrokeStyle) {
+        if let Some(ui) = &self.state.style {
+            ui.current.set(style);
+            ui.swatch.queue_draw();
+            for (s, radio, id) in &ui.radios {
+                radio.block_signal(id);
+                radio.set_active(*s == style);
+                radio.unblock_signal(id);
+            }
+        }
+    }
+
+    /// Enable or disable the style-picker button (mirrors
+    /// [`Self::set_color_picker_sensitive`] for tools whose stroke style is
+    /// hardcoded — Highlight / Number / Text / Blur / Crop / Redact).
+    pub fn set_style_picker_sensitive(&self, sensitive: bool) {
+        if let Some(ui) = &self.state.style {
             ui.button.set_sensitive(sensitive);
         }
     }
@@ -1050,6 +1202,28 @@ fn draw_color_swatch(cr: &gtk4::cairo::Context, w: f64, h: f64, c: gdk4::RGBA) {
     );
     cr.rectangle(0.0, 0.0, w, h);
     let _ = cr.fill();
+}
+
+/// Paint the sample line used by the stroke-style picker's trigger button. Draws
+/// a 2 px horizontal line centred vertically, dashed/dotted according to `style`,
+/// using the theme's foreground color so the swatch reads correctly in light and
+/// dark themes alike.
+fn draw_style_swatch(cr: &gtk4::cairo::Context, w: f64, h: f64, style: StrokeStyle) {
+    let line_w = 2.0_f64;
+    cr.set_source_rgb(0.85, 0.85, 0.85);
+    cr.set_line_width(line_w);
+    cr.set_line_cap(gtk4::cairo::LineCap::Round);
+    match style {
+        StrokeStyle::Solid => cr.set_dash(&[], 0.0),
+        // Width-relative dashes mirror `styled_stroke` in `canvas.rs` so the swatch
+        // preview matches what the user will get on-canvas.
+        StrokeStyle::Dashed => cr.set_dash(&[line_w * 3.0, line_w * 2.0], 0.0),
+        StrokeStyle::Dotted => cr.set_dash(&[0.0, line_w * 2.0], 0.0),
+    }
+    let y = h / 2.0;
+    cr.move_to(2.0, y);
+    cr.line_to(w - 2.0, y);
+    let _ = cr.stroke();
 }
 
 /// Open a `gtk4::ColorDialog` so the user can pick a color, handling the layer-shell
@@ -1300,5 +1474,10 @@ mod tests {
         let c = gdk4::RGBA::new(0.0, 1.0, 0.0, 0.5);
         // 0.5 * 255 rounds to 128 (0x80).
         assert_eq!(rgba_to_hex(&c), "#00ff0080");
+    }
+
+    #[test]
+    fn stroke_style_default_is_solid() {
+        assert_eq!(StrokeStyle::default(), StrokeStyle::Solid);
     }
 }

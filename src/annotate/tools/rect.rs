@@ -1,4 +1,4 @@
-use crate::annotate::{Tool, ToolKind};
+use crate::annotate::{StrokeStyle, Tool, ToolKind};
 use crate::capture::region::Rect;
 
 #[derive(Debug, Clone)]
@@ -6,6 +6,7 @@ pub struct RectTool {
     pub bounds: Rect,
     pub stroke: [f32; 4],
     pub stroke_width: f32,
+    pub stroke_style: StrokeStyle,
 }
 
 impl RectTool {
@@ -14,6 +15,7 @@ impl RectTool {
             bounds,
             stroke: [1.0, 0.0, 0.0, 1.0],
             stroke_width: 2.0,
+            stroke_style: StrokeStyle::Solid,
         }
     }
 }

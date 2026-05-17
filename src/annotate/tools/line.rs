@@ -3,7 +3,7 @@
 //! one or the other from the toolbar depending on whether they want a pointer or a plain
 //! ruler.
 
-use crate::annotate::{Tool, ToolKind};
+use crate::annotate::{StrokeStyle, Tool, ToolKind};
 use crate::capture::region::Rect;
 
 #[derive(Debug, Clone)]
@@ -12,6 +12,7 @@ pub struct LineTool {
     pub to: (f64, f64),
     pub stroke: [f32; 4],
     pub stroke_width: f32,
+    pub stroke_style: StrokeStyle,
 }
 
 impl LineTool {
@@ -21,6 +22,7 @@ impl LineTool {
             to,
             stroke: [1.0, 0.0, 0.0, 1.0],
             stroke_width: 3.0,
+            stroke_style: StrokeStyle::Solid,
         }
     }
 }
@@ -55,6 +57,7 @@ mod tests {
         assert_eq!(t.kind(), ToolKind::Line);
         assert_eq!(t.stroke, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(t.stroke_width, 3.0);
+        assert_eq!(t.stroke_style, StrokeStyle::Solid);
     }
 
     #[rstest]

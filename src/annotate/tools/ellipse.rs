@@ -1,4 +1,4 @@
-use crate::annotate::{Tool, ToolKind};
+use crate::annotate::{StrokeStyle, Tool, ToolKind};
 use crate::capture::region::Rect;
 
 /// Outline ellipse inscribed in `bounds`. Same defaults as [`super::rect::RectTool`] — a
@@ -11,6 +11,7 @@ pub struct EllipseTool {
     pub bounds: Rect,
     pub stroke: [f32; 4],
     pub stroke_width: f32,
+    pub stroke_style: StrokeStyle,
 }
 
 impl EllipseTool {
@@ -19,6 +20,7 @@ impl EllipseTool {
             bounds,
             stroke: [1.0, 0.0, 0.0, 1.0],
             stroke_width: 2.0,
+            stroke_style: StrokeStyle::Solid,
         }
     }
 }

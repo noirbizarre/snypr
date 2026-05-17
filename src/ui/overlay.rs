@@ -403,6 +403,7 @@ fn spawn_monitor_overlay(
             show_undo: true,
             show_save: true,
             show_color_picker: true,
+            show_style_picker: true,
             initial_tool: Some(shared.current_tool.get()),
             ..Default::default()
         })
@@ -413,6 +414,7 @@ fn spawn_monitor_overlay(
             show_clear: true,
             show_passthrough_toggle: true,
             show_color_picker: true,
+            show_style_picker: true,
             initial_tool: Some(shared.current_tool.get()),
             initial_passthrough: shared.passthrough.get(),
             ..Default::default()
@@ -523,6 +525,10 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
         toolbar.set_color(color);
     }
     toolbar.set_color_picker_sensitive(kind_is_colorable(initial_kind));
+    if let Some(style) = canvas.tool_style(initial_kind) {
+        toolbar.set_stroke_style(style);
+    }
+    toolbar.set_style_picker_sensitive(kind_is_styleable(initial_kind));
 
     toolbar.connect(move |action| match action {
         ToolbarAction::ToolSelected(kind) => {
@@ -536,13 +542,22 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
                 .borrow()
                 .first()
                 .and_then(|c| c.canvas.tool_color(kind));
+            let style = canvases
+                .borrow()
+                .first()
+                .and_then(|c| c.canvas.tool_style(kind));
             let colorable = kind_is_colorable(kind);
+            let styleable = kind_is_styleable(kind);
             for t in toolbars.borrow().iter() {
                 t.set_tool(kind);
                 if let Some(c) = color {
                     t.set_color(c);
                 }
                 t.set_color_picker_sensitive(colorable);
+                if let Some(s) = style {
+                    t.set_stroke_style(s);
+                }
+                t.set_style_picker_sensitive(styleable);
             }
         }
         ToolbarAction::ColorChanged(color) => {
@@ -556,6 +571,18 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             // Sync peer toolbars on other monitors so their swatches reflect the new color.
             for t in toolbars.borrow().iter() {
                 t.set_color(color);
+            }
+        }
+        ToolbarAction::StrokeStyleChanged(style) => {
+            let kind = current_tool.get();
+            if !kind_is_styleable(kind) {
+                return;
+            }
+            for c in canvases.borrow().iter() {
+                c.canvas.set_tool_style(kind, style);
+            }
+            for t in toolbars.borrow().iter() {
+                t.set_stroke_style(style);
             }
         }
         ToolbarAction::Undo => {
@@ -605,6 +632,17 @@ fn kind_is_colorable(kind: ToolKind) -> bool {
             | ToolKind::Freehand
             | ToolKind::Number
             | ToolKind::Text
+    )
+}
+
+/// Tools whose stroke is styleable via the dash picker. A subset of `kind_is_colorable`:
+/// only outline-rendering tools qualify. Highlight (filled rectangle), Number (text-on-disc)
+/// and Text (glyph rendering) have no outline to style. Arrow's arrowhead stays solid but
+/// its shaft is styled — see `styled_stroke` in `canvas.rs`.
+fn kind_is_styleable(kind: ToolKind) -> bool {
+    matches!(
+        kind,
+        ToolKind::Rect | ToolKind::Ellipse | ToolKind::Arrow | ToolKind::Line | ToolKind::Freehand
     )
 }
 

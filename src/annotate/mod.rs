@@ -88,6 +88,18 @@ pub enum ToolKind {
     Crop,
 }
 
+/// Per-tool line dash pattern. Applies to outline-rendering tools
+/// (Rect / Ellipse / Arrow / Line / Freehand); ignored by fill-only
+/// tools (Highlight) and hardcoded tools (Blur, Crop, Redact). The
+/// toolbar's style picker exposes one of these per tool.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum StrokeStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

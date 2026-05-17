@@ -110,6 +110,12 @@ A color picker (with alpha) sits next to the tool buttons. Each tool remembers i
 color across switches within a session; it's disabled for tools whose appearance is
 hardcoded (Blur, Crop, Redact).
 
+Next to the color picker, a stroke-style picker offers Solid / Dashed / Dotted dash
+patterns for the outline-rendering tools (Rectangle, Ellipse, Arrow, Line, Freehand).
+Like the color picker, each tool remembers its own style across switches. The Arrow
+tool's shaft honours the style while its arrowhead stays solid so it remains a
+recognisable pointer.
+
 The picker opens GTK's native `GtkColorDialog`. Placement, sizing, and the resize
 behaviour when toggling the *Custom Color* editor are delegated to the compositor —
 `GtkColorDialog` does not expose its window to applications. On Hyprland (0.55+, Lua
