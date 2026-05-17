@@ -76,6 +76,7 @@ pub trait Tool: std::fmt::Debug + Send + Sync {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ToolKind {
     Arrow,
+    Line,
     Rect,
     Ellipse,
     Text,

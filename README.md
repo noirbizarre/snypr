@@ -92,6 +92,7 @@ Region mode, click on a monitor in Screen mode, then press `Enter` (Capture) or
 | `R`      | Rectangle tool               |
 | `O`      | Ellipse tool                 |
 | `A`      | Arrow tool                   |
+| `L`      | Line tool (no arrowhead)     |
 | `H`      | Highlight tool               |
 | `F`      | Freehand tool                |
 | `N`      | Numbered marker              |

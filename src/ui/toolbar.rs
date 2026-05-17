@@ -74,6 +74,12 @@ pub const EDITOR_TOOLS: &[ToolEntry] = &[
         icon: "mail-forward-symbolic",
     },
     ToolEntry {
+        kind: ToolKind::Line,
+        label: "Line",
+        key: gdk4::Key::l,
+        icon: "draw-line-symbolic",
+    },
+    ToolEntry {
         kind: ToolKind::Highlight,
         label: "Highlight",
         key: gdk4::Key::h,
@@ -138,6 +144,12 @@ pub const OVERLAY_TOOLS: &[ToolEntry] = &[
         label: "Arrow",
         key: gdk4::Key::a,
         icon: "mail-forward-symbolic",
+    },
+    ToolEntry {
+        kind: ToolKind::Line,
+        label: "Line",
+        key: gdk4::Key::l,
+        icon: "draw-line-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Highlight,
@@ -1238,6 +1250,7 @@ mod tests {
             ToolKind::Rect,
             ToolKind::Ellipse,
             ToolKind::Arrow,
+            ToolKind::Line,
             ToolKind::Highlight,
             ToolKind::Freehand,
             ToolKind::Number,
@@ -1255,6 +1268,12 @@ mod tests {
         let kinds: std::collections::HashSet<_> = OVERLAY_TOOLS.iter().map(|e| e.kind).collect();
         assert!(!kinds.contains(&ToolKind::Blur));
         assert!(!kinds.contains(&ToolKind::Crop));
+    }
+
+    #[test]
+    fn overlay_draw_preset_includes_line() {
+        let kinds: std::collections::HashSet<_> = OVERLAY_TOOLS.iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&ToolKind::Line));
     }
 
     #[test]

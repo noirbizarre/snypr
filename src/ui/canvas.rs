@@ -25,6 +25,7 @@ use crate::annotate::tools::blur::BlurTool;
 use crate::annotate::tools::ellipse::EllipseTool;
 use crate::annotate::tools::freehand::FreehandTool;
 use crate::annotate::tools::highlight::HighlightTool;
+use crate::annotate::tools::line::LineTool;
 use crate::annotate::tools::number::NumberTool;
 use crate::annotate::tools::rect::RectTool;
 use crate::annotate::tools::redact::RedactTool;
@@ -343,6 +344,15 @@ fn snapshot_tool(
                 );
             }
         }
+        ToolKind::Line => {
+            if let Some(t) = tool.as_any().downcast_ref::<LineTool>() {
+                snap.append_stroke(
+                    &line_path(t.from, t.to),
+                    &solid_stroke(t.stroke_width as f64),
+                    &rgba(t.stroke),
+                );
+            }
+        }
         ToolKind::Highlight => {
             if let Some(t) = tool.as_any().downcast_ref::<HighlightTool>() {
                 snap.append_color(&rgba(t.color), &rect_to_graphene(&t.bounds));
@@ -469,6 +479,9 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
                 &color,
             );
         }
+        ToolKind::Line => {
+            snap.append_stroke(&line_path(p.from, p.to), &solid_stroke(3.0), &rgba(p.color));
+        }
         ToolKind::Highlight => {
             let r = drag_rect(p.from, p.to);
             snap.append_color(&rgba(p.color), &rect_to_graphene(&r));
@@ -569,6 +582,7 @@ mod imp {
             colors.insert(ToolKind::Rect, [1.0, 0.0, 0.0, 1.0]);
             colors.insert(ToolKind::Ellipse, [1.0, 0.0, 0.0, 1.0]);
             colors.insert(ToolKind::Arrow, [1.0, 0.0, 0.0, 1.0]);
+            colors.insert(ToolKind::Line, [1.0, 0.0, 0.0, 1.0]);
             colors.insert(ToolKind::Freehand, [1.0, 0.0, 0.0, 1.0]);
             colors.insert(ToolKind::Highlight, [1.0, 1.0, 0.0, 0.35]);
             colors.insert(ToolKind::Number, [0.9, 0.1, 0.1, 1.0]);
@@ -749,6 +763,17 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     if (dx * dx + dy * dy) >= 16.0 {
                         let mut t = ArrowTool::new(stroke.from, stroke.to);
                         if let Some(color) = c.tool_color(ToolKind::Arrow) {
+                            t.stroke = color;
+                        }
+                        doc.push_layer(Box::new(t));
+                    }
+                }
+                ToolKind::Line => {
+                    let dx = stroke.to.0 - stroke.from.0;
+                    let dy = stroke.to.1 - stroke.from.1;
+                    if (dx * dx + dy * dy) >= 16.0 {
+                        let mut t = LineTool::new(stroke.from, stroke.to);
+                        if let Some(color) = c.tool_color(ToolKind::Line) {
                             t.stroke = color;
                         }
                         doc.push_layer(Box::new(t));

@@ -600,6 +600,7 @@ fn kind_is_colorable(kind: ToolKind) -> bool {
         ToolKind::Rect
             | ToolKind::Ellipse
             | ToolKind::Arrow
+            | ToolKind::Line
             | ToolKind::Highlight
             | ToolKind::Freehand
             | ToolKind::Number
