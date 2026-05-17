@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-pub mod annotate;
 pub mod daemon;
 pub mod draw;
 pub mod screenshot;
@@ -32,8 +31,6 @@ pub enum Command {
     /// Capture the screen and write it to the configured sinks. Pass `--edit` to open the
     /// annotation editor between capture and sinks.
     Screenshot(screenshot::Args),
-    /// Open the annotation editor on an existing image.
-    Annotate(annotate::Args),
     /// Open a transparent overlay to draw on top of the screen.
     Draw(draw::Args),
     /// Run a long-lived daemon listening on the IPC socket.
@@ -92,7 +89,6 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Draw(args) if args.via_daemon => dispatch_via_daemon(Command::Draw(args)).await,
         Command::Screenshot(args) => screenshot::run(args).await,
-        Command::Annotate(args) => annotate::run(args).await,
         Command::Draw(args) => draw::run(args).await,
         Command::Daemon(args) => daemon::run(args).await,
     }
@@ -100,7 +96,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
 
 /// Forward a `Command` to a running `hyprsnap daemon` over the IPC socket instead of executing
 /// locally. Only `screenshot` (with or without `--edit`) and `draw` accept `--via-daemon`;
-/// `annotate` and `daemon` reject the flag at parse time.
+/// `daemon` rejects the flag at parse time.
 async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
     use anyhow::{Context as _, anyhow, bail};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -154,9 +150,9 @@ fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
             ))
         }
         Command::Draw(_) => Ok(crate::ipc::Request::DrawToggle),
-        Command::Annotate(_) | Command::Daemon(_) => {
+        Command::Daemon(_) => {
             unreachable!(
-                "annotate/daemon never reach build_request: --via-daemon is rejected at parse time"
+                "daemon never reaches build_request: --via-daemon is rejected at parse time"
             )
         }
     }
@@ -211,7 +207,6 @@ mod tests {
         for args in [
             vec!["hyprsnap", "screenshot", "--full"],
             vec!["hyprsnap", "screenshot", "--edit"],
-            vec!["hyprsnap", "annotate", "/tmp/x.png"],
             vec!["hyprsnap", "draw"],
             vec!["hyprsnap", "daemon"],
             vec!["hyprsnap", "daemon", "--systray"],
@@ -232,16 +227,8 @@ mod tests {
     }
 
     #[test]
-    fn via_daemon_rejected_on_annotate_and_daemon() {
-        for args in [
-            vec!["hyprsnap", "annotate", "/tmp/x.png", "--via-daemon"],
-            vec!["hyprsnap", "daemon", "--via-daemon"],
-        ] {
-            assert!(
-                Cli::try_parse_from(&args).is_err(),
-                "expected parse failure for {args:?}",
-            );
-        }
+    fn via_daemon_rejected_on_daemon() {
+        assert!(Cli::try_parse_from(["hyprsnap", "daemon", "--via-daemon"]).is_err());
     }
 
     #[test]

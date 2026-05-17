@@ -35,7 +35,7 @@ pub struct Args {
 
     /// Open the annotation editor on the captured image before writing to sinks.
     /// Incompatible with `--per-output` (one editor session per N frames doesn't compose).
-    #[arg(long, alias = "annotate")]
+    #[arg(long)]
     pub edit: bool,
 
     /// Sink(s) to receive the image. Repeatable.
@@ -397,13 +397,6 @@ mod tests {
     #[test]
     fn parses_edit_flag() {
         let cli = Harness::try_parse_from(["test", "screenshot", "--edit"]).unwrap();
-        let HarnessCmd::Screenshot(args) = cli.cmd;
-        assert!(args.edit);
-    }
-
-    #[test]
-    fn parses_annotate_alias() {
-        let cli = Harness::try_parse_from(["test", "screenshot", "--annotate"]).unwrap();
         let HarnessCmd::Screenshot(args) = cli.cmd;
         assert!(args.edit);
     }

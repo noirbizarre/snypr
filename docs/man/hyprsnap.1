@@ -45,7 +45,7 @@ Capture an explicit logical-pixel region.
 .BR \-\-interactive
 Open the selector overlay and let the user draw a region.
 .TP
-.BR \-\-edit ", " \-\-annotate
+.BR \-\-edit
 Open the in-place annotation overlay on the captured image before writing to sinks. The
 overlay opens one layer-shell window per intersecting monitor so the captured pixels are
 edited where they live on the desktop. Incompatible with \fB\-\-per\-output\fR.
@@ -64,14 +64,6 @@ Wait \fIMS\fR milliseconds before capturing.
 .BR \-\-via-daemon
 Forward the request to a running \fBhyprsnap daemon\fR over its Unix socket instead of
 executing locally.
-.SS annotate
-Open the in-place annotation overlay on an existing image. The overlay anchors on the
-focused monitor and writes back to the source path on Ctrl+S (unless \fB\-\-to\fR is
-supplied):
-.RS
-.B hyprsnap annotate
-\fIIMAGE\fR
-.RE
 .SS draw
 Launch the live draw-on-screen overlay. Keys: \fBR\fR rectangle, \fBA\fR arrow,
 \fBH\fR highlight, \fBF\fR freehand, \fBN\fR numbered marker, \fBT\fR text,
@@ -79,9 +71,8 @@ Launch the live draw-on-screen overlay. Keys: \fBR\fR rectangle, \fBA\fR arrow,
 passthrough, \fBEsc\fR quit. Also accepts \fB\-\-via-daemon\fR to toggle a
 daemon-managed overlay instead of spawning a new process.
 .SS editor (in-place annotation overlay)
-Opened by \fBscreenshot \-\-edit\fR, by a Shift-click / \fBShift+Enter\fR on the
-selector's Capture button, or by \fBannotate\fR \fIIMAGE\fR. Save with \fBCtrl+S\fR or
-\fBEnter\fR; \fBEsc\fR quits.
+Opened by \fBscreenshot \-\-edit\fR or by a Shift-click / \fBShift+Enter\fR on the
+selector's Capture button. Save with \fBCtrl+S\fR or \fBEnter\fR; \fBEsc\fR quits.
 .SS selector
 The interactive selector (used by \fBscreenshot\fR without an explicit selection flag)
 shows a floating toolbar with Full / Screen / Window / Region modes, a cursor toggle, and

@@ -72,26 +72,12 @@ pub async fn active_window() -> Result<ActiveWindow> {
 
 /// Name of the focused monitor.
 pub async fn focused_monitor() -> Result<String> {
-    Ok(focused_monitor_info().await?.0)
-}
-
-/// Logical top-left of the focused monitor in compositor coordinates. Used by `annotate
-/// <file>` so the in-place overlay can anchor the loaded image where the user is currently
-/// looking instead of always landing at `(0, 0)`.
-pub async fn focused_monitor_origin() -> Result<(i32, i32)> {
-    let (_, x, y) = focused_monitor_info().await?;
-    Ok((x, y))
-}
-
-async fn focused_monitor_info() -> Result<(String, i32, i32)> {
     let body = query("j/monitors").await?;
 
     #[derive(Deserialize)]
     struct Raw {
         name: String,
         focused: bool,
-        x: i32,
-        y: i32,
     }
 
     let monitors: Vec<Raw> = serde_json::from_str(&body)
@@ -99,7 +85,7 @@ async fn focused_monitor_info() -> Result<(String, i32, i32)> {
     monitors
         .into_iter()
         .find(|m| m.focused)
-        .map(|m| (m.name, m.x, m.y))
+        .map(|m| m.name)
         .ok_or_else(|| anyhow!("no focused monitor"))
 }
 

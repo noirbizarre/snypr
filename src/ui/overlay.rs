@@ -1,5 +1,6 @@
 //! Layer-shell overlay used by both the live "draw on screen" flow and the in-place
-//! annotation-editing flow (`screenshot --edit`, `annotate <file>`).
+//! annotation-editing flow (`screenshot --edit`, Shift-click / Shift+Enter on the selector's
+//! Capture button, and the tray "Annotate region…" entry).
 //!
 //! Spawns one `gtk4_layer_shell` window per monitor at `Layer::Overlay`. Each hosts an
 //! [`AnnotationCanvas`] sized to its monitor, plus a floating bottom-center
@@ -12,10 +13,10 @@
 //! * [`OverlayMode::Draw`] — Draw-On-Gnome equivalent: transparent canvases, pointer
 //!   passthrough toggle, Undo/Clear shortcuts. The overlay stays alive until the user presses
 //!   `Esc` (or an external shutdown receiver fires) and writes nothing.
-//! * [`OverlayMode::Edit`] — annotate an existing image (captured or loaded from disk) in
-//!   place. Each per-monitor canvas renders its slice of the base image; the toolbar adds a
-//!   Save button that composes every per-monitor canvas, stitches the slices back together,
-//!   fans the result out to the configured sinks, and tears the overlay down.
+//! * [`OverlayMode::Edit`] — annotate the just-captured image in place. Each per-monitor
+//!   canvas renders its slice of the base image; the toolbar adds a Save button that
+//!   composes every per-monitor canvas, stitches the slices back together, fans the result
+//!   out to the configured sinks, and tears the overlay down.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;

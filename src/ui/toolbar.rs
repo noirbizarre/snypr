@@ -598,8 +598,7 @@ impl Toolbar {
                             .set_tooltip_text(Some("Annotate (Shift-click or Shift+Enter)"));
                     } else {
                         icon_for_timer.set_icon_name(Some("camera-photo-symbolic"));
-                        btn_for_timer
-                            .set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
+                        btn_for_timer.set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
                     }
                 }
                 glib::ControlFlow::Continue
