@@ -57,21 +57,21 @@ pub struct ModeEntry {
 pub const EDITOR_TOOLS: &[ToolEntry] = &[
     ToolEntry {
         kind: ToolKind::Rect,
-        label: "Rect",
+        label: "Rectangle",
         key: gdk4::Key::r,
-        icon: "view-paged-symbolic",
+        icon: "draw-rectangle-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Ellipse,
         label: "Ellipse",
         key: gdk4::Key::o,
-        icon: "media-record-symbolic",
+        icon: "draw-oval2-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Arrow,
         label: "Arrow",
         key: gdk4::Key::a,
-        icon: "mail-forward-symbolic",
+        icon: "arrow1-top-right-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Line,
@@ -95,31 +95,31 @@ pub const EDITOR_TOOLS: &[ToolEntry] = &[
         kind: ToolKind::Number,
         label: "Number",
         key: gdk4::Key::n,
-        icon: "zoom-original-symbolic",
+        icon: "lang-define-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Text,
         label: "Text",
         key: gdk4::Key::t,
-        icon: "format-text-italic-symbolic",
+        icon: "text-insert-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Blur,
         label: "Blur",
         key: gdk4::Key::b,
-        icon: "view-reveal-symbolic",
+        icon: "blend-tool-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Redact,
         label: "Redact",
         key: gdk4::Key::x,
-        icon: "view-conceal-symbolic",
+        icon: "screen-privacy7-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Crop,
         label: "Crop",
         key: gdk4::Key::c,
-        icon: "image-crop-symbolic",
+        icon: "ui-crop-to-selection-symbolic",
     },
 ];
 
@@ -128,22 +128,21 @@ pub const EDITOR_TOOLS: &[ToolEntry] = &[
 pub const OVERLAY_TOOLS: &[ToolEntry] = &[
     ToolEntry {
         kind: ToolKind::Rect,
-        label: "Rect",
+        label: "Rectangle",
         key: gdk4::Key::r,
-        icon: "edit-select-all-symbolic",
-        // icon: "view-paged-symbolic",
+        icon: "draw-rectangle-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Ellipse,
         label: "Ellipse",
         key: gdk4::Key::o,
-        icon: "media-record-symbolic",
+        icon: "draw-oval2-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Arrow,
         label: "Arrow",
         key: gdk4::Key::a,
-        icon: "mail-forward-symbolic",
+        icon: "arrow1-top-right-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Line,
@@ -155,7 +154,7 @@ pub const OVERLAY_TOOLS: &[ToolEntry] = &[
         kind: ToolKind::Highlight,
         label: "Highlight",
         key: gdk4::Key::h,
-        icon: "checkbox-symbolic",
+        icon: "marker-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Freehand,
@@ -167,19 +166,19 @@ pub const OVERLAY_TOOLS: &[ToolEntry] = &[
         kind: ToolKind::Number,
         label: "Number",
         key: gdk4::Key::n,
-        icon: "zoom-original-symbolic",
+        icon: "lang-define-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Text,
         label: "Text",
         key: gdk4::Key::t,
-        icon: "format-text-italic-symbolic",
+        icon: "text-insert-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Redact,
         label: "Redact",
         key: gdk4::Key::x,
-        icon: "view-conceal-symbolic",
+        icon: "screen-privacy7-symbolic",
     },
 ];
 
@@ -207,7 +206,7 @@ pub const SELECTOR_MODES: &[ModeEntry] = &[
         kind: ModeKind::Region,
         label: "Region",
         key: gdk4::Key::_4,
-        icon: "edit-select-all-symbolic",
+        icon: "tool-select-rectangle-symbolic",
     },
 ];
 
@@ -690,7 +689,7 @@ impl Toolbar {
 
         if spec.show_cursor_toggle {
             let btn = gtk4::ToggleButton::new();
-            btn.set_child(Some(&icon_only("input-mouse-symbolic")));
+            btn.set_child(Some(&icon_only("pointer-primary-click-symbolic")));
             btn.set_tooltip_text(Some("Include cursor in capture"));
             make_unfocusable(&btn);
             btn.set_active(spec.initial_cursor);
@@ -706,7 +705,7 @@ impl Toolbar {
 
         if spec.show_passthrough_toggle {
             let btn = gtk4::ToggleButton::new();
-            btn.set_child(Some(&icon_only("input-touchpad-symbolic")));
+            btn.set_child(Some(&icon_only("mouse-click-symbolic")));
             btn.set_tooltip_text(Some("Toggle pointer passthrough (P)"));
             make_unfocusable(&btn);
             btn.set_active(spec.initial_passthrough);

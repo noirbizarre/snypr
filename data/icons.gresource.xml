@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
   <gresource prefix="/re/noirbizar/HyprSnap/icons/scalable/actions">
+    <file alias="arrow1-top-right-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/arrow1-top-right-symbolic.svg</file>
+    <file alias="blend-tool-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/blend-tool-symbolic.svg</file>
     <file alias="draw-line-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/draw-line-symbolic.svg</file>
+    <file alias="draw-oval2-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/draw-oval2-symbolic.svg</file>
+    <file alias="draw-rectangle-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/draw-rectangle-symbolic.svg</file>
+    <file alias="marker-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/marker-symbolic.svg</file>
+    <file alias="mouse-click-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/mouse-click-symbolic.svg</file>
+    <file alias="pointer-primary-click-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/pointer-primary-click-symbolic.svg</file>
+    <file alias="screen-privacy7-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/screen-privacy7-symbolic.svg</file>
+    <file alias="text-insert-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/text-insert-symbolic.svg</file>
+    <file alias="tool-select-rectangle-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/tool-select-rectangle-symbolic.svg</file>
   </gresource>
 </gresources>
