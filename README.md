@@ -83,9 +83,11 @@ hyprsnap screenshot --full --via-daemon
 
 The selector (used by `screenshot --edit` and the default `screenshot`) shows a floating
 toolbar on the primary monitor with four modes — **Full**, **Screen**, **Window**,
-**Region** — plus a cursor toggle and a **Capture** button. Keyboard shortcuts:
-`1/2/3/4` switch modes, drag with the mouse in Region mode, click on a monitor in
-Screen mode, then press `Enter` (or click **Capture**) to commit. `Esc` cancels.
+**Region** — plus a cursor toggle and a **Capture** button. Hold `Shift` while
+clicking Capture (the button's icon swaps live) to *also* open the in-place editor on
+the captured image. Keyboard shortcuts: `1/2/3/4` switch modes, drag with the mouse in
+Region mode, click on a monitor in Screen mode, then press `Enter` (Capture) or
+`Shift+Enter` (Capture + Annotate) to commit. `Esc` cancels.
 
 ### Editor & overlay keybinds
 
@@ -101,7 +103,7 @@ Screen mode, then press `Enter` (or click **Capture**) to commit. `Esc` cancels.
 | `X`      | Redact (solid black)         |
 | `C`      | Crop (editor only)           |
 | `Ctrl+Z` | Undo last layer              |
-| `Ctrl+S` | Save (editor only)           |
+| `Ctrl+S` / `Enter` | Save (editor only) |
 | `P`      | Toggle pointer passthrough (overlay only) |
 | `Ctrl+L` | Clear all layers (overlay only)           |
 | `Esc`    | Quit                         |
@@ -120,6 +122,29 @@ bind = SUPER ALT,    Print, exec, hyprsnap draw
 # Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
 exec-once = hyprsnap daemon --systray
 ```
+
+### Troubleshooting
+
+**Pressing the keybind does nothing?**
+
+1. Inspect the actually-registered bind:
+   ```sh
+   hyprctl binds | grep -i print
+   ```
+   The dispatcher must be `exec` (not `exec_cmd` — that's the load-time
+   directive). If your config layer (Nix module, etc.) emits `exec_cmd` inside
+   a `bind`, Hyprland silently drops it.
+2. Confirm the binary resolves on Hyprland's `PATH`:
+   ```sh
+   hyprctl dispatch exec "which hyprsnap"
+   tail -n5 ~/.local/share/hyprland/hyprland.log
+   ```
+3. Check Hyprland's log for stderr from the spawned hyprsnap process — that's
+   where errors land when launched from a keybind. The optional `notify`
+   feature (enabled by default) also surfaces fatal errors as a desktop
+   notification.
+4. Add `-vv` to your bind (e.g. `hyprsnap -vv screenshot`) to upgrade the
+   `hyprsnap` log level to trace without needing `RUST_LOG`.
 
 ## Configuration
 

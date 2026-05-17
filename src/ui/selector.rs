@@ -43,6 +43,11 @@ pub struct SelectorOutcome {
     pub selection: Selection,
     /// Final cursor toggle from the floating toolbar; overrides any CLI default.
     pub cursor: bool,
+    /// User asked to open the annotation editor on the captured image (clicked the Annotate
+    /// button or pressed Shift+Enter). Distinct from any CLI-level `--edit` flag: the button
+    /// choice wins, so Capture always reports `false` here regardless of how the selector was
+    /// invoked.
+    pub edit: bool,
 }
 
 /// Show the selector and return the chosen selection + cursor toggle. The toolbar's cursor
@@ -216,7 +221,11 @@ fn spawn_monitor_overlay(
         window.set_anchor(edge, true);
     }
     window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
+    // Exclusive keyboard: the selector lives or dies by its shortcuts (1/2/3/4, Enter,
+    // Shift+Enter, Esc) and needs modifier state for Shift-click on Capture. Toolbar
+    // buttons are non-focusable, so KeyboardMode::OnDemand would never trigger a
+    // keyboard grab and Shift would always read as un-held.
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.set_default_size(mon_w.max(1), mon_h.max(1));
 
     let area = SelectorOverlay::new(shared.selection.clone(), info.index);
@@ -308,6 +317,19 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
                 &monitors,
                 &app_weak,
                 Some(primary.clone()),
+                false,
+            );
+        }
+        ToolbarAction::Annotate => {
+            commit(
+                &selection,
+                &tx,
+                &finalised,
+                &windows,
+                &monitors,
+                &app_weak,
+                Some(primary.clone()),
+                true,
             );
         }
         _ => {}
@@ -437,7 +459,7 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
             }
             let info = monitors.borrow().get(monitor_index).cloned();
             commit(
-                &selection, &tx, &finalised, &windows, &monitors, &app_weak, info,
+                &selection, &tx, &finalised, &windows, &monitors, &app_weak, info, false,
             );
         });
     }
@@ -476,6 +498,7 @@ fn install_keys(
                 &monitors,
                 &app_weak,
                 Some(info.clone()),
+                false,
             );
             glib::Propagation::Stop
         }
@@ -534,6 +557,7 @@ fn resolve_selection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit(
     selection: &SelectionCell,
     tx: &Sender,
@@ -542,6 +566,7 @@ fn commit(
     _monitors: &MonitorList,
     app_weak: &glib::WeakRef<gtk4::Application>,
     local_info: Option<MonitorInfo>,
+    edit: bool,
 ) {
     if *finalised.borrow() {
         return;
@@ -555,6 +580,7 @@ fn commit(
     let outcome = SelectorOutcome {
         selection: sel,
         cursor: state.cursor,
+        edit,
     };
     send_once(tx, Ok(outcome));
     if let Some(app) = app_weak.upgrade() {

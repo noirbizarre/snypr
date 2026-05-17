@@ -78,6 +78,24 @@ Launch the live draw-on-screen overlay. Keys: \fBR\fR rectangle, \fBA\fR arrow,
 \fBX\fR redact, \fBCtrl+Z\fR undo, \fBCtrl+L\fR clear all, \fBP\fR toggle pointer
 passthrough, \fBEsc\fR quit. Also accepts \fB\-\-via-daemon\fR to toggle a
 daemon-managed overlay instead of spawning a new process.
+.SS editor (in-place annotation overlay)
+Opened by \fBscreenshot \-\-edit\fR, by a Shift-click / \fBShift+Enter\fR on the
+selector's Capture button, or by \fBannotate\fR \fIIMAGE\fR. Save with \fBCtrl+S\fR or
+\fBEnter\fR; \fBEsc\fR quits.
+.SS selector
+The interactive selector (used by \fBscreenshot\fR without an explicit selection flag)
+shows a floating toolbar with Full / Screen / Window / Region modes, a cursor toggle, and
+a single action button:
+.RS
+.IP \(bu 2
+\fBCapture\fR (\fBEnter\fR) commits the selection and writes the result to sinks. Holding
+\fBShift\fR while clicking (or pressing \fBShift+Enter\fR / \fBShift+KP_Enter\fR) instead
+captures and then opens the in-place annotation overlay before writing. The button's icon
+and tooltip swap live while Shift is held.
+.RE
+The Shift modifier ORs into the CLI \fB\-\-edit\fR flag: Shift-click on a plain
+\fBscreenshot\fR opens the editor, and \fB\-\-edit\fR still opens the editor even on a
+plain Capture click.
 .SS daemon
 Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. Pass \fB\-\-systray\fR to
 also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
