@@ -17,14 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-4-dev \
-            libgtk4-layer-shell-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            pkg-config
+        uses: ./.github/actions/install-gtk4-layer-shell
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -56,14 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-4-dev \
-            libgtk4-layer-shell-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            pkg-config
+        uses: ./.github/actions/install-gtk4-layer-shell
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

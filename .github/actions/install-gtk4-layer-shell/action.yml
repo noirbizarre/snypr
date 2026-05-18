@@ -1,0 +1,51 @@
+name: Install gtk4-layer-shell
+description: Install gtk4-layer-shell from source with caching of the install tree.
+inputs:
+  version:
+    description: gtk4-layer-shell version (without the leading 'v').
+    required: false
+    default: "1.3.0"
+runs:
+  using: composite
+  steps:
+    - name: Install apt dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libgtk-4-dev \
+          libwayland-dev \
+          libxkbcommon-dev \
+          wayland-protocols \
+          meson \
+          ninja-build \
+          pkg-config \
+          gobject-introspection \
+          libgirepository1.0-dev
+
+    - name: Restore gtk4-layer-shell install cache
+      id: gtk4ls-cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/gtk4ls-install
+        key: gtk4-layer-shell-${{ inputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Build gtk4-layer-shell
+      if: steps.gtk4ls-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        git clone --depth 1 --branch "v${VERSION}" \
+          https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
+        cd /tmp/gtk4-layer-shell
+        meson setup build --prefix=/usr --buildtype=release \
+          -Dexamples=false -Ddocs=false -Dtests=false
+        ninja -C build
+        DESTDIR=/tmp/gtk4ls-install ninja -C build install
+
+    - name: Install gtk4-layer-shell into the system
+      shell: bash
+      run: |
+        sudo cp -a /tmp/gtk4ls-install/. /
+        sudo ldconfig
