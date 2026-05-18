@@ -35,6 +35,20 @@ use crate::capture::region::Rect;
 use crate::context::Ctx;
 use crate::ui::toolbar::{ModeKind, SELECTOR_MODES, Toolbar, ToolbarAction, ToolbarSpec};
 
+/// Marker error indicating the user dismissed the interactive selector
+/// (e.g. pressing Escape). Detected in `main` to exit 0 without logging
+/// at error level or emitting a desktop notification.
+#[derive(Debug, Clone, Copy)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled by user")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
 /// Result of an interactive selector session.
 #[derive(Clone, Debug)]
 pub struct SelectorOutcome {
@@ -659,7 +673,7 @@ fn cancel(
     *f = true;
     drop(f);
     dismiss_overlays(windows);
-    send_once(tx, Err(anyhow!("selection cancelled")));
+    send_once(tx, Err(anyhow::Error::new(Cancelled)));
     if let Some(app) = app_weak.upgrade() {
         app.quit();
     }

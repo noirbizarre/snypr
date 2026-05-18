@@ -800,7 +800,11 @@ async fn run_draw_save(
     let outcome = match selector::pick_region_in_app(&app, draw_save.cursor).await {
         Ok(o) => o,
         Err(err) => {
-            tracing::info!(error = ?err, "draw-save: selector cancelled");
+            if err.chain().any(|e| e.is::<selector::Cancelled>()) {
+                tracing::info!("draw-save: selector cancelled");
+            } else {
+                tracing::info!(error = ?err, "draw-save: selector cancelled");
+            }
             for t in toolbars.borrow().iter() {
                 t.widget().set_visible(true);
             }

@@ -27,12 +27,33 @@ fn main() -> ExitCode {
     match runtime.block_on(dispatch(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            tracing::error!(error = ?err, "hyprsnap failed");
-            eprintln!("error: {err:#}");
-            #[cfg(feature = "notify")]
-            notify_error(&err);
-            ExitCode::FAILURE
+            if is_user_cancelled(&err) {
+                tracing::info!("cancelled by user");
+                ExitCode::SUCCESS
+            } else {
+                tracing::error!(error = ?err, "hyprsnap failed");
+                eprintln!("error: {err:#}");
+                #[cfg(feature = "notify")]
+                notify_error(&err);
+                ExitCode::FAILURE
+            }
         }
+    }
+}
+
+/// Detect a user-driven cancellation (e.g. Escape in the interactive selector)
+/// anywhere in the error chain, so we can exit cleanly without logging at error
+/// level or emitting a desktop notification.
+fn is_user_cancelled(err: &anyhow::Error) -> bool {
+    #[cfg(feature = "ui")]
+    {
+        err.chain()
+            .any(|e| e.is::<hyprsnap::ui::selector::Cancelled>())
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        let _ = err;
+        false
     }
 }
 
