@@ -141,22 +141,40 @@ hl.window_rule({
 
 ### Hyprland keybindings
 
-A ready-to-paste sample lives in [`docs/hyprland.conf.example`](docs/hyprland.conf.example):
+Drop the following into your Hyprland Lua config (e.g.
+`~/.config/hypr/hyprland.lua`) — adjust paths/mods to taste:
 
-```hyprlang
-# ~/.config/hypr/hyprland.conf
-bind = SUPER,        Print, exec, hyprsnap screenshot --edit --to clipboard --to file
-bind = SUPER SHIFT,  Print, exec, hyprsnap screenshot --full --to file
-bind = SUPER CTRL,   Print, exec, hyprsnap screenshot --focused --to clipboard
-bind = SUPER ALT,    Print, exec, hyprsnap draw
+```lua
+-- Default screenshot (uses the configured defaults from ~/.config/hyprsnap/config.toml).
+hl.bind("SUPER + Print", hl.dsp.exec_cmd("hyprsnap screenshot"))
 
-# Toggle pointer passthrough on a running draw overlay. Useful because
-# passthrough mode detaches the surface from the keyboard, so the overlay's
-# own `P` shortcut can't turn passthrough back off — a global keybind can.
-bind = SUPER ALT,    P,     exec, hyprsnap draw --via-daemon --toggle-passthrough
+-- Full desktop, stitched across every output, written to the configured directory.
+hl.bind("SUPER + SHIFT + Print",
+    hl.dsp.exec_cmd("hyprsnap screenshot --full --to file"))
 
-# Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
-exec-once = hyprsnap daemon --systray
+-- One PNG per monitor (uses {output} in the filename template).
+hl.bind("SUPER + SHIFT + ALT + Print",
+    hl.dsp.exec_cmd("hyprsnap screenshot --full --per-output --to file"))
+
+-- Currently focused window (queried over Hyprland IPC), copied to the clipboard.
+hl.bind("SUPER + CTRL + Print",
+    hl.dsp.exec_cmd("hyprsnap screenshot --focused --to clipboard"))
+
+-- Live draw-on-screen overlay — ideal for presentations / Google Meet.
+-- Inside the overlay: R/A/H/F/N/T/X to pick tools, Ctrl+Z to undo,
+-- P to toggle pointer passthrough, Ctrl+L to clear, Esc to quit.
+hl.bind("SUPER + ALT + Print", hl.dsp.exec_cmd("hyprsnap draw"))
+
+-- Toggle pointer passthrough on a running draw overlay. Useful because
+-- passthrough mode detaches the surface from the keyboard, so the overlay's
+-- own `P` shortcut can't turn passthrough back off — a global keybind can.
+hl.bind("SUPER + ALT + P",
+    hl.dsp.exec_cmd("hyprsnap draw --via-daemon --toggle-passthrough"))
+
+-- Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
+hl.on("hyprland.start", function()
+    hl.exec_cmd("hyprsnap daemon --systray")
+end)
 ```
 
 ### Troubleshooting
