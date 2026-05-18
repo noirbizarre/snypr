@@ -34,11 +34,45 @@ mise run fmt             # cargo fmt --all
 mise run cover           # cargo llvm-cov nextest
 ```
 
-System dependencies (Debian / Ubuntu):
+### Build dependencies
+
+Arch Linux (primary target):
+
+```sh
+sudo pacman -S --needed gtk4 gtk4-layer-shell wayland pkgconf
+```
+
+Debian / Ubuntu:
 
 ```sh
 sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
 ```
+
+### Runtime dependencies
+
+- A wlroots-based Wayland compositor exposing the
+  `zwlr_screencopy_manager_v1` protocol — Hyprland is the primary target;
+  sway, river, and other wlroots compositors should also work.
+- GTK4 stack at runtime.
+  - Arch Linux:
+    ```sh
+    sudo pacman -S --needed gtk4 gtk4-layer-shell wayland
+    ```
+  - Debian / Ubuntu:
+    ```sh
+    sudo apt install libgtk-4-1 libgtk4-layer-shell0 libwayland-client0
+    ```
+- Optional, only when running `hyprsnap daemon --systray` (the `tray`
+  feature): a StatusNotifierItem host such as `waybar` (with the tray
+  module), `swaync`, or `ironbar`.
+- Optional, only when the `notify` feature surfaces errors as desktop
+  toasts (default): a notification daemon implementing
+  `org.freedesktop.Notifications`, e.g. `mako`, `dunst`, or `swaync`.
+
+No external CLI helpers are invoked: `hyprctl`, `grim`, `slurp`, and
+`wl-copy` are **not** required. Hyprland IPC is spoken directly over the
+command socket, Wayland capture goes through `zwlr_screencopy_manager_v1`,
+and clipboard writes use `wl-clipboard-rs`.
 
 ## Usage
 
