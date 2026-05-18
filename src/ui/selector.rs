@@ -33,6 +33,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use crate::capture::Selection;
 use crate::capture::region::Rect;
 use crate::context::Ctx;
+use crate::hypr::{self, HyprWindow};
 use crate::ui::toolbar::{ModeKind, SELECTOR_MODES, Toolbar, ToolbarAction, ToolbarSpec};
 
 /// Marker error indicating the user dismissed the interactive selector
@@ -73,7 +74,8 @@ pub struct SelectorOutcome {
 /// action), call [`pick_region_in_app`] instead so we don't try to spin up a second GTK app.
 pub async fn pick_region(_ctx: Ctx, initial_cursor: bool) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
-    tokio::task::spawn_blocking(move || run_gtk(tx, initial_cursor))
+    let clients = fetch_clients_or_warn().await;
+    tokio::task::spawn_blocking(move || run_gtk(tx, initial_cursor, clients))
         .await
         .map_err(|e| anyhow!("selector task panicked: {e}"))??;
     let result = rx
@@ -102,11 +104,12 @@ pub async fn pick_region_in_app(
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let tx: Sender = Arc::new(Mutex::new(Some(tx)));
+    let clients = fetch_clients_or_warn().await;
     // Empty WeakRef → commit/cancel's `app.upgrade()` returns None → no `app.quit()` fires
     // against the caller's app. Windows are still parented to `app` (required by GTK), but
     // they're destroyed by `dismiss_overlays` so they don't keep the app alive on their own.
     let quit_target: glib::WeakRef<gtk4::Application> = glib::WeakRef::new();
-    if let Err(err) = build_overlays(app, &tx, initial_cursor, quit_target) {
+    if let Err(err) = build_overlays(app, &tx, initial_cursor, quit_target, clients) {
         send_once(&tx, Err(err));
     }
     let result = rx
@@ -125,6 +128,26 @@ struct MonitorInfo {
     connector: Option<String>,
 }
 
+/// A window picked from the cached Hyprland clients list, carried as the "selected" zone in
+/// Window mode. Stored in compositor logical coordinates so painting can translate to each
+/// per-monitor widget-local space without re-querying Hyprland.
+#[derive(Clone, Debug)]
+struct PickedWindow {
+    rect: Rect,
+    title: String,
+    class: String,
+}
+
+impl From<&HyprWindow> for PickedWindow {
+    fn from(w: &HyprWindow) -> Self {
+        Self {
+            rect: w.rect(),
+            title: w.title.clone(),
+            class: w.class.clone(),
+        }
+    }
+}
+
 /// Shared selection state visible to every monitor overlay.
 #[derive(Clone, Debug, Default)]
 struct SharedSelection {
@@ -138,6 +161,13 @@ struct SharedSelection {
     cursor: bool,
     /// Monitor currently under the pointer (Screen mode highlight).
     hover_monitor: Option<usize>,
+    /// Monitor explicitly picked by clicking (Screen mode). `None` until the user clicks; then
+    /// remains set until they click a different monitor.
+    selected_monitor: Option<usize>,
+    /// Window currently under the pointer (Window mode hover outline).
+    hover_window: Option<PickedWindow>,
+    /// Window explicitly picked by clicking (Window mode).
+    selected_window: Option<PickedWindow>,
 }
 
 impl SharedSelection {
@@ -162,6 +192,7 @@ type AreaRegistry = Rc<RefCell<Vec<SelectorOverlay>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 type MonitorList = Rc<RefCell<Vec<MonitorInfo>>>;
 type ToolbarRegistry = Rc<RefCell<Vec<Toolbar>>>;
+type ClientList = Rc<RefCell<Vec<HyprWindow>>>;
 
 fn send_once(tx: &Sender, msg: Result<SelectorOutcome>) {
     if let Ok(mut guard) = tx.lock()
@@ -177,9 +208,56 @@ fn redraw_all(areas: &AreaRegistry) {
     }
 }
 
+/// Translate widget-local coordinates on monitor `monitor_index` to compositor logical
+/// coordinates by adding the monitor's logical offset from `gdk::Monitor::geometry()`.
+fn local_to_logical(monitor_index: usize, x: f64, y: f64) -> Option<(i32, i32)> {
+    let display = gdk4::Display::default()?;
+    let monitors = display.monitors();
+    let obj = monitors.item(monitor_index as u32)?;
+    let monitor = obj.downcast::<gdk4::Monitor>().ok()?;
+    let geo = monitor.geometry();
+    Some((geo.x() + x.round() as i32, geo.y() + y.round() as i32))
+}
+
+/// Inverse of `local_to_logical`: subtract the monitor's logical offset from a rect expressed
+/// in compositor logical coordinates so it can be drawn into the monitor's widget. Returns
+/// `None` if the monitor index doesn't resolve. Negative widget coordinates are kept so the
+/// snapshot code can clip naturally; the caller decides whether the rect intersects the
+/// widget.
+fn logical_to_local(monitor_index: usize, rect: &Rect) -> Option<(f32, f32, f32, f32)> {
+    let display = gdk4::Display::default()?;
+    let monitors = display.monitors();
+    let obj = monitors.item(monitor_index as u32)?;
+    let monitor = obj.downcast::<gdk4::Monitor>().ok()?;
+    let geo = monitor.geometry();
+    Some((
+        (rect.x - geo.x()) as f32,
+        (rect.y - geo.y()) as f32,
+        rect.w as f32,
+        rect.h as f32,
+    ))
+}
+
+/// Try to snapshot Hyprland's client list. On failure (host isn't Hyprland, socket
+/// missing, IPC error) we log a warning and return an empty list — Window mode then falls
+/// back to its legacy "capture focused window" behavior via `Selection::Window`.
+async fn fetch_clients_or_warn() -> Vec<HyprWindow> {
+    match hypr::clients().await {
+        Ok(list) => list,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not fetch Hyprland clients; Window mode will fall back to focused-window capture"
+            );
+            Vec::new()
+        }
+    }
+}
+
 fn run_gtk(
     tx: tokio::sync::oneshot::Sender<Result<SelectorOutcome>>,
     initial_cursor: bool,
+    clients: Vec<HyprWindow>,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
@@ -188,6 +266,7 @@ fn run_gtk(
 
     {
         let tx = tx.clone();
+        let clients = Rc::new(RefCell::new(clients));
         app.connect_activate(move |app| {
             crate::ui::install_icon_resources();
             // Standalone: pass `app.downgrade()` as the quit target so commit / cancel tear
@@ -195,7 +274,10 @@ fn run_gtk(
             // `pick_region_in_app` path passes an empty WeakRef to leave the caller's app
             // alone.
             let quit_target = app.downgrade();
-            if let Err(err) = build_overlays(app, &tx, initial_cursor, quit_target) {
+            let clients_snapshot = clients.borrow().clone();
+            if let Err(err) =
+                build_overlays(app, &tx, initial_cursor, quit_target, clients_snapshot)
+            {
                 send_once(&tx, Err(err));
                 app.quit();
             }
@@ -216,6 +298,7 @@ fn build_overlays(
     tx: &Sender,
     initial_cursor: bool,
     quit_target: glib::WeakRef<gtk4::Application>,
+    clients: Vec<HyprWindow>,
 ) -> Result<()> {
     crate::ui::style::install();
 
@@ -239,6 +322,7 @@ fn build_overlays(
         app_weak: quit_target,
         toolbars: Rc::new(RefCell::new(Vec::new())),
         initial_cursor,
+        clients: Rc::new(RefCell::new(clients)),
     };
 
     let mut windows = Vec::with_capacity(n as usize);
@@ -365,6 +449,11 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
                     s.start = None;
                     s.current = None;
                 }
+                // Switching modes always clears any previously "armed" zone so the user
+                // doesn't accidentally commit a stale selection from a different mode.
+                s.selected_monitor = None;
+                s.selected_window = None;
+                s.hover_window = None;
             }
             for t in toolbars.borrow().iter() {
                 t.set_mode(mode);
@@ -420,6 +509,10 @@ struct SharedState {
     app_weak: glib::WeakRef<gtk4::Application>,
     toolbars: ToolbarRegistry,
     initial_cursor: bool,
+    /// Snapshot of Hyprland's client list at selector start, used by Window mode for
+    /// cursor-based hit-testing. Empty when the query failed or the host isn't Hyprland — in
+    /// that case Window mode falls back to the legacy "capture focused window" behavior.
+    clients: ClientList,
 }
 
 fn install_drag(
@@ -484,8 +577,18 @@ fn install_drag(
     area.add_controller(drag);
 }
 
-/// Hover tracking + click-to-pick for the non-Region modes. `MotionController` updates
-/// `hover_monitor`; `GestureClick` commits in Screen / Window / Full modes.
+/// Hover tracking + click-to-select for the non-Region modes.
+///
+/// - `Screen`: `MotionController::enter/leave` updates `hover_monitor`. A click sets
+///   `selected_monitor` so the picked screen stays outlined after the pointer moves.
+/// - `Window`: `MotionController::motion` hit-tests the cached Hyprland clients list to update
+///   `hover_window`. A click promotes the hovered window into `selected_window`.
+/// - `Full`: clicking simply triggers a redraw — `Full` is implicitly the whole desktop, so
+///   there's nothing to "select"; validation still goes through Enter / Capture / Shift+Enter
+///   / Shift+click on the Capture button.
+///
+/// Critically, **none of these click paths call `commit` directly**: every mode goes through
+/// the same Enter / Capture / Shift+Enter / Shift+Capture validation pipeline as Region.
 fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared: &SharedState) {
     let motion = gtk4::EventControllerMotion::new();
     {
@@ -505,8 +608,41 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
         let areas = shared.areas.clone();
         motion.connect_leave(move |_| {
             let mut s = selection.borrow_mut();
+            let mut changed = false;
             if s.hover_monitor == Some(monitor_index) {
                 s.hover_monitor = None;
+                changed = true;
+            }
+            if s.hover_window.is_some() {
+                s.hover_window = None;
+                changed = true;
+            }
+            if changed {
+                drop(s);
+                redraw_all(&areas);
+            }
+        });
+    }
+    {
+        let selection = shared.selection.clone();
+        let areas = shared.areas.clone();
+        let clients = shared.clients.clone();
+        motion.connect_motion(move |_, x, y| {
+            if selection.borrow().mode != ModeKind::Window {
+                return;
+            }
+            let Some((lx, ly)) = local_to_logical(monitor_index, x, y) else {
+                return;
+            };
+            let next = hypr::window_at(&clients.borrow(), lx, ly).map(PickedWindow::from);
+            let mut s = selection.borrow_mut();
+            let changed = match (&s.hover_window, &next) {
+                (Some(a), Some(b)) => a.rect != b.rect,
+                (None, None) => false,
+                _ => true,
+            };
+            if changed {
+                s.hover_window = next;
                 drop(s);
                 redraw_all(&areas);
             }
@@ -518,21 +654,40 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
     click.set_button(gdk4::BUTTON_PRIMARY);
     {
         let selection = shared.selection.clone();
-        let tx = shared.tx.clone();
-        let finalised = shared.finalised.clone();
-        let windows = shared.windows.clone();
-        let monitors = shared.monitors.clone();
-        let app_weak = shared.app_weak.clone();
-        click.connect_pressed(move |_, _, _, _| {
+        let areas = shared.areas.clone();
+        let clients = shared.clients.clone();
+        click.connect_pressed(move |_, _, x, y| {
             let mode = selection.borrow().mode;
-            // Region mode commits via Enter / Capture button, never via a single click.
+            // Region mode arms its selection via drag; clicks are ignored here.
             if mode == ModeKind::Region {
                 return;
             }
-            let info = monitors.borrow().get(monitor_index).cloned();
-            commit(
-                &selection, &tx, &finalised, &windows, &monitors, &app_weak, info, false,
-            );
+            let mut s = selection.borrow_mut();
+            match mode {
+                ModeKind::Screen => {
+                    s.selected_monitor = Some(monitor_index);
+                    s.selected_window = None;
+                }
+                ModeKind::Window => {
+                    let picked = local_to_logical(monitor_index, x, y).and_then(|(lx, ly)| {
+                        hypr::window_at(&clients.borrow(), lx, ly).map(PickedWindow::from)
+                    });
+                    if picked.is_some() {
+                        s.selected_window = picked;
+                        s.selected_monitor = None;
+                    }
+                    // Click on empty space in Window mode: keep the previous selection (if
+                    // any) so accidentally missing a window doesn't blow away the user's
+                    // pick. A miss is visible — no window is outlined — so the user can
+                    // retry.
+                }
+                ModeKind::Full => {
+                    // Implicit selection; nothing to update beyond the redraw triggered below.
+                }
+                ModeKind::Region => unreachable!(),
+            }
+            drop(s);
+            redraw_all(&areas);
         });
     }
     area.add_controller(click);
@@ -556,12 +711,15 @@ fn install_keys(
     let windows = windows.clone();
     let monitors = monitors.clone();
     let app_weak = app_weak.clone();
-    key.connect_key_pressed(move |_, k, _, _| match k {
+    key.connect_key_pressed(move |_, k, _, modifiers| match k {
         gdk4::Key::Escape => {
             cancel(&tx, &finalised, &windows, &app_weak);
             glib::Propagation::Stop
         }
         gdk4::Key::Return | gdk4::Key::KP_Enter => {
+            // Shift+Enter routes to the annotation editor, mirroring the toolbar's
+            // `ShortcutAction::Annotate` shortcut so both layers stay in sync.
+            let edit = modifiers.contains(gdk4::ModifierType::SHIFT_MASK);
             commit(
                 &selection,
                 &tx,
@@ -570,7 +728,7 @@ fn install_keys(
                 &monitors,
                 &app_weak,
                 Some(info.clone()),
-                false,
+                edit,
             );
             glib::Propagation::Stop
         }
@@ -596,12 +754,18 @@ fn dismiss_overlays(windows: &WindowRegistry) {
 /// - `Region`: needs `local_info` so we can translate widget-local coordinates back to
 ///   compositor logical coords via `gdk::Monitor::geometry()`. Falls through to `None` if no
 ///   rectangle has been drawn yet.
-/// - `Screen`: uses `local_info` (the monitor we're committing from) → `Selection::Output(name)`.
-/// - `Window`: returns `Selection::Window`; the capture pipeline resolves it via Hyprland IPC.
+/// - `Screen`: prefers the explicitly-clicked `selected_monitor`; falls back to `local_info`
+///   (the monitor that hosted the Enter / Capture button) when nothing was clicked yet so
+///   keyboard-only use keeps working.
+/// - `Window`: prefers the explicitly-clicked `selected_window` (resolved locally via the
+///   cached Hyprland clients list → `Selection::Region(rect)`). Falls back to
+///   `Selection::Window` (focused window) so users that never moved the mouse still get a
+///   sensible capture — and so we degrade gracefully when the Hyprland client query failed.
 /// - `Full`: returns `Selection::Full`.
 fn resolve_selection(
     state: &SharedSelection,
     local_info: Option<&MonitorInfo>,
+    monitors: &[MonitorInfo],
 ) -> Option<Selection> {
     match state.mode {
         ModeKind::Region => {
@@ -620,11 +784,17 @@ fn resolve_selection(
             }))
         }
         ModeKind::Screen => {
-            let info = local_info?;
-            let name = info.connector.clone()?;
-            Some(Selection::Output(name))
+            let connector = state
+                .selected_monitor
+                .and_then(|idx| monitors.get(idx))
+                .or(local_info)
+                .and_then(|info| info.connector.clone())?;
+            Some(Selection::Output(connector))
         }
-        ModeKind::Window => Some(Selection::Window),
+        ModeKind::Window => match &state.selected_window {
+            Some(picked) => Some(Selection::Region(picked.rect)),
+            None => Some(Selection::Window),
+        },
         ModeKind::Full => Some(Selection::Full),
     }
 }
@@ -635,7 +805,7 @@ fn commit(
     tx: &Sender,
     finalised: &Rc<RefCell<bool>>,
     windows: &WindowRegistry,
-    _monitors: &MonitorList,
+    monitors: &MonitorList,
     app_weak: &glib::WeakRef<gtk4::Application>,
     local_info: Option<MonitorInfo>,
     edit: bool,
@@ -644,7 +814,8 @@ fn commit(
         return;
     }
     let state = selection.borrow().clone();
-    let Some(sel) = resolve_selection(&state, local_info.as_ref()) else {
+    let monitors_snapshot = monitors.borrow().clone();
+    let Some(sel) = resolve_selection(&state, local_info.as_ref(), &monitors_snapshot) else {
         return;
     };
     *finalised.borrow_mut() = true;
@@ -812,37 +983,79 @@ mod imp {
                         snapshot,
                         w,
                         h,
-                        "Full desktop — click Capture or press Enter",
+                        "Full desktop — Enter to confirm, Esc to cancel",
                         &label_color,
                     );
                 }
                 ModeKind::Screen => {
+                    let selected = state.selected_monitor == Some(monitor_index);
                     let hovered = state.hover_monitor == Some(monitor_index);
-                    let dim = if hovered { dim_light } else { dim_strong };
+                    // Selected screen stays bright (dim_light) until the user picks a
+                    // different one; hovered (but not selected) screens get the same lift
+                    // as a hint. Everything else is fully dimmed.
+                    let dim = if selected || hovered {
+                        dim_light
+                    } else {
+                        dim_strong
+                    };
                     snapshot.append_color(&dim, &graphene::Rect::new(0.0, 0.0, w, h));
-                    if hovered {
+                    if selected || hovered {
                         let pb = gtk4::gsk::PathBuilder::new();
                         pb.add_rect(&graphene::Rect::new(1.5, 1.5, w - 3.0, h - 3.0));
-                        let stroke = gtk4::gsk::Stroke::new(3.0);
+                        let stroke = gtk4::gsk::Stroke::new(if selected { 4.0 } else { 2.0 });
                         snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
                     }
-                    self.draw_hint(
-                        snapshot,
-                        w,
-                        h,
-                        "Hover a monitor and click to capture it",
-                        &label_color,
-                    );
+                    let hint = if state.selected_monitor.is_some() {
+                        "Screen selected — Enter to confirm, Esc to cancel"
+                    } else {
+                        "Click a screen — Enter to confirm, Esc to cancel"
+                    };
+                    self.draw_hint(snapshot, w, h, hint, &label_color);
                 }
                 ModeKind::Window => {
                     snapshot.append_color(&dim_strong, &graphene::Rect::new(0.0, 0.0, w, h));
-                    self.draw_hint(
-                        snapshot,
-                        w,
-                        h,
-                        "Focused window — click Capture or press Enter",
-                        &label_color,
-                    );
+
+                    // Outline the hovered window (thin) and the selected window (thick), each
+                    // translated from compositor logical coords into this monitor's
+                    // widget-local space. Both can clip out of the widget — gsk's stroke
+                    // handles that naturally.
+                    if let Some(picked) = &state.hover_window
+                        && state
+                            .selected_window
+                            .as_ref()
+                            .is_none_or(|p| p.rect != picked.rect)
+                        && let Some((rx, ry, rw, rh)) =
+                            logical_to_local(monitor_index, &picked.rect)
+                    {
+                        let pb = gtk4::gsk::PathBuilder::new();
+                        pb.add_rect(&graphene::Rect::new(rx + 0.5, ry + 0.5, rw - 1.0, rh - 1.0));
+                        let stroke = gtk4::gsk::Stroke::new(2.0);
+                        snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
+                    }
+                    if let Some(picked) = &state.selected_window
+                        && let Some((rx, ry, rw, rh)) =
+                            logical_to_local(monitor_index, &picked.rect)
+                    {
+                        let pb = gtk4::gsk::PathBuilder::new();
+                        pb.add_rect(&graphene::Rect::new(rx + 0.5, ry + 0.5, rw - 1.0, rh - 1.0));
+                        let stroke = gtk4::gsk::Stroke::new(3.0);
+                        snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
+                    }
+
+                    let hint = match &state.selected_window {
+                        Some(p) if !p.class.is_empty() && !p.title.is_empty() => {
+                            format!("{}: {} — Enter to confirm, Esc to cancel", p.class, p.title)
+                        }
+                        Some(p) if !p.class.is_empty() => {
+                            format!("{} — Enter to confirm, Esc to cancel", p.class)
+                        }
+                        Some(p) if !p.title.is_empty() => {
+                            format!("{} — Enter to confirm, Esc to cancel", p.title)
+                        }
+                        Some(_) => "Window selected — Enter to confirm, Esc to cancel".to_owned(),
+                        None => "Click a window — Enter to confirm, Esc to cancel".to_owned(),
+                    };
+                    self.draw_hint(snapshot, w, h, &hint, &label_color);
                 }
             }
         }

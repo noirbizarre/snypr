@@ -70,6 +70,85 @@ pub async fn active_window() -> Result<ActiveWindow> {
     })
 }
 
+/// A single Hyprland client (window) as reported by `j/clients`.
+///
+/// Order in the returned `Vec` matches Hyprland's IPC response, which is z-ordered
+/// front-to-back; callers that want hit-testing should iterate in order and pick the
+/// first match.
+#[derive(Debug, Clone)]
+pub struct HyprWindow {
+    pub address: String,
+    pub title: String,
+    pub class: String,
+    pub at: (i32, i32),
+    pub size: (u32, u32),
+    pub monitor: String,
+    pub workspace_id: i64,
+    pub mapped: bool,
+    pub hidden: bool,
+}
+
+impl HyprWindow {
+    pub fn rect(&self) -> Rect {
+        Rect {
+            x: self.at.0,
+            y: self.at.1,
+            w: self.size.0,
+            h: self.size.1,
+        }
+    }
+}
+
+/// List every Hyprland client (window). Order is preserved from the IPC response so
+/// front-to-back hit-testing works without re-sorting.
+pub async fn clients() -> Result<Vec<HyprWindow>> {
+    let body = query("j/clients").await?;
+
+    #[derive(Deserialize)]
+    struct RawWorkspace {
+        id: i64,
+    }
+    #[derive(Deserialize)]
+    struct Raw {
+        address: String,
+        title: String,
+        class: String,
+        at: [i32; 2],
+        size: [i32; 2],
+        monitor: i64,
+        workspace: RawWorkspace,
+        mapped: bool,
+        hidden: bool,
+    }
+
+    let raw: Vec<Raw> = serde_json::from_str(&body)
+        .with_context(|| format!("parsing Hyprland clients response: {body}"))?;
+    Ok(raw
+        .into_iter()
+        .map(|r| HyprWindow {
+            address: r.address,
+            title: r.title,
+            class: r.class,
+            at: (r.at[0], r.at[1]),
+            size: (r.size[0].max(0) as u32, r.size[1].max(0) as u32),
+            monitor: r.monitor.to_string(),
+            workspace_id: r.workspace.id,
+            mapped: r.mapped,
+            hidden: r.hidden,
+        })
+        .collect())
+}
+
+/// Topmost mapped, visible client whose rectangle contains the logical point `(x, y)`.
+///
+/// Assumes `clients` is in Hyprland's z-order (front-to-back), which is how
+/// [`clients`] returns them.
+pub fn window_at(clients: &[HyprWindow], x: i32, y: i32) -> Option<&HyprWindow> {
+    clients
+        .iter()
+        .find(|c| c.mapped && !c.hidden && c.rect().contains(x, y))
+}
+
 /// Name of the focused monitor.
 pub async fn focused_monitor() -> Result<String> {
     let body = query("j/monitors").await?;
@@ -136,4 +215,83 @@ pub(crate) fn socket_path() -> Result<PathBuf> {
     bail!(
         "Hyprland IPC socket not found under $XDG_RUNTIME_DIR/hypr/{sig}/.socket.sock or /tmp/hypr/{sig}/.socket.sock",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn win(
+        address: &str,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        mapped: bool,
+        hidden: bool,
+    ) -> HyprWindow {
+        HyprWindow {
+            address: address.into(),
+            title: "t".into(),
+            class: "c".into(),
+            at: (x, y),
+            size: (w, h),
+            monitor: "0".into(),
+            workspace_id: 1,
+            mapped,
+            hidden,
+        }
+    }
+
+    #[test]
+    fn window_at_returns_topmost_match() {
+        // Hyprland returns clients front-to-back; the first match wins.
+        let clients = vec![
+            win("top", 0, 0, 100, 100, true, false),
+            win("bottom", 0, 0, 200, 200, true, false),
+        ];
+        assert_eq!(
+            window_at(&clients, 50, 50).map(|w| w.address.as_str()),
+            Some("top")
+        );
+    }
+
+    #[test]
+    fn window_at_skips_unmapped_and_hidden() {
+        let clients = vec![
+            win("unmapped", 0, 0, 100, 100, false, false),
+            win("hidden", 0, 0, 100, 100, true, true),
+            win("visible", 0, 0, 100, 100, true, false),
+        ];
+        assert_eq!(
+            window_at(&clients, 10, 10).map(|w| w.address.as_str()),
+            Some("visible")
+        );
+    }
+
+    #[test]
+    fn window_at_returns_none_when_point_outside() {
+        let clients = vec![win("only", 0, 0, 10, 10, true, false)];
+        assert_eq!(
+            window_at(&clients, 100, 100).map(|w| w.address.as_str()),
+            None
+        );
+    }
+
+    #[test]
+    fn window_at_picks_correct_one_for_disjoint_clients() {
+        let clients = vec![
+            win("left", 0, 0, 100, 100, true, false),
+            win("right", 200, 0, 100, 100, true, false),
+        ];
+        assert_eq!(
+            window_at(&clients, 250, 50).map(|w| w.address.as_str()),
+            Some("right")
+        );
+        assert_eq!(
+            window_at(&clients, 50, 50).map(|w| w.address.as_str()),
+            Some("left")
+        );
+    }
 }

@@ -37,6 +37,14 @@ impl Rect {
         }
     }
 
+    /// `true` if the rectangle contains the point `(x, y)` (logical coordinates).
+    ///
+    /// Half-open on the right/bottom edges so adjacent rectangles don't both claim a shared
+    /// border pixel.
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && y >= self.y && x < self.right() && y < self.bottom()
+    }
+
     /// Intersection of two rectangles. `None` if they don't overlap.
     pub fn intersect(&self, other: &Rect) -> Option<Rect> {
         let x = self.x.max(other.x);
