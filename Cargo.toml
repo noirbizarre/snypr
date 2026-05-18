@@ -104,7 +104,7 @@ notify-rust = { version = "4", optional = true }
 glib-build-tools = "0.22"
 
 [dev-dependencies]
-rstest = "0.23"
+rstest = "0.26"
 pretty_assertions = "1"
 tempfile = "3"
 
