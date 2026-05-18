@@ -53,6 +53,10 @@ impl AnnotationCanvas {
         imp.base_texture.replace(tex);
         imp.doc.replace(Some(Rc::new(RefCell::new(doc))));
         imp.pending.replace(None);
+        // Drop any in-progress text edit when the document changes; the new doc has its
+        // own coordinate space and the in-flight buffer is meaningless against it. The
+        // caret-blink timer self-terminates as soon as it sees `pending_text` is None.
+        imp.pending_text.replace(None);
         imp.next_number.set(1);
         self.queue_resize();
         self.queue_draw();
@@ -60,6 +64,15 @@ impl AnnotationCanvas {
 
     /// Currently active tool used when the user starts a new drag.
     pub fn set_tool(&self, kind: ToolKind) {
+        // Switching away from the Text tool while a text edit is in progress commits
+        // whatever the user has typed so far — typing then clicking a different tool
+        // button is a natural "I'm done with this label" gesture.
+        if self.imp().current_tool.get() == ToolKind::Text
+            && kind != ToolKind::Text
+            && self.imp().pending_text.borrow().is_some()
+        {
+            commit_pending_text(self);
+        }
         self.imp().current_tool.set(kind);
     }
 
@@ -76,8 +89,16 @@ impl AnnotationCanvas {
 
     /// Override the color stored for `kind`. Has no effect on already-committed layers;
     /// only affects subsequent drags / clicks that produce a fresh tool instance.
+    /// When a text edit is currently in progress for this kind, the in-flight
+    /// `PendingText` color is updated live so the user sees the new color immediately.
     pub fn set_tool_color(&self, kind: ToolKind, color: [f32; 4]) {
         self.imp().tool_colors.borrow_mut().insert(kind, color);
+        if matches!(kind, ToolKind::Text)
+            && let Some(pt) = self.imp().pending_text.borrow_mut().as_mut()
+        {
+            pt.color = color;
+            self.queue_draw();
+        }
     }
 
     /// Stroke dash style the given tool should use on the next drag commit. Returns
@@ -91,6 +112,27 @@ impl AnnotationCanvas {
     /// [`Self::set_tool_color`] — affects future drags only, not committed layers.
     pub fn set_tool_style(&self, kind: ToolKind, style: StrokeStyle) {
         self.imp().tool_styles.borrow_mut().insert(kind, style);
+    }
+
+    /// Font size (in points) for tools that render text. Returns `None` for tools whose
+    /// appearance isn't text-based, so the toolbar can hide/disable its size picker
+    /// for them.
+    pub fn tool_font_size(&self, kind: ToolKind) -> Option<f32> {
+        self.imp().tool_font_sizes.borrow().get(&kind).copied()
+    }
+
+    /// Override the font size for `kind`. If a text edit is currently in progress for
+    /// this same kind, the in-flight `PendingText` is updated live so the user sees the
+    /// new size immediately.
+    pub fn set_tool_font_size(&self, kind: ToolKind, size: f32) {
+        let size = size.max(1.0);
+        self.imp().tool_font_sizes.borrow_mut().insert(kind, size);
+        if matches!(kind, ToolKind::Text)
+            && let Some(pt) = self.imp().pending_text.borrow_mut().as_mut()
+        {
+            pt.size_pt = size;
+            self.queue_draw();
+        }
     }
 
     /// Render with a transparent background when no base image is loaded. The annotation editor
@@ -475,6 +517,45 @@ fn snapshot_text(snap: &gtk4::Snapshot, t: &TextTool, pango_ctx: &pango::Context
     snap.restore();
 }
 
+/// Build a Pango layout for the in-progress text editor. Mirrors `text_layout` so the
+/// preview pixels match what gets committed.
+fn pending_text_layout(pt: &PendingText, pango_ctx: &pango::Context) -> pango::Layout {
+    let layout = pango::Layout::new(pango_ctx);
+    layout.set_text(&pt.buffer);
+    let mut desc = pango::FontDescription::from_string("Sans");
+    desc.set_size((pt.size_pt as f64 * pango::SCALE as f64) as i32);
+    layout.set_font_description(Some(&desc));
+    layout
+}
+
+/// Render the in-progress text edit at its current state: the laid-out glyphs plus a
+/// blinking caret. Uses the same Pango/GSK path as `snapshot_text`, so the on-screen
+/// preview is pixel-identical to the eventual committed layer.
+fn snapshot_pending_text(snap: &gtk4::Snapshot, pt: &PendingText, pango_ctx: &pango::Context) {
+    let layout = pending_text_layout(pt, pango_ctx);
+    snap.save();
+    snap.translate(&graphene::Point::new(
+        pt.origin.0 as f32,
+        pt.origin.1 as f32,
+    ));
+    if !pt.buffer.is_empty() {
+        snap.append_layout(&layout, &rgba(pt.color));
+    }
+    if pt.caret_visible {
+        // Pango reports the caret position in Pango units (1024 per pixel). The "strong"
+        // cursor pos is the natural visual location at the byte caret; we render it as a
+        // ~1.5 px vertical bar in the text color so it stays visible against any base.
+        let (strong, _weak) = layout.cursor_pos(pt.caret as i32);
+        let scale = pango::SCALE as f32;
+        let cx = strong.x() as f32 / scale;
+        let cy = strong.y() as f32 / scale;
+        let ch = (strong.height() as f32 / scale).max(pt.size_pt);
+        let caret_rect = graphene::Rect::new(cx, cy, 1.5, ch);
+        snap.append_color(&rgba(pt.color), &caret_rect);
+    }
+    snap.restore();
+}
+
 /// Blur the base image inside the tool's bounds, leaving other layers untouched. The push_blur
 /// node applies a Gaussian blur to everything drawn in the active subtree; we wrap that subtree
 /// in a clip rect so only pixels inside `t.bounds` are affected.
@@ -616,6 +697,27 @@ pub struct PendingStroke {
     style: StrokeStyle,
 }
 
+/// An in-progress WYSIWYG text edit. Lives in `imp.pending_text` while the user types;
+/// rendered live by [`snapshot_pending_text`] using the same Pango helpers as the
+/// committed [`TextTool`], so the user sees exactly what the final annotation will look
+/// like. The caret toggles `caret_visible` every ~530 ms via a `glib::timeout_add_local`
+/// timer that self-terminates when this slot becomes `None`.
+#[derive(Clone, Debug)]
+pub struct PendingText {
+    /// Top-left of the text block on the document, in document coords (same convention
+    /// as [`TextTool::origin`]).
+    pub origin: (f64, f64),
+    /// UTF-8 text content; may contain `\n` for explicit newlines (Shift+Return).
+    pub buffer: String,
+    /// Byte offset into `buffer` for the insertion caret. Always sits on a UTF-8
+    /// character boundary; never indexed by char count.
+    pub caret: usize,
+    pub color: [f32; 4],
+    pub size_pt: f32,
+    /// Toggled by the blink timer; drives whether `snapshot_pending_text` draws the caret.
+    pub caret_visible: bool,
+}
+
 mod imp {
     use super::*;
 
@@ -624,6 +726,12 @@ mod imp {
         pub base_texture: RefCell<Option<gdk::MemoryTexture>>,
         pub current_tool: Cell<ToolKind>,
         pub pending: RefCell<Option<PendingStroke>>,
+        /// In-progress WYSIWYG text edit. When `Some`, the canvas is in text-editing mode:
+        /// keystrokes mutate the buffer/caret, the layout is rendered live in `snapshot()`,
+        /// and the caret blinks on a timer. Mutually exclusive with normal click-to-place
+        /// behavior: clicking with the Text tool active commits the pending edit (if any)
+        /// before starting a new one. See `commit_pending_text` / `cancel_pending_text`.
+        pub pending_text: RefCell<Option<PendingText>>,
         /// Auto-increment counter used by the Number tool. Resets when a new document is loaded.
         pub next_number: Cell<u32>,
         /// When true, baseless documents render with a transparent background instead of the
@@ -637,6 +745,14 @@ mod imp {
         /// model as `tool_colors`: only line-rendering tools (Rect/Ellipse/Arrow/Line/
         /// Freehand) get entries; everything else stays implicit-Solid.
         pub tool_styles: RefCell<HashMap<ToolKind, StrokeStyle>>,
+        /// Per-tool font sizes (in points). Currently only meaningful for `ToolKind::Text`,
+        /// but kept as a map so future text-bearing tools can plug in. Driven by the
+        /// toolbar's font-size spinner when the Text tool is active.
+        pub tool_font_sizes: RefCell<HashMap<ToolKind, f32>>,
+        /// Source id of the active caret-blink timer (see `start_caret_blink`). Used
+        /// to cancel the previous timer when a fresh text edit is started so we don't
+        /// leak a timer per click.
+        pub caret_timer: RefCell<Option<glib::SourceId>>,
     }
 
     impl Default for AnnotationCanvas {
@@ -656,15 +772,20 @@ mod imp {
             styles.insert(ToolKind::Arrow, StrokeStyle::Solid);
             styles.insert(ToolKind::Line, StrokeStyle::Solid);
             styles.insert(ToolKind::Freehand, StrokeStyle::Solid);
+            let mut font_sizes = HashMap::new();
+            font_sizes.insert(ToolKind::Text, 18.0);
             Self {
                 doc: RefCell::new(None),
                 base_texture: RefCell::new(None),
                 current_tool: Cell::new(ToolKind::Rect),
                 pending: RefCell::new(None),
+                pending_text: RefCell::new(None),
                 next_number: Cell::new(1),
                 transparent_background: Cell::new(false),
                 tool_colors: RefCell::new(colors),
                 tool_styles: RefCell::new(styles),
+                tool_font_sizes: RefCell::new(font_sizes),
+                caret_timer: RefCell::new(None),
             }
         }
     }
@@ -683,6 +804,7 @@ mod imp {
             obj.set_focusable(true);
             install_drag(&obj);
             install_click(&obj);
+            install_text_input(&obj);
         }
     }
 
@@ -730,6 +852,9 @@ mod imp {
             }
             if let Some(p) = self.pending.borrow().as_ref() {
                 snapshot_pending(snapshot, p);
+            }
+            if let Some(pt) = self.pending_text.borrow().as_ref() {
+                snapshot_pending_text(snapshot, pt, &pango_ctx);
             }
             if let Some(c) = doc.crop {
                 snapshot_crop_veil(snapshot, doc.size, c);
@@ -927,7 +1052,7 @@ fn install_click(canvas: &AnnotationCanvas) {
         let Some(c) = weak.upgrade() else { return };
         match c.tool() {
             ToolKind::Number => place_number(&c, x, y),
-            ToolKind::Text => prompt_text(&c, x, y),
+            ToolKind::Text => start_or_commit_text(&c, x, y),
             _ => {}
         }
     });
@@ -955,52 +1080,308 @@ fn place_number(c: &AnnotationCanvas, x: f64, y: f64) {
     c.queue_draw();
 }
 
-/// Pop an Entry popover anchored at `(x, y)` and commit a `TextTool` when the user presses
-/// Enter (empty input cancels). The popover is unparented on close to keep GTK from leaking
-/// the widget hierarchy.
-fn prompt_text(canvas: &AnnotationCanvas, x: f64, y: f64) {
-    let popover = gtk4::Popover::new();
-    popover.set_parent(canvas);
-    popover.set_autohide(true);
-    let rect = gdk4::Rectangle::new(x as i32, y as i32, 1, 1);
-    popover.set_pointing_to(Some(&rect));
-    let entry = gtk4::Entry::new();
-    entry.set_placeholder_text(Some("Text"));
-    entry.set_width_chars(20);
-    popover.set_child(Some(&entry));
-
-    {
-        let canvas_weak = canvas.downgrade();
-        let popover_weak = popover.downgrade();
-        entry.connect_activate(move |e| {
-            let Some(c) = canvas_weak.upgrade() else {
-                return;
-            };
-            let text = e.text().to_string();
-            if !text.is_empty()
-                && let Some(doc_rc) = c.imp().doc.borrow().clone()
-            {
-                let color = c
-                    .tool_color(ToolKind::Text)
-                    .unwrap_or([1.0, 0.95, 0.2, 1.0]);
-                doc_rc.borrow_mut().push_layer(Box::new(TextTool {
-                    origin: (x, y),
-                    text,
-                    size_pt: 18.0,
-                    color,
-                }));
-                c.queue_draw();
-            }
-            if let Some(p) = popover_weak.upgrade() {
-                p.popdown();
-            }
-        });
+/// Click-with-Text-tool handler. If a text edit is already in progress, commits it and
+/// starts a fresh one at the new click point — the natural "I'm done with that label;
+/// place another here" gesture. Otherwise opens a new in-canvas WYSIWYG text editor at
+/// the click location: a [`PendingText`] is stored on the canvas, the caret-blink timer
+/// is started, focus is grabbed so keystrokes route to our `install_text_input`
+/// controller, and the live preview is rendered from the next `snapshot()` onwards.
+fn start_or_commit_text(canvas: &AnnotationCanvas, x: f64, y: f64) {
+    if canvas.imp().pending_text.borrow().is_some() {
+        commit_pending_text(canvas);
     }
-    // GTK4 requires explicit unparent on transient popovers, otherwise the widget tree leaks.
-    popover.connect_closed(|p| p.unparent());
+    let color = canvas
+        .tool_color(ToolKind::Text)
+        .unwrap_or([1.0, 0.95, 0.2, 1.0]);
+    let size_pt = canvas.tool_font_size(ToolKind::Text).unwrap_or(18.0);
+    canvas.imp().pending_text.replace(Some(PendingText {
+        origin: (x, y),
+        buffer: String::new(),
+        caret: 0,
+        color,
+        size_pt,
+        caret_visible: true,
+    }));
+    let _ = canvas.grab_focus();
+    start_caret_blink(canvas);
+    canvas.queue_draw();
+}
 
-    popover.popup();
-    entry.grab_focus();
+/// Commit the in-progress text edit (if any) as a `TextTool` layer on the document.
+/// An empty buffer cancels instead of pushing a zero-glyph layer. Either way, clears
+/// `pending_text` and stops the blink timer.
+fn commit_pending_text(canvas: &AnnotationCanvas) {
+    let Some(pt) = canvas.imp().pending_text.borrow_mut().take() else {
+        return;
+    };
+    stop_caret_blink(canvas);
+    if !pt.buffer.is_empty()
+        && let Some(doc_rc) = canvas.imp().doc.borrow().clone()
+    {
+        // Measure with a fresh Pango context so the cached `Tool::bounds` matches the
+        // pixels `snapshot_text` will render at this size.
+        let pango_ctx = canvas.create_pango_context();
+        let bounds_cache = {
+            let tmp = TextTool {
+                origin: pt.origin,
+                text: pt.buffer.clone(),
+                size_pt: pt.size_pt,
+                color: pt.color,
+                bounds_cache: (0, 0),
+            };
+            let layout = text_layout(&tmp, &pango_ctx);
+            let (w, h) = layout.pixel_size();
+            (w.max(0) as u32, h.max(0) as u32)
+        };
+        doc_rc.borrow_mut().push_layer(Box::new(TextTool::new(
+            pt.origin,
+            pt.buffer,
+            pt.size_pt,
+            pt.color,
+            bounds_cache,
+        )));
+    }
+    canvas.queue_draw();
+}
+
+/// Drop the in-progress text edit without committing. Pairs with the Escape key.
+fn cancel_pending_text(canvas: &AnnotationCanvas) {
+    if canvas.imp().pending_text.borrow().is_some() {
+        canvas.imp().pending_text.replace(None);
+        stop_caret_blink(canvas);
+        canvas.queue_draw();
+    }
+}
+
+/// Start (or restart) the caret-blink timer. Any previous timer is removed first so
+/// clicking around with the Text tool doesn't accumulate timers. The closure
+/// self-terminates as soon as `pending_text` becomes `None` or the canvas is dropped,
+/// so commit/cancel/document-swap all naturally stop the blink without further work.
+fn start_caret_blink(canvas: &AnnotationCanvas) {
+    stop_caret_blink(canvas);
+    let weak = canvas.downgrade();
+    let source = glib::timeout_add_local(std::time::Duration::from_millis(530), move || {
+        let Some(c) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let mut slot = c.imp().pending_text.borrow_mut();
+        let Some(pt) = slot.as_mut() else {
+            // Clear the stored handle so we don't try to `remove` an already-finished
+            // source later — `SourceId::remove` panics on a stale id.
+            drop(slot);
+            c.imp().caret_timer.replace(None);
+            return glib::ControlFlow::Break;
+        };
+        pt.caret_visible = !pt.caret_visible;
+        drop(slot);
+        c.queue_draw();
+        glib::ControlFlow::Continue
+    });
+    canvas.imp().caret_timer.replace(Some(source));
+}
+
+/// Remove the caret-blink timer if one is active. Safe to call when no timer exists.
+fn stop_caret_blink(canvas: &AnnotationCanvas) {
+    if let Some(id) = canvas.imp().caret_timer.replace(None) {
+        id.remove();
+    }
+}
+
+/// Install a key-event controller that drives the in-canvas WYSIWYG text editor.
+///
+/// Runs in `PropagationPhase::Capture` so that, while a text edit is in progress, we
+/// intercept Return/Backspace/etc. *before* the toolbar's window-level shortcut
+/// dispatcher (which binds `Return` to Save). When no text edit is active, every key
+/// is allowed to propagate, so global shortcuts behave exactly as before.
+fn install_text_input(canvas: &AnnotationCanvas) {
+    let key = gtk4::EventControllerKey::new();
+    key.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let weak = canvas.downgrade();
+    key.connect_key_pressed(move |_, keyval, _keycode, state| {
+        let Some(c) = weak.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        if c.imp().pending_text.borrow().is_none() {
+            return glib::Propagation::Proceed;
+        }
+        // Ignore modifier-only chords other than Shift — let Ctrl+S / Ctrl+Z etc. through
+        // so the toolbar shortcuts keep working even mid-edit (Undo on the most recent
+        // commit, Save on the document, etc.).
+        let mods = state
+            & (gdk4::ModifierType::CONTROL_MASK
+                | gdk4::ModifierType::ALT_MASK
+                | gdk4::ModifierType::SUPER_MASK);
+        if !mods.is_empty() {
+            return glib::Propagation::Proceed;
+        }
+        let shift = state.contains(gdk4::ModifierType::SHIFT_MASK);
+        handle_text_key(&c, keyval, shift)
+    });
+    canvas.add_controller(key);
+}
+
+/// Apply a single key press to the in-progress text edit. Returns `Stop` whenever the
+/// key was meaningful to the editor (printable insertion, navigation, commit, cancel)
+/// so toolbar accelerators don't double-fire; returns `Proceed` for keys we don't
+/// handle (e.g. Tab, function keys) so they remain available for other controllers.
+fn handle_text_key(canvas: &AnnotationCanvas, keyval: gdk4::Key, shift: bool) -> glib::Propagation {
+    // Single-character editing operations that mutate `pending_text` in place.
+    let mut handled = true;
+    {
+        let mut pt_borrow = canvas.imp().pending_text.borrow_mut();
+        let Some(pt) = pt_borrow.as_mut() else {
+            return glib::Propagation::Proceed;
+        };
+        match keyval {
+            gdk4::Key::Escape => {
+                // Drop the borrow before mutating canvas.pending_text via the helper.
+                drop(pt_borrow);
+                cancel_pending_text(canvas);
+                return glib::Propagation::Stop;
+            }
+            gdk4::Key::Return | gdk4::Key::KP_Enter => {
+                if shift {
+                    insert_at_caret(pt, "\n");
+                } else {
+                    drop(pt_borrow);
+                    commit_pending_text(canvas);
+                    return glib::Propagation::Stop;
+                }
+            }
+            gdk4::Key::BackSpace => {
+                if pt.caret > 0 {
+                    let prev = prev_char_boundary(&pt.buffer, pt.caret);
+                    pt.buffer.replace_range(prev..pt.caret, "");
+                    pt.caret = prev;
+                }
+            }
+            gdk4::Key::Delete => {
+                if pt.caret < pt.buffer.len() {
+                    let next = next_char_boundary(&pt.buffer, pt.caret);
+                    pt.buffer.replace_range(pt.caret..next, "");
+                }
+            }
+            gdk4::Key::Left => {
+                pt.caret = prev_char_boundary(&pt.buffer, pt.caret);
+            }
+            gdk4::Key::Right => {
+                pt.caret = next_char_boundary(&pt.buffer, pt.caret);
+            }
+            gdk4::Key::Home => {
+                pt.caret = line_start(&pt.buffer, pt.caret);
+            }
+            gdk4::Key::End => {
+                pt.caret = line_end(&pt.buffer, pt.caret);
+            }
+            gdk4::Key::Up => {
+                pt.caret = move_caret_vertically(&pt.buffer, pt.caret, -1);
+            }
+            gdk4::Key::Down => {
+                pt.caret = move_caret_vertically(&pt.buffer, pt.caret, 1);
+            }
+            _ => {
+                // Translate keyval → printable Unicode. `to_unicode` returns the
+                // shifted character when Shift is in the keyval's effective group, so
+                // ASCII typing "just works" without us applying a manual case shift.
+                if let Some(ch) = keyval.to_unicode()
+                    && !ch.is_control()
+                {
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    insert_at_caret(pt, s);
+                } else {
+                    handled = false;
+                }
+            }
+        }
+        // Restart the visible portion of the blink cycle so the caret is always shown
+        // immediately after typing — feels more responsive than waiting for the next tick.
+        pt.caret_visible = true;
+    }
+    if handled {
+        canvas.queue_draw();
+        glib::Propagation::Stop
+    } else {
+        glib::Propagation::Proceed
+    }
+}
+
+fn insert_at_caret(pt: &mut PendingText, s: &str) {
+    pt.buffer.insert_str(pt.caret, s);
+    pt.caret += s.len();
+}
+
+/// Walk back from `idx` to the previous UTF-8 character boundary; returns 0 if `idx`
+/// already sits at the start of the string.
+fn prev_char_boundary(s: &str, idx: usize) -> usize {
+    if idx == 0 {
+        return 0;
+    }
+    let mut i = idx - 1;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Walk forward from `idx` to the next UTF-8 character boundary; returns `s.len()` if
+/// `idx` already sits at the end of the string.
+fn next_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx + 1;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Byte offset of the start of the line that contains the byte position `caret`.
+fn line_start(s: &str, caret: usize) -> usize {
+    s[..caret].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+/// Byte offset of the end of the line that contains `caret` (i.e. just before the next
+/// `\n`, or `s.len()` if there's no trailing newline).
+fn line_end(s: &str, caret: usize) -> usize {
+    s[caret..]
+        .find('\n')
+        .map(|i| caret + i)
+        .unwrap_or_else(|| s.len())
+}
+
+/// Move the caret one line up (`delta = -1`) or down (`delta = 1`), preserving the
+/// column position measured as the number of `char`s from the start of the current
+/// line. Snaps to the end of the destination line when the column exceeds its length.
+fn move_caret_vertically(s: &str, caret: usize, delta: i32) -> usize {
+    let cur_start = line_start(s, caret);
+    let column_chars = s[cur_start..caret].chars().count();
+    let dest_start = match delta {
+        d if d < 0 => {
+            if cur_start == 0 {
+                return caret;
+            }
+            // Previous line: scan back from cur_start - 1 (which is the '\n') to its line start.
+            line_start(s, cur_start - 1)
+        }
+        _ => {
+            let cur_end = line_end(s, caret);
+            if cur_end >= s.len() {
+                return caret;
+            }
+            cur_end + 1
+        }
+    };
+    let dest_end = line_end(s, dest_start);
+    let dest_line = &s[dest_start..dest_end];
+    for (taken, (i, _)) in dest_line.char_indices().enumerate() {
+        if taken >= column_chars {
+            return dest_start + i;
+        }
+    }
+    // Ran out of characters before reaching the target column → snap to line end.
+    dest_end
 }
 
 fn clamp_to_doc(r: Rect, size: (u32, u32)) -> Rect {

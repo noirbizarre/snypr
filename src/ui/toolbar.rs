@@ -236,6 +236,11 @@ pub struct ToolbarSpec {
     /// [`ToolbarAction::StrokeStyleChanged`] when the user picks a new style; the
     /// caller is responsible for storing the choice on whatever canvas state it owns.
     pub show_style_picker: bool,
+    /// Show a font-size spinner that drives the point size of the currently selected
+    /// tool, when that tool renders text (Text, currently). The toolbar emits
+    /// [`ToolbarAction::FontSizeChanged`] when the user picks a new size; the caller
+    /// is responsible for forwarding it to the canvas via `set_tool_font_size`.
+    pub show_font_size_picker: bool,
     pub initial_tool: Option<ToolKind>,
     pub initial_mode: Option<ModeKind>,
     pub initial_cursor: bool,
@@ -257,6 +262,7 @@ impl ToolbarSpec {
             show_passthrough_toggle: false,
             show_color_picker: false,
             show_style_picker: false,
+            show_font_size_picker: false,
             initial_tool: None,
             initial_mode: None,
             initial_cursor: false,
@@ -287,6 +293,10 @@ pub enum ToolbarAction {
     /// User picked a new stroke style from the style picker. The caller applies it
     /// to the currently active tool's `stroke_style` (analogous to `ColorChanged`).
     StrokeStyleChanged(StrokeStyle),
+    /// User picked a new font size (in points) from the font-size spinner. The caller
+    /// applies it to the currently active tool's `size_pt` (analogous to
+    /// `StrokeStyleChanged`). Only meaningful for text-rendering tools.
+    FontSizeChanged(f32),
 }
 
 type Callback = Rc<RefCell<Option<Box<dyn Fn(ToolbarAction) + 'static>>>>;
@@ -312,6 +322,9 @@ struct ToolbarState {
     /// Stroke-style picker UI (button + popover with three radios). Same lifecycle
     /// model as `color`. Built only when [`ToolbarSpec::show_style_picker`] is set.
     style: Option<StylePickerUi>,
+    /// Font-size spinner UI. Same lifecycle model as `color` / `style`. Built only
+    /// when [`ToolbarSpec::show_font_size_picker`] is set.
+    font_size: Option<FontSizePickerUi>,
     shortcuts: Vec<Shortcut>,
     callback: Callback,
 }
@@ -357,6 +370,15 @@ struct StylePickerUi {
     /// `set_stroke_style` can flip the right toggle without re-emitting the
     /// `StrokeStyleChanged` action (via `block_signal`).
     toggles: Vec<(StrokeStyle, gtk4::ToggleButton, glib::SignalHandlerId)>,
+}
+
+/// Live state for the font-size picker. A `SpinButton` sized to match the rest of the
+/// toolbar's icon buttons. We keep its `value-changed` handler id so external state
+/// updates ([`Toolbar::set_font_size`]) can `block_signal` while writing the new value
+/// to avoid re-emitting `FontSizeChanged` back to the caller.
+struct FontSizePickerUi {
+    spin: gtk4::SpinButton,
+    handler: glib::SignalHandlerId,
 }
 
 impl CaptureUi {
@@ -636,6 +658,39 @@ impl Toolbar {
             None
         };
 
+        // Font-size spinner (optional) — shown when the active tool renders text.
+        // Width is set wide enough to comfortably fit 3 digits + the +/- arrows. We
+        // also clamp the value with a small min/max so the spinner UI stays focused
+        // on sane sizes for screen annotations (matches what Pango can render
+        // without producing absurd glyph dimensions).
+        let font_size = if spec.show_font_size_picker {
+            // Only emit a leading separator when neither the color nor the style
+            // picker already provided one (they each emit their own when no earlier
+            // picker has).
+            if color.is_none() && style.is_none() && !spec.tools.is_empty() {
+                widget.append(&separator());
+            }
+            let adj = gtk4::Adjustment::new(18.0, 6.0, 200.0, 1.0, 4.0, 0.0);
+            let spin = gtk4::SpinButton::new(Some(&adj), 1.0, 0);
+            spin.set_numeric(true);
+            spin.set_tooltip_text(Some("Font size (pt)"));
+            spin.set_width_chars(3);
+            spin.set_max_width_chars(3);
+            // Keep keyboard focus on the parent window's shortcut dispatcher rather
+            // than the spinner itself — typing should still drive the text editor.
+            spin.set_focus_on_click(false);
+            let cb = callback.clone();
+            let handler = spin.connect_value_changed(move |s| {
+                if let Some(f) = cb.borrow().as_ref() {
+                    f(ToolbarAction::FontSizeChanged(s.value() as f32));
+                }
+            });
+            widget.append(&spin);
+            Some(FontSizePickerUi { spin, handler })
+        } else {
+            None
+        };
+
         // Trailing actions: separator + spacer + toggles + buttons.
         let trailing = spec.show_undo
             || spec.show_clear
@@ -738,9 +793,11 @@ impl Toolbar {
             widget.append(&btn);
             // Ctrl+S is the conventional shortcut; Enter / KP_Enter is the quick-save used
             // by both the annotation editor (Edit mode) and the live draw overlay (Draw
-            // mode). Neither overlay's tool set binds Enter to a tool action (no Text tool
-            // in OVERLAY_TOOLS, and in EDITOR_TOOLS the Text tool's Return is scoped to its
-            // own popover), so this can't accidentally shadow a drawing operation.
+            // mode). The Text tool's in-canvas WYSIWYG editor installs a key controller
+            // in `PropagationPhase::Capture` on the canvas widget itself, so while a
+            // text edit is in progress Return is intercepted there (committing the
+            // typed text) before it ever reaches this shortcut dispatcher. When no
+            // text edit is active, Enter falls through and triggers Save as before.
             shortcuts.push(Shortcut {
                 key: gdk4::Key::s,
                 action: ShortcutAction::Save,
@@ -876,6 +933,7 @@ impl Toolbar {
             capture,
             color,
             style,
+            font_size,
             shortcuts,
             callback,
         });
@@ -982,6 +1040,25 @@ impl Toolbar {
     pub fn set_style_picker_sensitive(&self, sensitive: bool) {
         if let Some(ui) = &self.state.style {
             ui.container.set_sensitive(sensitive);
+        }
+    }
+
+    /// Update the font-size spinner without firing `FontSizeChanged`. Used by external
+    /// state changes (e.g. selecting a different tool) so the spinner always reflects
+    /// the active tool's stored size.
+    pub fn set_font_size(&self, size: f32) {
+        if let Some(ui) = &self.state.font_size {
+            ui.spin.block_signal(&ui.handler);
+            ui.spin.set_value(size as f64);
+            ui.spin.unblock_signal(&ui.handler);
+        }
+    }
+
+    /// Enable or disable the font-size spinner (mirrors [`Self::set_color_picker_sensitive`]
+    /// — only tools that render text expose a meaningful font size).
+    pub fn set_font_size_picker_sensitive(&self, sensitive: bool) {
+        if let Some(ui) = &self.state.font_size {
+            ui.spin.set_sensitive(sensitive);
         }
     }
 

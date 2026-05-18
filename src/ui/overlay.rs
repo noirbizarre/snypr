@@ -451,6 +451,7 @@ fn spawn_monitor_overlay(
             show_save: true,
             show_color_picker: true,
             show_style_picker: true,
+            show_font_size_picker: true,
             initial_tool: Some(shared.current_tool.get()),
             ..Default::default()
         })
@@ -463,6 +464,7 @@ fn spawn_monitor_overlay(
             show_passthrough_toggle: true,
             show_color_picker: true,
             show_style_picker: true,
+            show_font_size_picker: true,
             initial_tool: Some(shared.current_tool.get()),
             initial_passthrough: shared.passthrough.get(),
             ..Default::default()
@@ -578,6 +580,10 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
         toolbar.set_stroke_style(style);
     }
     toolbar.set_style_picker_sensitive(kind_is_styleable(initial_kind));
+    if let Some(size) = canvas.tool_font_size(initial_kind) {
+        toolbar.set_font_size(size);
+    }
+    toolbar.set_font_size_picker_sensitive(kind_has_font_size(initial_kind));
 
     toolbar.connect(move |action| match action {
         ToolbarAction::ToolSelected(kind) => {
@@ -595,8 +601,13 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
                 .borrow()
                 .first()
                 .and_then(|c| c.canvas.tool_style(kind));
+            let font_size = canvases
+                .borrow()
+                .first()
+                .and_then(|c| c.canvas.tool_font_size(kind));
             let colorable = kind_is_colorable(kind);
             let styleable = kind_is_styleable(kind);
+            let has_font_size = kind_has_font_size(kind);
             for t in toolbars.borrow().iter() {
                 t.set_tool(kind);
                 if let Some(c) = color {
@@ -607,6 +618,10 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
                     t.set_stroke_style(s);
                 }
                 t.set_style_picker_sensitive(styleable);
+                if let Some(s) = font_size {
+                    t.set_font_size(s);
+                }
+                t.set_font_size_picker_sensitive(has_font_size);
             }
         }
         ToolbarAction::ColorChanged(color) => {
@@ -632,6 +647,18 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             }
             for t in toolbars.borrow().iter() {
                 t.set_stroke_style(style);
+            }
+        }
+        ToolbarAction::FontSizeChanged(size) => {
+            let kind = current_tool.get();
+            if !kind_has_font_size(kind) {
+                return;
+            }
+            for c in canvases.borrow().iter() {
+                c.canvas.set_tool_font_size(kind, size);
+            }
+            for t in toolbars.borrow().iter() {
+                t.set_font_size(size);
             }
         }
         ToolbarAction::Undo => {
@@ -703,6 +730,13 @@ fn kind_is_styleable(kind: ToolKind) -> bool {
         kind,
         ToolKind::Rect | ToolKind::Ellipse | ToolKind::Arrow | ToolKind::Line | ToolKind::Freehand
     )
+}
+
+/// Tools whose appearance includes a configurable font size. Currently only the Text
+/// tool exposes one; Number's font size is derived from its disc radius and stays
+/// implicit.
+fn kind_has_font_size(kind: ToolKind) -> bool {
+    matches!(kind, ToolKind::Text)
 }
 
 /// Compose every per-monitor canvas into its slice, then stitch the slices back into a single
