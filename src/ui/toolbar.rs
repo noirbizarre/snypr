@@ -200,7 +200,7 @@ pub const SELECTOR_MODES: &[ModeEntry] = &[
         kind: ModeKind::Window,
         label: "Window",
         key: gdk4::Key::_3,
-        icon: "preferences-system-windows-symbolic",
+        icon: "overlapping-windows-symbolic",
     },
     ModeEntry {
         kind: ModeKind::Region,

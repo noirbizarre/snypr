@@ -8,6 +8,7 @@
     <file alias="draw-rectangle-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/draw-rectangle-symbolic.svg</file>
     <file alias="marker-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/marker-symbolic.svg</file>
     <file alias="mouse-click-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/mouse-click-symbolic.svg</file>
+    <file alias="overlapping-windows-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/overlapping-windows-symbolic.svg</file>
     <file alias="pointer-primary-click-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/pointer-primary-click-symbolic.svg</file>
     <file alias="screen-privacy7-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/screen-privacy7-symbolic.svg</file>
     <file alias="text-insert-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/text-insert-symbolic.svg</file>
