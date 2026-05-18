@@ -115,7 +115,7 @@ async fn query(command: &str) -> Result<String> {
 ///
 /// Prefers the modern `$XDG_RUNTIME_DIR/hypr/$HIS/.socket.sock` layout (Hyprland ≥ 0.42) and
 /// falls back to the legacy `/tmp/hypr/$HIS/.socket.sock` for older builds.
-fn socket_path() -> Result<PathBuf> {
+pub(crate) fn socket_path() -> Result<PathBuf> {
     let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").map_err(|_| {
         anyhow!("HYPRLAND_INSTANCE_SIGNATURE is not set; not running under Hyprland?")
     })?;

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 pub mod daemon;
+pub mod doctor;
 pub mod draw;
 pub mod screenshot;
 
@@ -35,6 +36,9 @@ pub enum Command {
     Draw(draw::Args),
     /// Run a long-lived daemon listening on the IPC socket.
     Daemon(daemon::Args),
+    /// Print a copy-pasteable Markdown diagnostic report (config, environment,
+    /// live capability probes). Always exits with status 0.
+    Doctor(doctor::Args),
 }
 
 /// Where a captured / annotated image should be written.
@@ -79,6 +83,11 @@ impl std::str::FromStr for SinkSpec {
 
 /// Top-level dispatch.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    // Captured before `cli` is consumed so subcommands that need it (currently only
+    // `doctor`) can honor the global `--config` flag. Other subcommands still rely on
+    // `Config::load_default()` internally — threading `--config` through them is tracked
+    // separately.
+    let config_override = cli.config.clone();
     let command = cli.command.unwrap_or_else(|| {
         // No subcommand → default to an interactive screenshot.
         Command::Screenshot(screenshot::Args::default())
@@ -91,6 +100,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Screenshot(args) => screenshot::run(args).await,
         Command::Draw(args) => draw::run(args).await,
         Command::Daemon(args) => daemon::run(args).await,
+        Command::Doctor(args) => doctor::run(args, config_override).await,
     }
 }
 
@@ -161,6 +171,9 @@ fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
                 "daemon never reaches build_request: --via-daemon is rejected at parse time"
             )
         }
+        Command::Doctor(_) => {
+            unreachable!("doctor never reaches build_request: it has no --via-daemon flag")
+        }
     }
 }
 
@@ -216,9 +229,20 @@ mod tests {
             vec!["hyprsnap", "draw"],
             vec!["hyprsnap", "daemon"],
             vec!["hyprsnap", "daemon", "--systray"],
+            vec!["hyprsnap", "doctor"],
         ] {
             Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} -> {e}"));
         }
+    }
+
+    #[test]
+    fn doctor_honors_global_config_flag() {
+        let cli = Cli::try_parse_from(["hyprsnap", "--config", "/tmp/alt.toml", "doctor"]).unwrap();
+        assert_eq!(
+            cli.config.as_deref(),
+            Some(std::path::Path::new("/tmp/alt.toml"))
+        );
+        assert!(matches!(cli.command, Some(Command::Doctor(_))));
     }
 
     #[test]
