@@ -115,6 +115,11 @@ struct MonitorCanvas {
     /// Top-left + size of this canvas's pixels in the unified `base` coordinate space. Only
     /// set in Edit mode.
     slice: Option<Rect>,
+    /// Logical-coordinate geometry of the monitor this canvas covers. Needed in Draw mode by
+    /// the lazy desktop capture (Blur tool) to slice the stitched compositor frame into
+    /// per-monitor `DocumentBase` chunks. Mirrors the rect computed in
+    /// [`spawn_monitor_overlay`].
+    monitor_rect: Rect,
 }
 
 fn run_gtk(
@@ -284,6 +289,7 @@ fn build_overlays(
         app_weak: app.downgrade(),
         edit: edit.map(Rc::new),
         draw_save,
+        blur_capture_in_flight: Rc::new(Cell::new(false)),
     };
 
     let mut windows = Vec::with_capacity(n as usize);
@@ -349,6 +355,9 @@ struct Shared {
     /// Set in Draw mode when the overlay should respond to Save (Ctrl+S / Enter / click).
     /// `None` would disable the Save UI entirely; today we always set this in Draw mode.
     draw_save: Option<Rc<DrawSaveState>>,
+    /// `true` while the lazy Draw-mode Blur desktop capture is in flight. Prevents the user
+    /// from re-triggering the capture by tapping Blur again before the first capture lands.
+    blur_capture_in_flight: Rc<Cell<bool>>,
 }
 
 /// Build (or skip) one overlay window for a monitor. Returns `Some(window)` when a window
@@ -443,7 +452,9 @@ fn spawn_monitor_overlay(
     canvas.set_tool(shared.current_tool.get());
 
     // Edit mode shows the full editor toolset (incl. Blur + Crop) plus a Save button. Draw
-    // mode keeps the slimmer overlay set and adds the passthrough toggle + Clear shortcut.
+    // mode keeps the slimmer overlay set (no Crop) and adds the passthrough toggle + Clear
+    // shortcut. Blur is in the overlay too: it grabs the desktop into a hidden base on first
+    // use so the GSK blur node has real pixels to sample.
     let toolbar = if shared.edit.is_some() {
         Toolbar::new(ToolbarSpec {
             tools: EDITOR_TOOLS,
@@ -501,6 +512,7 @@ fn spawn_monitor_overlay(
     shared.canvases.borrow_mut().push(MonitorCanvas {
         canvas: canvas.clone(),
         slice,
+        monitor_rect: mon_rect,
     });
     shared.toolbars.borrow_mut().push(toolbar);
     shared.windows.borrow_mut().push(window.clone());
@@ -568,6 +580,7 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
     let edit = shared.edit.clone();
     let draw_save = shared.draw_save.clone();
     let app_weak = shared.app_weak.clone();
+    let blur_in_flight = shared.blur_capture_in_flight.clone();
 
     // Seed the picker with the initial tool's color + correct sensitivity. Done up front so
     // the picker doesn't show its built-in default before the user touches a tool button.
@@ -590,6 +603,29 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             current_tool.set(kind);
             for c in canvases.borrow().iter() {
                 c.canvas.set_tool(kind);
+            }
+            // Lazy desktop capture for Draw-mode Blur. The overlay is transparent so the
+            // GSK blur node has nothing to sample by default; the first time the user picks
+            // the Blur tool we briefly hide the overlay surfaces, grab the desktop via
+            // wlr-screencopy, and attach the result as a hidden base on every canvas.
+            // Subsequent Blur uses reuse this base. `Crop` and other tools take no part.
+            if matches!(kind, ToolKind::Blur)
+                && let Some(ds) = draw_save.as_ref()
+                && canvases
+                    .borrow()
+                    .first()
+                    .map(|c| !c.canvas.has_base())
+                    .unwrap_or(false)
+                && !blur_in_flight.replace(true)
+            {
+                glib::MainContext::default().spawn_local(ensure_draw_blur_base(
+                    canvases.clone(),
+                    windows.clone(),
+                    toolbars.clone(),
+                    passthrough.clone(),
+                    ds.runtime.clone(),
+                    blur_in_flight.clone(),
+                ));
             }
             // Push the new tool's stored color into every peer toolbar's swatch (silently),
             // and toggle picker sensitivity for tools with hardcoded appearance.
@@ -798,6 +834,136 @@ fn compose_edit(canvases: &[MonitorCanvas], edit: &EditState) -> Result<Captured
 /// during the selector + capture so they don't appear in the saved PNG; re-shows them on
 /// the way out so the user keeps drawing.
 ///
+/// Grab the underlying desktop into a hidden base on every Draw-mode canvas so the Blur
+/// tool's GSK render node has real pixels to sample. The overlay layer-shell surfaces are
+/// transparent above the desktop, but the compositor framebuffer also contains our toolbar
+/// chrome; we hide the toolbars for the duration of the capture so the blur source stays
+/// clean of UI. Existing strokes are intentionally left visible: they're already part of
+/// what the user is "looking at", so blurring includes them — same semantics as Edit mode
+/// where the layered annotations sit on top of the captured pixels.
+///
+/// We deliberately do **not** flip passthrough or unmap the canvas. Both would race a fast
+/// click-drag the user makes immediately after selecting Blur — the input region / keyboard
+/// mode commit takes ~1 frame to reach the compositor and any drag begun in that window
+/// would be lost. The toolbar widget hide is local-only (no Wayland commit) and harmless.
+///
+/// `blur_in_flight` is reset to `false` no matter the outcome so a future Blur selection
+/// (after a failed capture, e.g. the user denied screencopy permission) can retry.
+async fn ensure_draw_blur_base(
+    canvases: CanvasRegistry,
+    _windows: WindowRegistry,
+    toolbars: ToolbarRegistry,
+    _passthrough: Rc<Cell<bool>>,
+    runtime: tokio::runtime::Handle,
+    blur_in_flight: Rc<Cell<bool>>,
+) {
+    // Toolbar chrome is opaque; hide it so it doesn't end up in the blur source. Snapshot
+    // visibility so we restore exactly what the user had (in case a future feature toggles
+    // it externally).
+    let prev_toolbar_visible: Vec<bool> = toolbars
+        .borrow()
+        .iter()
+        .map(|t| t.widget().is_visible())
+        .collect();
+    for t in toolbars.borrow().iter() {
+        t.widget().set_visible(false);
+    }
+
+    // Yield long enough for the toolbar-hide commit to reach the compositor. One frame at
+    // 60 Hz + a small margin matches what `run_draw_save` uses for the same purpose.
+    glib::timeout_future(std::time::Duration::from_millis(32)).await;
+
+    // Capture the full desktop bounding box. We slice per-monitor below using each
+    // canvas's `monitor_rect`, so the wlr capture only needs a single round-trip.
+    let join = runtime.spawn(async move {
+        let capturer = crate::capture::wlr::WlrCapturer::new()?;
+        let images = capturer
+            .capture(crate::capture::Selection::Full, false)
+            .await?;
+        let stitched = crate::capture::region::stitch(&images, &crate::capture::Selection::Full)?;
+        anyhow::Ok(stitched)
+    });
+
+    let stitched = match join.await {
+        Ok(Ok(img)) => Some(img),
+        Ok(Err(err)) => {
+            tracing::warn!(error = ?err, "draw-blur: desktop capture failed; blur will fall back to the grey-wash preview");
+            None
+        }
+        Err(err) => {
+            tracing::warn!(error = ?err, "draw-blur: capture task panicked");
+            None
+        }
+    };
+
+    // Restore toolbar visibility before we touch the canvases — keeps the visual blip as
+    // short as possible (the post-capture set_hidden_base only queues a redraw).
+    for (t, vis) in toolbars.borrow().iter().zip(&prev_toolbar_visible) {
+        t.widget().set_visible(*vis);
+    }
+
+    if let Some(stitched) = stitched {
+        // Stitched origin is the bounding-box top-left in compositor logical coordinates;
+        // see `capture::region::stitch` for the math. We need that to slice per monitor.
+        let origin = stitched_origin(&stitched);
+        for c in canvases.borrow().iter() {
+            let Some((bgra, w, h)) = slice_pixels(
+                &stitched.pixels,
+                stitched.width,
+                stitched.height,
+                stitched.stride,
+                origin,
+                c.monitor_rect,
+            ) else {
+                continue;
+            };
+            // wlr-screencopy hands back BGRA8888 premultiplied; `DocumentBase` /
+            // `build_base_texture` expect RGBA (`gdk::MemoryFormat::R8g8b8a8`). Without
+            // this swap the blurred region looks yellow/red-tinted because the R and B
+            // channels are exchanged. Mirrors `cli::screenshot::base_from_captured`.
+            let mut rgba = bgra;
+            for px in rgba.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            let base = DocumentBase {
+                pixels: Arc::from(rgba.into_boxed_slice()),
+                width: w,
+                height: h,
+                stride: w * 4,
+            };
+            c.canvas.set_hidden_base(base);
+        }
+    }
+
+    blur_in_flight.set(false);
+}
+
+/// The bounding box that [`crate::capture::region::stitch`] uses for a `Full` selection is
+/// the union of every output's logical rect, with the resulting pixels laid out from the
+/// top-left of that union. Reconstruct that origin so `slice_pixels` can map monitor logical
+/// coordinates back into the stitched buffer.
+fn stitched_origin(_stitched: &CapturedImage) -> (i32, i32) {
+    let Some(display) = gtk4::gdk::Display::default() else {
+        return (0, 0);
+    };
+    let monitors = display.monitors();
+    let mut origin: Option<(i32, i32)> = None;
+    for i in 0..monitors.n_items() {
+        let Some(obj) = monitors.item(i) else {
+            continue;
+        };
+        let Ok(m) = obj.downcast::<gtk4::gdk::Monitor>() else {
+            continue;
+        };
+        let g = m.geometry();
+        origin = Some(match origin {
+            None => (g.x(), g.y()),
+            Some((x, y)) => (x.min(g.x()), y.min(g.y())),
+        });
+    }
+    origin.unwrap_or((0, 0))
+}
+
 /// Runs on the GLib main context (`spawn_local`). Long-running async work (the actual
 /// `WlrCapturer::capture` + `Outputs::write_png`) is offloaded onto the tokio runtime via
 /// `runtime.spawn`, then awaited from here — the GTK loop stays responsive while the

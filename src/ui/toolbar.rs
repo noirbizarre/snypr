@@ -123,8 +123,10 @@ pub const EDITOR_TOOLS: &[ToolEntry] = &[
     },
 ];
 
-/// Tools surfaced in the live draw overlay. Crop and Blur don't make sense on an ephemeral
-/// surface (no underlying pixels to crop or blur), so they're omitted.
+/// Tools surfaced in the live draw overlay. Crop is omitted — it has no meaning without a
+/// captured base (the overlay is ephemeral and saves via a fresh compositor capture). Blur is
+/// included: when first used, the overlay grabs the underlying desktop into a hidden base so
+/// the GSK blur node has real pixels to sample (see `AnnotationCanvas::set_hidden_base`).
 pub const OVERLAY_TOOLS: &[ToolEntry] = &[
     ToolEntry {
         kind: ToolKind::Rect,
@@ -173,6 +175,12 @@ pub const OVERLAY_TOOLS: &[ToolEntry] = &[
         label: "Text",
         key: gdk4::Key::t,
         icon: "text-insert-symbolic",
+    },
+    ToolEntry {
+        kind: ToolKind::Blur,
+        label: "Blur",
+        key: gdk4::Key::b,
+        icon: "blend-tool-symbolic",
     },
     ToolEntry {
         kind: ToolKind::Redact,
@@ -1498,9 +1506,12 @@ mod tests {
     }
 
     #[test]
-    fn overlay_draw_preset_excludes_blur_and_crop() {
+    fn overlay_draw_preset_includes_blur_excludes_crop() {
+        // Blur in the overlay is backed by a lazy desktop capture (see
+        // `AnnotationCanvas::set_hidden_base`); Crop has no meaning without a captured
+        // base and is still omitted.
         let kinds: std::collections::HashSet<_> = OVERLAY_TOOLS.iter().map(|e| e.kind).collect();
-        assert!(!kinds.contains(&ToolKind::Blur));
+        assert!(kinds.contains(&ToolKind::Blur));
         assert!(!kinds.contains(&ToolKind::Crop));
     }
 

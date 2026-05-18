@@ -53,6 +53,7 @@ impl AnnotationCanvas {
         imp.base_texture.replace(tex);
         imp.doc.replace(Some(Rc::new(RefCell::new(doc))));
         imp.pending.replace(None);
+        imp.hidden_base.set(false);
         // Drop any in-progress text edit when the document changes; the new doc has its
         // own coordinate space and the in-flight buffer is meaningless against it. The
         // caret-blink timer self-terminates as soon as it sees `pending_text` is None.
@@ -147,6 +148,38 @@ impl AnnotationCanvas {
     /// live overlay to spin up a canvas sized to a monitor without owning any pixels.
     pub fn set_empty(&self, size: (u32, u32)) {
         self.set_document(Document::empty(size));
+    }
+
+    /// Attach a [`DocumentBase`] to the current document without exposing it on screen.
+    ///
+    /// Used by the draw-mode overlay: when the user picks the Blur tool we capture the
+    /// underlying desktop into this hidden base so [`snapshot_blur`] has real pixels to
+    /// sample. The base is **not** painted as a background (the canvas stays in
+    /// `transparent_background = true` mode) — it only feeds the blur GSK subtree. Existing
+    /// layers and crop are preserved.
+    pub fn set_hidden_base(&self, base: DocumentBase) {
+        let imp = self.imp();
+        let tex = build_base_texture(&base).ok();
+        imp.base_texture.replace(tex);
+        if let Some(doc_rc) = imp.doc.borrow().clone() {
+            doc_rc.borrow_mut().base = Some(base);
+        } else {
+            imp.doc
+                .replace(Some(Rc::new(RefCell::new(Document::with_base(base)))));
+        }
+        imp.hidden_base.set(true);
+        self.queue_draw();
+    }
+
+    /// `true` once a base image (visible or hidden) is attached to the current document.
+    /// Cheap pre-flight check used by the overlay to skip redundant desktop captures.
+    pub fn has_base(&self) -> bool {
+        self.imp()
+            .doc
+            .borrow()
+            .as_ref()
+            .map(|d| d.borrow().base.is_some())
+            .unwrap_or(false)
     }
 
     /// Drop every committed layer (used by the overlay's "clear" shortcut).
@@ -559,10 +592,21 @@ fn snapshot_pending_text(snap: &gtk4::Snapshot, pt: &PendingText, pango_ctx: &pa
 /// Blur the base image inside the tool's bounds, leaving other layers untouched. The push_blur
 /// node applies a Gaussian blur to everything drawn in the active subtree; we wrap that subtree
 /// in a clip rect so only pixels inside `t.bounds` are affected.
+///
+/// When `t.invert` is set, the roles flip: we render the *full* blurred texture first, then
+/// overlay the un-blurred texture clipped to `t.bounds` so the selection stays sharp and
+/// everything around it is blurred. GSK's `push_clip` only takes a rect, so this two-pass
+/// approach is simpler than building an even-odd path-clip for the inverse region.
 fn snapshot_blur(snap: &gtk4::Snapshot, t: &BlurTool, base: Option<&DocumentBase>) {
     let Some(base) = base else {
-        // Fall back to a translucent grey rectangle when there's no base to blur (overlay path).
-        snap.append_color(&rgba([0.5, 0.5, 0.5, 0.45]), &rect_to_graphene(&t.bounds));
+        // Fall back to a translucent grey rectangle when there's no base to blur (overlay path
+        // before the lazy desktop capture lands). Mirrors the inverse/normal split visually.
+        if t.invert {
+            // Best-effort outside-veil: without a doc size here we can only hint at the rect.
+            snap.append_color(&rgba([0.5, 0.5, 0.5, 0.25]), &rect_to_graphene(&t.bounds));
+        } else {
+            snap.append_color(&rgba([0.5, 0.5, 0.5, 0.45]), &rect_to_graphene(&t.bounds));
+        }
         return;
     };
     let Ok(tex) = build_base_texture(base) else {
@@ -570,14 +614,24 @@ fn snapshot_blur(snap: &gtk4::Snapshot, t: &BlurTool, base: Option<&DocumentBase
     };
     let clip = rect_to_graphene(&t.bounds);
     let full = graphene::Rect::new(0.0, 0.0, base.width as f32, base.height as f32);
-    snap.push_clip(&clip);
-    snap.push_blur(t.radius as f64);
-    snap.append_texture(&tex, &full);
-    snap.pop(); // blur
-    snap.pop(); // clip
+    if t.invert {
+        // Blur the entire base, then re-paint the sharp original inside the selection rect.
+        snap.push_blur(t.radius as f64);
+        snap.append_texture(&tex, &full);
+        snap.pop(); // blur
+        snap.push_clip(&clip);
+        snap.append_texture(&tex, &full);
+        snap.pop(); // clip
+    } else {
+        snap.push_clip(&clip);
+        snap.push_blur(t.radius as f64);
+        snap.append_texture(&tex, &full);
+        snap.pop(); // blur
+        snap.pop(); // clip
+    }
 }
 
-fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
+fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke, doc_size: (u32, u32)) {
     match p.kind {
         ToolKind::Rect => {
             let r = drag_rect(p.from, p.to);
@@ -641,14 +695,33 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke) {
         ToolKind::Blur => {
             // Dashed outline with a faint fill — actually applying the blur every drag-update
             // would re-upload the texture every frame, so we settle for a marker preview and
-            // commit the real blur on drag-end.
+            // commit the real blur on drag-end. The inverted variant (SHIFT) mirrors
+            // [`snapshot_crop_veil`]: the veil covers everything *outside* the drag rect so the
+            // user can see at a glance that the inside is preserved.
             let r = drag_rect(p.from, p.to);
-            snap.append_color(&rgba(p.color), &rect_to_graphene(&r));
-            snap.append_stroke(
-                &rect_path(&r),
-                &dashed_stroke(1.0, &[4.0, 3.0]),
-                &rgba([1.0, 1.0, 1.0, 0.9]),
-            );
+            // Suppress the preview at drag-begin (degenerate 0-area rect). For the inverted
+            // path that's critical: even-odd fill of "doc rect minus 0×0 inner rect" = full
+            // doc, which would otherwise flash the entire screen the moment the user clicks.
+            if r.w >= 2 && r.h >= 2 {
+                if p.invert {
+                    let pb = gsk::PathBuilder::new();
+                    pb.add_rect(&graphene::Rect::new(
+                        0.0,
+                        0.0,
+                        doc_size.0 as f32,
+                        doc_size.1 as f32,
+                    ));
+                    pb.add_rect(&rect_to_graphene(&r));
+                    snap.append_fill(&pb.to_path(), gsk::FillRule::EvenOdd, &rgba(p.color));
+                } else {
+                    snap.append_color(&rgba(p.color), &rect_to_graphene(&r));
+                }
+                snap.append_stroke(
+                    &rect_path(&r),
+                    &dashed_stroke(1.0, &[4.0, 3.0]),
+                    &rgba([1.0, 1.0, 1.0, 0.9]),
+                );
+            }
         }
         ToolKind::Number | ToolKind::Text => {}
     }
@@ -695,6 +768,11 @@ pub struct PendingStroke {
     /// that aren't styleable; the preview itself uses a fixed marquee dash for the
     /// bounded shape tools and only honours this for line-like tools.
     style: StrokeStyle,
+    /// Modifier state captured once at drag-begin. Currently only the Blur tool reads
+    /// this — when SHIFT is held the blur applies to everything *outside* the selection
+    /// (a.k.a. reverse blur / focus mode). Sampled once and locked for the stroke so
+    /// the preview can't flicker if the user releases SHIFT mid-drag.
+    invert: bool,
 }
 
 /// An in-progress WYSIWYG text edit. Lives in `imp.pending_text` while the user types;
@@ -737,6 +815,12 @@ mod imp {
         /// When true, baseless documents render with a transparent background instead of the
         /// editor's dark fill — used by the live overlay so strokes float over the desktop.
         pub transparent_background: Cell<bool>,
+        /// `true` when the `DocumentBase` attached to the current document is for blur
+        /// sampling only and must not be painted as a canvas background. Set by
+        /// [`AnnotationCanvas::set_hidden_base`] (Draw-mode lazy capture). Distinct from
+        /// `transparent_background` because Edit mode also sets `transparent_background`
+        /// but *does* want its base painted (it's the captured image the user is editing).
+        pub hidden_base: Cell<bool>,
         /// Per-tool color overrides driven by the toolbar's color picker. Keys are only
         /// inserted for tools whose appearance is user-controlled — Blur, Crop and Redact
         /// stay hardcoded so the picker can disable itself for them.
@@ -782,6 +866,7 @@ mod imp {
                 pending_text: RefCell::new(None),
                 next_number: Cell::new(1),
                 transparent_background: Cell::new(false),
+                hidden_base: Cell::new(false),
                 tool_colors: RefCell::new(colors),
                 tool_styles: RefCell::new(styles),
                 tool_font_sizes: RefCell::new(font_sizes),
@@ -836,12 +921,16 @@ mod imp {
 
             // Background: neutral dark fill for baseless documents in the editor; the base
             // texture (uploaded once via GdkMemoryTexture) for loaded documents; nothing at
-            // all for the transparent overlay path.
+            // all for the transparent overlay path. When the base is `hidden` (Draw-mode
+            // lazy capture used purely as a blur source) we skip painting it too — the
+            // captured pixels stay reachable through `doc.base` for `snapshot_blur` only.
             if doc.base.is_none() {
                 if !self.transparent_background.get() {
                     snapshot.append_color(&gdk::RGBA::new(0.1, 0.1, 0.12, 1.0), &bounds);
                 }
-            } else if let Some(tex) = self.base_texture.borrow().as_ref() {
+            } else if !self.hidden_base.get()
+                && let Some(tex) = self.base_texture.borrow().as_ref()
+            {
                 snapshot.append_texture(tex, &bounds);
             }
 
@@ -851,7 +940,7 @@ mod imp {
                 snapshot_tool(snapshot, layer.as_ref(), &pango_ctx, base.as_ref());
             }
             if let Some(p) = self.pending.borrow().as_ref() {
-                snapshot_pending(snapshot, p);
+                snapshot_pending(snapshot, p, doc.size);
             }
             if let Some(pt) = self.pending_text.borrow().as_ref() {
                 snapshot_pending_text(snapshot, pt, &pango_ctx);
@@ -890,6 +979,18 @@ fn install_drag(canvas: &AnnotationCanvas) {
                 _ => [1.0, 0.0, 0.0, 0.85],
             });
             let style = c.tool_style(kind).unwrap_or_default();
+            // Sample SHIFT once at drag-begin and lock it on the stroke. Today only Blur
+            // consumes this (reverse blur), so we skip the gdk roundtrip for every other
+            // tool.
+            let invert = if matches!(kind, ToolKind::Blur) {
+                gdk4::Display::default()
+                    .and_then(|d| d.default_seat())
+                    .and_then(|s| s.keyboard())
+                    .map(|k| k.modifier_state().contains(gdk4::ModifierType::SHIFT_MASK))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
             c.imp().pending.replace(Some(PendingStroke {
                 kind,
                 from: (x, y),
@@ -897,6 +998,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                 points,
                 color,
                 style,
+                invert,
             }));
             c.queue_draw();
         });
@@ -1024,6 +1126,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                         doc.push_layer(Box::new(BlurTool {
                             bounds: clamped,
                             radius: 12.0,
+                            invert: stroke.invert,
                         }));
                     }
                 }
