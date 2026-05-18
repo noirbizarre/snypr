@@ -18,3 +18,6 @@ pub mod ui;
 
 pub mod annotate;
 pub mod daemon;
+
+#[cfg(feature = "notify")]
+pub mod notify;

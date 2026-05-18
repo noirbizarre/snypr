@@ -48,6 +48,8 @@ pub fn sinks_save_fn(
             paths = ?paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "saved annotated image"
         );
+        #[cfg(feature = "notify")]
+        crate::notify::notify_success(&config.notify, &paths, &png);
         if let Ok(mut g) = collected.lock() {
             g.extend(paths.iter().cloned());
         }

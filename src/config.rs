@@ -15,6 +15,30 @@ pub struct Config {
     pub output: OutputConfig,
     pub capture: CaptureConfig,
     pub keybinds: KeybindConfig,
+    pub notify: NotifyConfig,
+}
+
+/// Desktop-notification preferences. Notifications are best-effort: failures to talk to the
+/// notification daemon are logged at `debug!` and otherwise ignored, regardless of these flags.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NotifyConfig {
+    /// Emit a desktop notification (with the screenshot as a thumbnail) on success.
+    pub success: bool,
+    /// Emit a desktop notification on a fatal error.
+    pub error: bool,
+    /// Notification expiry timeout in milliseconds.
+    pub timeout_ms: u32,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            success: true,
+            error: true,
+            timeout_ms: 6000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -259,5 +283,27 @@ mod tests {
         std::fs::write(&path, "not = a [valid").unwrap();
         let err = Config::load(&path).unwrap_err();
         assert!(format!("{err:#}").contains("parsing TOML"));
+    }
+
+    #[test]
+    fn notify_defaults_enable_both_channels() {
+        let cfg = Config::default();
+        assert!(cfg.notify.success);
+        assert!(cfg.notify.error);
+        assert_eq!(cfg.notify.timeout_ms, 6000);
+    }
+
+    #[test]
+    fn notify_section_round_trips() {
+        let toml = r#"
+            [notify]
+            success = false
+            error = true
+            timeout_ms = 2500
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(!cfg.notify.success);
+        assert!(cfg.notify.error);
+        assert_eq!(cfg.notify.timeout_ms, 2500);
     }
 }

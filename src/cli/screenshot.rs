@@ -137,6 +137,7 @@ pub async fn execute(
             let outputs = Outputs::from_specs_per_output(&sinks, &ctx.config, &ctx_fname)?;
             let png = crate::output::encode_png(img, ctx.config.output.compression)?;
             let paths = outputs.write_png(&png).await?;
+            notify_written(&ctx.config, &paths, &png);
             all_paths.extend(paths);
         }
         return Ok(all_paths);
@@ -188,7 +189,16 @@ pub async fn execute(
     let outputs = Outputs::from_specs(&sinks, &ctx.config, &ctx_fname)?;
     let png = crate::output::encode_png(&stitched, ctx.config.output.compression)?;
     let paths = outputs.write_png(&png).await?;
+    notify_written(&ctx.config, &paths, &png);
     Ok(paths)
+}
+
+/// Emit a best-effort success notification for a freshly written screenshot. Behind the
+/// `notify` feature so non-notify builds compile cleanly without a stub call.
+#[inline]
+fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _png: &[u8]) {
+    #[cfg(feature = "notify")]
+    crate::notify::notify_success(&_config.notify, _paths, _png);
 }
 
 /// Convert a screencopy `CapturedImage` (BGRA, possibly with padded stride) into a tight RGBA

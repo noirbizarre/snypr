@@ -34,7 +34,15 @@ fn main() -> ExitCode {
                 tracing::error!(error = ?err, "hyprsnap failed");
                 eprintln!("error: {err:#}");
                 #[cfg(feature = "notify")]
-                notify_error(&err);
+                {
+                    // Load the config best-effort so users can disable error notifications
+                    // via `[notify] error = false`. If the config can't be loaded we fall
+                    // back to defaults (notifications enabled) — matches prior behaviour.
+                    let cfg = hyprsnap::config::Config::load_default()
+                        .unwrap_or_default()
+                        .notify;
+                    hyprsnap::notify::notify_error(&cfg, &err);
+                }
                 ExitCode::FAILURE
             }
         }
@@ -84,24 +92,4 @@ fn init_tracing(verbose: u8) -> anyhow::Result<()> {
         .try_init()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     Ok(())
-}
-
-/// Emit a desktop notification for a fatal error so the user sees something when hyprsnap
-/// was launched from a Hyprland keybind (where stderr is detached). Best-effort: failures
-/// to talk to the notification daemon are logged at debug and otherwise ignored.
-#[cfg(feature = "notify")]
-fn notify_error(err: &anyhow::Error) {
-    use notify_rust::Notification;
-
-    let body = format!("{err:#}");
-    if let Err(e) = Notification::new()
-        .summary("HyprSnap")
-        .body(&body)
-        .icon("noirbizar.re.HyprSnap")
-        .appname("hyprsnap")
-        .timeout(notify_rust::Timeout::Milliseconds(6000))
-        .show()
-    {
-        tracing::debug!(error = ?e, "failed to emit desktop notification");
-    }
 }
