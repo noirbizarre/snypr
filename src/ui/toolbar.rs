@@ -220,7 +220,7 @@ pub const SELECTOR_MODES: &[ModeEntry] = &[
 
 /// Per-view configuration. Sections appear left-to-right in the order: modes, tools, then the
 /// trailing action group (cursor toggle, passthrough toggle, undo, clear, save, capture).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ToolbarSpec {
     pub tools: &'static [ToolEntry],
     pub modes: &'static [ModeEntry],
@@ -232,6 +232,12 @@ pub struct ToolbarSpec {
     /// reflects the held Shift state live (only when shortcuts have been installed on a target
     /// window via [`Toolbar::install_shortcuts`]).
     pub show_capture: bool,
+    /// When `show_capture` is true, control whether the Capture button honors the Shift
+    /// modifier to switch to [`ToolbarAction::Annotate`]. Set to `false` from contexts where
+    /// the captured region will not be re-annotated (e.g. the selector popped by the draw
+    /// overlay's Save action — the user is already on an annotation surface). Defaults to
+    /// `true`, matching the historical selector behavior.
+    pub capture_shift_annotates: bool,
     pub show_cursor_toggle: bool,
     pub show_passthrough_toggle: bool,
     /// Show a color-picker button (with alpha) that drives the color of the currently
@@ -266,6 +272,7 @@ impl ToolbarSpec {
             show_clear: false,
             show_save: false,
             show_capture: false,
+            capture_shift_annotates: true,
             show_cursor_toggle: false,
             show_passthrough_toggle: false,
             show_color_picker: false,
@@ -276,6 +283,16 @@ impl ToolbarSpec {
             initial_cursor: false,
             initial_passthrough: false,
         }
+    }
+}
+
+impl Default for ToolbarSpec {
+    // `capture_shift_annotates` defaults to `true` to preserve the historical selector
+    // behavior where Shift+click / Shift+Enter on Capture opens the annotation editor.
+    // Callers that don't want that (the draw overlay's Save → selector flow) flip it to
+    // `false` explicitly.
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -831,10 +848,20 @@ impl Toolbar {
             // consult `shift_held`, which the window-level key controller installed by
             // `install_shortcuts` keeps in sync as Shift is pressed/released. The icon and
             // tooltip also swap live from that same key controller.
+            //
+            // When `capture_shift_annotates` is false (selector popped by the draw overlay's
+            // Save flow), Shift is meaningless here — the user is already on an annotation
+            // surface — so we keep a static icon/tooltip and route every click and Enter to
+            // plain `Capture` regardless of modifier state.
+            let shift_annotates = spec.capture_shift_annotates;
             let btn = gtk4::Button::new();
             let icon = icon_only("camera-photo-symbolic");
             btn.set_child(Some(&icon));
-            btn.set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
+            if shift_annotates {
+                btn.set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
+            } else {
+                btn.set_tooltip_text(Some("Capture (Enter)"));
+            }
             btn.add_css_class("suggested-action");
             make_unfocusable(&btn);
 
@@ -853,14 +880,18 @@ impl Toolbar {
             //    the user pressed Shift first and then clicked without moving the mouse.
             let shift_for_click = shift_held.clone();
             btn.connect_clicked(move |_| {
-                let shift = shift_for_click.get()
-                    || gdk4::Display::default()
-                        .and_then(|d| d.default_seat())
-                        .and_then(|s| s.keyboard())
-                        .map(|k| k.modifier_state().contains(gdk4::ModifierType::SHIFT_MASK))
-                        .unwrap_or(false);
-                let action = if shift {
-                    ToolbarAction::Annotate
+                let action = if shift_annotates {
+                    let shift = shift_for_click.get()
+                        || gdk4::Display::default()
+                            .and_then(|d| d.default_seat())
+                            .and_then(|s| s.keyboard())
+                            .map(|k| k.modifier_state().contains(gdk4::ModifierType::SHIFT_MASK))
+                            .unwrap_or(false);
+                    if shift {
+                        ToolbarAction::Annotate
+                    } else {
+                        ToolbarAction::Capture
+                    }
                 } else {
                     ToolbarAction::Capture
                 };
@@ -869,42 +900,48 @@ impl Toolbar {
                 }
             });
 
-            // Live icon/tooltip swap as Shift is pressed/released. Pointer key events on a
-            // layer-shell selector don't reliably reach `EventControllerKey` (the window may
-            // not have keyboard focus, depending on compositor + layer config), so instead
-            // we poll the seat keyboard's modifier state on a short GLib timer. This is
-            // cheap (a handful of pointer hops every 60ms) and works regardless of focus.
-            let icon_for_timer = icon.clone();
-            let btn_for_timer = btn.clone();
-            let shift_for_timer = shift_held.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-                if btn_for_timer.parent().is_none() {
-                    // Button was destroyed (window closed); cancel the timer.
-                    return glib::ControlFlow::Break;
-                }
-                let shift = gdk4::Display::default()
-                    .and_then(|d| d.default_seat())
-                    .and_then(|s| s.keyboard())
-                    .map(|k| k.modifier_state().contains(gdk4::ModifierType::SHIFT_MASK))
-                    .unwrap_or(false);
-                if shift_for_timer.get() != shift {
-                    shift_for_timer.set(shift);
-                    if shift {
-                        icon_for_timer.set_icon_name(Some("document-edit-symbolic"));
-                        btn_for_timer
-                            .set_tooltip_text(Some("Annotate (Shift-click or Shift+Enter)"));
-                    } else {
-                        icon_for_timer.set_icon_name(Some("camera-photo-symbolic"));
-                        btn_for_timer.set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
+            if shift_annotates {
+                // Live icon/tooltip swap as Shift is pressed/released. Pointer key events on a
+                // layer-shell selector don't reliably reach `EventControllerKey` (the window may
+                // not have keyboard focus, depending on compositor + layer config), so instead
+                // we poll the seat keyboard's modifier state on a short GLib timer. This is
+                // cheap (a handful of pointer hops every 60ms) and works regardless of focus.
+                let icon_for_timer = icon.clone();
+                let btn_for_timer = btn.clone();
+                let shift_for_timer = shift_held.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+                    if btn_for_timer.parent().is_none() {
+                        // Button was destroyed (window closed); cancel the timer.
+                        return glib::ControlFlow::Break;
                     }
-                }
-                glib::ControlFlow::Continue
-            });
+                    let shift = gdk4::Display::default()
+                        .and_then(|d| d.default_seat())
+                        .and_then(|s| s.keyboard())
+                        .map(|k| k.modifier_state().contains(gdk4::ModifierType::SHIFT_MASK))
+                        .unwrap_or(false);
+                    if shift_for_timer.get() != shift {
+                        shift_for_timer.set(shift);
+                        if shift {
+                            icon_for_timer.set_icon_name(Some("document-edit-symbolic"));
+                            btn_for_timer
+                                .set_tooltip_text(Some("Annotate (Shift-click or Shift+Enter)"));
+                        } else {
+                            icon_for_timer.set_icon_name(Some("camera-photo-symbolic"));
+                            btn_for_timer
+                                .set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
+                        }
+                    }
+                    glib::ControlFlow::Continue
+                });
+            }
 
             widget.append(&btn);
             // Enter → Capture, Shift+Enter → Annotate (and the KP variants). The Save block
             // never coexists with show_capture (editor toolbar vs selector toolbar), so the
-            // bare-Enter shortcuts don't collide.
+            // bare-Enter shortcuts don't collide. The Shift+Enter / Shift+KP_Enter shortcuts
+            // are only installed when `capture_shift_annotates` is true; otherwise the
+            // strict modifier match at `install_shortcuts` lets Shift+Enter fall through to
+            // the window-level key controller (which also honors the same flag).
             shortcuts.push(Shortcut {
                 key: gdk4::Key::Return,
                 action: ShortcutAction::Capture,
@@ -915,22 +952,29 @@ impl Toolbar {
                 action: ShortcutAction::Capture,
                 modifiers: gdk4::ModifierType::empty(),
             });
-            shortcuts.push(Shortcut {
-                key: gdk4::Key::Return,
-                action: ShortcutAction::Annotate,
-                modifiers: gdk4::ModifierType::SHIFT_MASK,
-            });
-            shortcuts.push(Shortcut {
-                key: gdk4::Key::KP_Enter,
-                action: ShortcutAction::Annotate,
-                modifiers: gdk4::ModifierType::SHIFT_MASK,
-            });
+            if shift_annotates {
+                shortcuts.push(Shortcut {
+                    key: gdk4::Key::Return,
+                    action: ShortcutAction::Annotate,
+                    modifiers: gdk4::ModifierType::SHIFT_MASK,
+                });
+                shortcuts.push(Shortcut {
+                    key: gdk4::Key::KP_Enter,
+                    action: ShortcutAction::Annotate,
+                    modifiers: gdk4::ModifierType::SHIFT_MASK,
+                });
+            }
 
-            capture = Some(CaptureUi {
-                button: btn,
-                icon,
-                shift_held,
-            });
+            // Only populate `CaptureUi` when Shift can actually change the button's
+            // appearance — otherwise `apply_shift` (driven by `install_shortcuts`) has
+            // nothing to do.
+            if shift_annotates {
+                capture = Some(CaptureUi {
+                    button: btn,
+                    icon,
+                    shift_held,
+                });
+            }
         }
 
         let state = Rc::new(ToolbarState {

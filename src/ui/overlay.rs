@@ -997,7 +997,11 @@ async fn run_draw_save(
     // later than the selector's `present()`.
     glib::timeout_future(std::time::Duration::from_millis(16)).await;
 
-    let outcome = match selector::pick_region_in_app(&app, draw_save.cursor).await {
+    // The draw overlay is itself an annotation surface, so the selector must not offer
+    // its Shift→Annotate shortcut — going draw → pick zone → annotate again would be a
+    // dead-end loop. Pass `allow_annotate = false` so Shift+click / Shift+Enter behave
+    // exactly like a plain Capture.
+    let outcome = match selector::pick_region_in_app(&app, draw_save.cursor, false).await {
         Ok(o) => o,
         Err(err) => {
             if err.chain().any(|e| e.is::<selector::Cancelled>()) {

@@ -263,7 +263,7 @@ async fn resolve_selection(
         Selection::Interactive => {
             #[cfg(feature = "ui")]
             {
-                let outcome = crate::ui::selector::pick_region(_ctx.clone(), cursor)
+                let outcome = crate::ui::selector::pick_region(_ctx.clone(), cursor, true)
                     .await
                     .context("interactive region selection")?;
                 tracing::info!(

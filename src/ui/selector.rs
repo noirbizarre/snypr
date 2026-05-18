@@ -72,10 +72,20 @@ pub struct SelectorOutcome {
 /// blocking thread, and tears the app down on commit / cancel. Use this from CLI flows that
 /// own the process. From inside an already-running overlay (e.g. the draw overlay's Save
 /// action), call [`pick_region_in_app`] instead so we don't try to spin up a second GTK app.
-pub async fn pick_region(_ctx: Ctx, initial_cursor: bool) -> Result<SelectorOutcome> {
+///
+/// `allow_annotate` controls whether the Capture button honors the Shift modifier as a
+/// "route through the annotation editor" shortcut. The standalone `hyprsnap screenshot`
+/// flow passes `true` (preserving Shift+click / Shift+Enter → Annotate); callers that
+/// already provide an annotation surface (the draw overlay) pass `false` so Shift behaves
+/// as a no-op modifier.
+pub async fn pick_region(
+    _ctx: Ctx,
+    initial_cursor: bool,
+    allow_annotate: bool,
+) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let clients = fetch_clients_or_warn().await;
-    tokio::task::spawn_blocking(move || run_gtk(tx, initial_cursor, clients))
+    tokio::task::spawn_blocking(move || run_gtk(tx, initial_cursor, clients, allow_annotate))
         .await
         .map_err(|e| anyhow!("selector task panicked: {e}"))??;
     let result = rx
@@ -98,9 +108,12 @@ pub async fn pick_region(_ctx: Ctx, initial_cursor: bool) -> Result<SelectorOutc
 /// Must be called from the GTK main context (typically via `glib::MainContext::spawn_local`).
 /// The 30 ms post-commit grace is honored here too so callers can immediately invoke
 /// `zwlr_screencopy` without the selector's dim veil leaking into the captured frame.
+///
+/// See [`pick_region`] for the semantics of `allow_annotate`.
 pub async fn pick_region_in_app(
     app: &gtk4::Application,
     initial_cursor: bool,
+    allow_annotate: bool,
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let tx: Sender = Arc::new(Mutex::new(Some(tx)));
@@ -109,7 +122,14 @@ pub async fn pick_region_in_app(
     // against the caller's app. Windows are still parented to `app` (required by GTK), but
     // they're destroyed by `dismiss_overlays` so they don't keep the app alive on their own.
     let quit_target: glib::WeakRef<gtk4::Application> = glib::WeakRef::new();
-    if let Err(err) = build_overlays(app, &tx, initial_cursor, quit_target, clients) {
+    if let Err(err) = build_overlays(
+        app,
+        &tx,
+        initial_cursor,
+        quit_target,
+        clients,
+        allow_annotate,
+    ) {
         send_once(&tx, Err(err));
     }
     let result = rx
@@ -258,6 +278,7 @@ fn run_gtk(
     tx: tokio::sync::oneshot::Sender<Result<SelectorOutcome>>,
     initial_cursor: bool,
     clients: Vec<HyprWindow>,
+    allow_annotate: bool,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
@@ -275,9 +296,14 @@ fn run_gtk(
             // alone.
             let quit_target = app.downgrade();
             let clients_snapshot = clients.borrow().clone();
-            if let Err(err) =
-                build_overlays(app, &tx, initial_cursor, quit_target, clients_snapshot)
-            {
+            if let Err(err) = build_overlays(
+                app,
+                &tx,
+                initial_cursor,
+                quit_target,
+                clients_snapshot,
+                allow_annotate,
+            ) {
                 send_once(&tx, Err(err));
                 app.quit();
             }
@@ -299,6 +325,7 @@ fn build_overlays(
     initial_cursor: bool,
     quit_target: glib::WeakRef<gtk4::Application>,
     clients: Vec<HyprWindow>,
+    allow_annotate: bool,
 ) -> Result<()> {
     crate::ui::style::install();
 
@@ -322,6 +349,7 @@ fn build_overlays(
         app_weak: quit_target,
         toolbars: Rc::new(RefCell::new(Vec::new())),
         initial_cursor,
+        allow_annotate,
         clients: Rc::new(RefCell::new(clients)),
     };
 
@@ -396,6 +424,7 @@ fn spawn_monitor_overlay(
         &shared.monitors,
         &shared.app_weak,
         info.clone(),
+        shared.allow_annotate,
     );
 
     // Every monitor gets its own floating toolbar. Mode/cursor changes on any toolbar
@@ -424,6 +453,7 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
         modes: SELECTOR_MODES,
         show_cursor_toggle: true,
         show_capture: true,
+        capture_shift_annotates: shared.allow_annotate,
         initial_mode: Some(ModeKind::Region),
         initial_cursor: shared.initial_cursor,
         ..Default::default()
@@ -509,6 +539,11 @@ struct SharedState {
     app_weak: glib::WeakRef<gtk4::Application>,
     toolbars: ToolbarRegistry,
     initial_cursor: bool,
+    /// When `false`, the Capture button on every per-monitor toolbar ignores the Shift
+    /// modifier and the window-level Enter handler always commits with `edit=false`. Set
+    /// by the draw overlay's Save flow so Shift+click / Shift+Enter just save the snapshot
+    /// instead of redundantly opening another annotation editor.
+    allow_annotate: bool,
     /// Snapshot of Hyprland's client list at selector start, used by Window mode for
     /// cursor-based hit-testing. Empty when the query failed or the host isn't Hyprland — in
     /// that case Window mode falls back to the legacy "capture focused window" behavior.
@@ -703,6 +738,7 @@ fn install_keys(
     monitors: &MonitorList,
     app_weak: &glib::WeakRef<gtk4::Application>,
     info: MonitorInfo,
+    allow_annotate: bool,
 ) {
     let key = gtk4::EventControllerKey::new();
     let selection = selection.clone();
@@ -717,9 +753,12 @@ fn install_keys(
             glib::Propagation::Stop
         }
         gdk4::Key::Return | gdk4::Key::KP_Enter => {
-            // Shift+Enter routes to the annotation editor, mirroring the toolbar's
-            // `ShortcutAction::Annotate` shortcut so both layers stay in sync.
-            let edit = modifiers.contains(gdk4::ModifierType::SHIFT_MASK);
+            // Shift+Enter normally routes to the annotation editor, mirroring the toolbar's
+            // `ShortcutAction::Annotate` shortcut so both layers stay in sync. When the
+            // selector was opened from a context that already provides an annotation
+            // surface (the draw overlay), `allow_annotate` is `false` and Shift is treated
+            // as a no-op modifier — every Enter just commits the snapshot.
+            let edit = allow_annotate && modifiers.contains(gdk4::ModifierType::SHIFT_MASK);
             commit(
                 &selection,
                 &tx,
