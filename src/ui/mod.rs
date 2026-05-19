@@ -14,7 +14,6 @@ pub mod tray;
 
 pub use toolbar::{ModeKind, Toolbar, ToolbarAction, ToolbarSpec};
 
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// Application id used across the GTK windows and the StatusNotifierItem.
@@ -35,10 +34,4 @@ pub(crate) fn install_icon_resources() {
     if let Some(display) = gdk4::Display::default() {
         gtk4::IconTheme::for_display(&display).add_resource_path("/re/noirbizar/HyprSnap/icons");
     }
-}
-
-/// Convenience accessor used by binary stubs that don't need the full editor yet.
-#[allow(dead_code)]
-pub fn placeholder_path() -> Option<PathBuf> {
-    None
 }
