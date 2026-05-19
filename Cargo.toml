@@ -14,14 +14,14 @@ path = "src/main.rs"
 [features]
 default = ["ui", "tray", "notify"]
 ui = [
-    "dep:gtk4",
-    "dep:gdk4",
-    "dep:gdk4-wayland",
-    "dep:gsk4",
-    "dep:gtk4-layer-shell",
-    "dep:glib",
-    "dep:cairo-rs",
-    "dep:pango",
+  "dep:gtk4",
+  "dep:gdk4",
+  "dep:gdk4-wayland",
+  "dep:gsk4",
+  "dep:gtk4-layer-shell",
+  "dep:glib",
+  "dep:cairo-rs",
+  "dep:pango",
 ]
 tray = ["ui", "dep:ksni"]
 # Emit a desktop notification when hyprsnap exits with an error. Useful when launched from a
@@ -42,14 +42,14 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 
 # Async runtime
 tokio = { version = "1", features = [
-    "rt-multi-thread",
-    "macros",
-    "net",
-    "sync",
-    "fs",
-    "io-util",
-    "time",
-    "signal",
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "sync",
+  "fs",
+  "io-util",
+  "time",
+  "signal",
 ] }
 async-channel = "2"
 async-trait = "0.1"
@@ -60,15 +60,15 @@ serde_json = "1"
 toml = "1.1"
 directories = "6"
 chrono = { version = "0.4", default-features = false, features = [
-    "std",
-    "clock",
+  "std",
+  "clock",
 ] }
 
 # Image
 image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-    "webp",
+  "png",
+  "jpeg",
+  "webp",
 ] }
 bytemuck = "1"
 
