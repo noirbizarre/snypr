@@ -16,7 +16,15 @@ use notify_rust::Notification;
 
 use crate::config::NotifyConfig;
 
-const APP_ID: &str = "hyprsnap";
+// The notification daemon distinguishes between the human-facing application name
+// (`appname`, surfaced in some notification UIs as a group label) and the desktop-file
+// / theme application id (used to resolve the icon). We deliberately use a lowercase
+// bare name as the appname so the grouping label reads cleanly, and reuse
+// `crate::ui::APP_ID` for the icon so the bundled `noirbizar.re.HyprSnap` icon resolves.
+const APP_NAME: &str = "hyprsnap";
+#[cfg(feature = "ui")]
+const APP_ICON: &str = crate::ui::APP_ID;
+#[cfg(not(feature = "ui"))]
 const APP_ICON: &str = "noirbizar.re.HyprSnap";
 const SUMMARY: &str = "HyprSnap";
 
@@ -31,7 +39,7 @@ pub fn notify_error(cfg: &NotifyConfig, err: &anyhow::Error) {
         .summary(SUMMARY)
         .body(&format!("{err:#}"))
         .icon(APP_ICON)
-        .appname(APP_ID)
+        .appname(APP_NAME)
         .timeout(notify_rust::Timeout::Milliseconds(cfg.timeout_ms));
     dispatch(builder);
 }
@@ -75,7 +83,7 @@ pub fn notify_success(cfg: &NotifyConfig, paths: &[PathBuf], png_bytes: &[u8]) {
     builder
         .summary(summary)
         .icon(APP_ICON)
-        .appname(APP_ID)
+        .appname(APP_NAME)
         .timeout(notify_rust::Timeout::Milliseconds(cfg.timeout_ms));
     if let Some(body) = body.as_deref() {
         builder.body(body);
