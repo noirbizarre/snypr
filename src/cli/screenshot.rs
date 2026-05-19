@@ -42,9 +42,11 @@ pub struct Args {
     #[arg(long = "to", value_name = "SINK")]
     pub to: Vec<SinkSpec>,
 
-    /// Delay before capture (e.g. `2s`, `500ms`).
-    #[arg(long, value_parser = humantime::parse_duration)]
-    pub delay: Option<std::time::Duration>,
+    /// Delay before capture, in whole seconds (e.g. `--delay 3`). `0` is the same as
+    /// omitting the flag. The UI countdown only operates on integer seconds, so the
+    /// CLI / config / IPC representation all match.
+    #[arg(long, value_name = "SECONDS")]
+    pub delay: Option<u32>,
 
     /// Include the mouse cursor in the capture.
     #[arg(long)]
@@ -66,43 +68,72 @@ pub async fn run(args: Args) -> Result<()> {
         args.to.clone()
     };
 
-    if let Some(delay) = args.delay {
-        tokio::time::sleep(delay).await;
-    }
+    // Effective delay: CLI flag wins, otherwise fall back to the `[capture].delay` config.
+    // The selector's spinner can still override this interactively (see `execute`).
+    let delay = effective_delay(args.delay, ctx.config.capture.delay);
 
-    let paths = execute(ctx, selection, args.cursor, sinks, args.edit).await?;
+    let paths = execute(ctx, selection, args.cursor, sinks, args.edit, delay).await?;
     for p in &paths {
         println!("{}", p.display());
     }
     Ok(())
 }
+
+/// Resolve the pre-capture delay using the documented precedence: CLI `--delay` flag wins,
+/// otherwise fall back to `[capture].delay` from the config. A zero result collapses to
+/// `None` so the sleep is a true no-op rather than a vacuous zero-length sleep round-trip.
+pub fn effective_delay(cli: Option<u32>, config: Option<u32>) -> Option<u32> {
+    cli.or(config).filter(|n| *n > 0)
+}
 /// Headless core of the screenshot pipeline used by both the CLI (`run`) and the daemon's IPC
 /// handler. Resolves compositor-aware selections, captures, encodes, and writes — returning the
-/// file paths produced by `OutputSink`s (clipboard sinks contribute nothing). `delay` and arg
-/// parsing live one level up since they're CLI-specific concerns.
+/// file paths produced by `OutputSink`s (clipboard sinks contribute nothing).
 ///
 /// When `edit == true`, the captured image is handed to the annotation editor (in-memory, no
 /// PNG round-trip) and the editor's save action fans the result out to `sinks` instead. The
 /// editor path rejects `Selection::PerOutput` since the editor operates on a single image.
+///
+/// `delay` is the pre-capture sleep applied **after** any interactive selector has been
+/// resolved (so the countdown only starts once the user has confirmed). The interactive
+/// selector can override this default via its delay spinner; the final value is what is
+/// honored. Pass `None` to skip the sleep entirely.
 pub async fn execute(
     ctx: crate::context::Ctx,
     selection: Selection,
     cursor: bool,
     sinks: Vec<SinkSpec>,
     edit: bool,
+    delay: Option<u32>,
 ) -> Result<Vec<std::path::PathBuf>> {
     // Resolve compositor-aware selections up front (Hyprland IPC + interactive overlay) so the
     // rest of the pipeline only ever sees concrete Region/Output/Full/PerOutput variants. The
-    // interactive selector can also override `cursor` via its toolbar toggle, and can request
-    // the annotation editor via its "Annotate" button (Shift+Enter). The button choice wins:
-    // if the selector explicitly opted in, we OR it into `edit`.
-    let (selection, cursor, selector_edit) = resolve_selection(selection, cursor, &ctx).await?;
+    // interactive selector can also override `cursor` and `delay` via its toolbar, and can
+    // request the annotation editor via its "Annotate" button (Shift+Enter). The button choice
+    // wins: if the selector explicitly opted in, we OR it into `edit`.
+    let (selection, cursor, selector_edit, delay) =
+        resolve_selection(selection, cursor, delay, &ctx).await?;
     let edit = edit || selector_edit;
 
     if edit && matches!(selection, Selection::PerOutput) {
         bail!(
             "`--edit` is incompatible with `--per-output` (the annotation editor operates on a single image)"
         );
+    }
+
+    // Apply the pre-capture sleep after the selector closes so the countdown does not block
+    // user interaction. For interactive paths the selector has already counted down inside
+    // its own overlay and `delay` arrives as `None` here. For non-interactive paths
+    // (`--full --delay 3`, `--monitor`, `--window`, daemon screenshot, tray) the selector
+    // is short-circuited; we display a transient fullscreen countdown instead of sleeping
+    // silently so the user is never caught mid-action by an unannounced capture.
+    if let Some(secs) = delay
+        && secs > 0
+    {
+        let d = std::time::Duration::from_secs(secs as u64);
+        #[cfg(feature = "ui")]
+        crate::ui::countdown::show_countdown(d).await?;
+        #[cfg(not(feature = "ui"))]
+        tokio::time::sleep(d).await;
     }
 
     let capturer = WlrCapturer::new()?;
@@ -244,41 +275,67 @@ pub(crate) fn selection_label(s: &Selection) -> &'static str {
 
 /// Resolve compositor-aware selections (`Interactive`, `Window`, `Focused`) into concrete ones
 /// that the capture pipeline can act on directly. Also returns the (potentially updated)
-/// cursor flag and an `edit` flag — the interactive selector's toolbar can override the CLI
-/// cursor default and ask for the annotation editor via a Shift-click on Capture.
+/// cursor flag, an `edit` flag, and the final pre-capture delay. The interactive selector's
+/// toolbar can override every one of these — its delay spinner, cursor toggle, and Annotate
+/// button take precedence over the values threaded in from the CLI.
 ///
-/// - `Interactive` opens the GTK overlay; the resulting selection + cursor + edit flag come
-///   from the user's toolbar choices.
+/// - `Interactive` opens the GTK overlay; the resulting selection + cursor + edit flag + delay
+///   come from the user's toolbar choices (initial delay seeded from `initial_delay`).
 /// - `Window` reads the currently active window from Hyprland and is replaced with `Region(rect)`.
 /// - `Focused` reads the currently focused monitor from Hyprland and is replaced with
 ///   `Output(name)`.
 ///
-/// All other variants pass through unchanged (with `edit = false` and `cursor` unchanged).
+/// All other variants pass through unchanged (with `edit = false`, `cursor`/`delay` unchanged).
 async fn resolve_selection(
     selection: Selection,
     cursor: bool,
+    initial_delay: Option<u32>,
     _ctx: &std::sync::Arc<crate::context::Context>,
-) -> Result<(Selection, bool, bool)> {
+) -> Result<(Selection, bool, bool, Option<u32>)> {
     match selection {
         Selection::Interactive => {
             #[cfg(feature = "ui")]
             {
-                let outcome = crate::ui::selector::pick_region(_ctx.clone(), cursor, true)
+                // Selector internals (countdown timer, outcome struct) operate on
+                // `Duration`; convert at the boundary so the rest of the screenshot
+                // pipeline stays in plain integer seconds.
+                let seed = std::time::Duration::from_secs(initial_delay.unwrap_or(0) as u64);
+                let outcome = crate::ui::selector::pick_region(_ctx.clone(), cursor, seed, true)
                     .await
                     .context("interactive region selection")?;
                 tracing::info!(
                     ?outcome.selection,
                     cursor = outcome.cursor,
                     edit = outcome.edit,
+                    delay_secs = outcome.delay.as_secs(),
                     "selector outcome",
                 );
+                // The selector counts down internally and returns `Duration::ZERO`, so
+                // any non-zero value here would only arise from a future code path that
+                // bypasses the in-overlay countdown. Convert it to seconds (rounding up
+                // to keep the visible wait at least as long as requested) for downstream
+                // sleep / countdown logic.
+                let chosen_delay = if outcome.delay.is_zero() {
+                    None
+                } else {
+                    let secs = outcome.delay.as_secs_f64().ceil() as u32;
+                    Some(secs).filter(|n| *n > 0)
+                };
                 // Resolve any compositor-aware variants the user picked (Window) by recursing.
-                let (resolved, cursor_after, edit_after) =
-                    Box::pin(resolve_selection(outcome.selection, outcome.cursor, _ctx)).await?;
-                Ok((resolved, cursor_after, outcome.edit || edit_after))
+                let (resolved, cursor_after, edit_after, delay_after) = Box::pin(
+                    resolve_selection(outcome.selection, outcome.cursor, chosen_delay, _ctx),
+                )
+                .await?;
+                Ok((
+                    resolved,
+                    cursor_after,
+                    outcome.edit || edit_after,
+                    delay_after,
+                ))
             }
             #[cfg(not(feature = "ui"))]
             {
+                let _ = initial_delay;
                 anyhow::bail!(
                     "interactive selector requires the `ui` cargo feature; pass a concrete --region, --full, or other flag"
                 );
@@ -299,16 +356,16 @@ async fn resolve_selection(
                 h = rect.h,
                 "active window resolved"
             );
-            Ok((Selection::Region(rect), cursor, false))
+            Ok((Selection::Region(rect), cursor, false, initial_delay))
         }
         Selection::Focused => {
             let name = crate::hypr::focused_monitor()
                 .await
                 .context("querying focused monitor from Hyprland")?;
             tracing::info!(monitor = %name, "focused monitor resolved");
-            Ok((Selection::Output(name), cursor, false))
+            Ok((Selection::Output(name), cursor, false, initial_delay))
         }
-        other => Ok((other, cursor, false)),
+        other => Ok((other, cursor, false, initial_delay)),
     }
 }
 
@@ -357,29 +414,6 @@ fn parse_region(spec: &str) -> Result<crate::capture::region::Rect> {
     })
 }
 
-/// Minimal humantime-like duration parser to avoid an extra dependency.
-mod humantime {
-    use std::time::Duration;
-
-    pub fn parse_duration(s: &str) -> Result<Duration, String> {
-        let s = s.trim();
-        let (num, unit) = s
-            .find(|c: char| c.is_alphabetic())
-            .map(|i| s.split_at(i))
-            .ok_or_else(|| format!("missing unit in duration `{s}` (try `2s` or `500ms`)"))?;
-        let value: u64 = num
-            .trim()
-            .parse()
-            .map_err(|e| format!("invalid number in duration `{s}`: {e}"))?;
-        match unit {
-            "ms" => Ok(Duration::from_millis(value)),
-            "s" => Ok(Duration::from_secs(value)),
-            "m" => Ok(Duration::from_secs(value * 60)),
-            other => Err(format!("unknown duration unit `{other}` (try ms, s, m)")),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +452,39 @@ mod tests {
             Harness::try_parse_from(["test", "screenshot", "--edit", "--per-output"]).unwrap_err();
         // Clap emits an ArgumentConflict error for `conflicts_with` violations.
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn effective_delay_prefers_cli_over_config() {
+        assert_eq!(effective_delay(Some(5), Some(10)), Some(5));
+    }
+
+    #[test]
+    fn effective_delay_falls_back_to_config() {
+        assert_eq!(effective_delay(None, Some(10)), Some(10));
+    }
+
+    #[test]
+    fn effective_delay_is_none_when_unset() {
+        assert_eq!(effective_delay(None, None), None);
+    }
+
+    #[test]
+    fn effective_delay_collapses_zero_to_none() {
+        assert_eq!(effective_delay(Some(0), None), None);
+        assert_eq!(effective_delay(None, Some(0)), None);
+    }
+
+    #[test]
+    fn parses_delay_as_integer_seconds() {
+        let cli = Harness::try_parse_from(["test", "screenshot", "--delay", "3"]).unwrap();
+        let HarnessCmd::Screenshot(args) = cli.cmd;
+        assert_eq!(args.delay, Some(3));
+    }
+
+    #[test]
+    fn rejects_humantime_delay() {
+        let err = Harness::try_parse_from(["test", "screenshot", "--delay", "2s"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 }

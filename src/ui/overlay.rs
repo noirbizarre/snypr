@@ -1000,8 +1000,17 @@ async fn run_draw_save(
     // The draw overlay is itself an annotation surface, so the selector must not offer
     // its Shift→Annotate shortcut — going draw → pick zone → annotate again would be a
     // dead-end loop. Pass `allow_annotate = false` so Shift+click / Shift+Enter behave
-    // exactly like a plain Capture.
-    let outcome = match selector::pick_region_in_app(&app, draw_save.cursor, false).await {
+    // exactly like a plain Capture. No pre-capture delay is plumbed through the draw
+    // overlay flow today: the user is already on an annotation surface, so a timed delay
+    // would just blur the workflow without an obvious entry point.
+    let outcome = match selector::pick_region_in_app(
+        &app,
+        draw_save.cursor,
+        std::time::Duration::ZERO,
+        false,
+    )
+    .await
+    {
         Ok(o) => o,
         Err(err) => {
             if err.chain().any(|e| e.is::<selector::Cancelled>()) {

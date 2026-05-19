@@ -240,6 +240,10 @@ pub struct ToolbarSpec {
     pub capture_shift_annotates: bool,
     pub show_cursor_toggle: bool,
     pub show_passthrough_toggle: bool,
+    /// Show a numeric delay spinner (seconds) next to the cursor toggle. The toolbar emits
+    /// [`ToolbarAction::DelayChanged`] when the user changes the value; the caller is
+    /// responsible for storing the choice and applying it before the actual capture.
+    pub show_delay_spinner: bool,
     /// Show a color-picker button (with alpha) that drives the color of the currently
     /// selected tool. The toolbar emits [`ToolbarAction::ColorChanged`] when the user
     /// picks a new color; the caller is responsible for storing the choice on whatever
@@ -259,6 +263,9 @@ pub struct ToolbarSpec {
     pub initial_mode: Option<ModeKind>,
     pub initial_cursor: bool,
     pub initial_passthrough: bool,
+    /// Initial value (in whole seconds) for the delay spinner. Ignored when
+    /// `show_delay_spinner` is false. Common values are 0, 3, and 10.
+    pub initial_delay_secs: u32,
 }
 
 impl ToolbarSpec {
@@ -275,6 +282,7 @@ impl ToolbarSpec {
             capture_shift_annotates: true,
             show_cursor_toggle: false,
             show_passthrough_toggle: false,
+            show_delay_spinner: false,
             show_color_picker: false,
             show_style_picker: false,
             show_font_size_picker: false,
@@ -282,6 +290,7 @@ impl ToolbarSpec {
             initial_mode: None,
             initial_cursor: false,
             initial_passthrough: false,
+            initial_delay_secs: 0,
         }
     }
 }
@@ -304,6 +313,8 @@ pub enum ToolbarAction {
     ModeSelected(ModeKind),
     CursorToggled(bool),
     PassthroughToggled(bool),
+    /// User changed the delay (in whole seconds) on the selector toolbar's spinner.
+    DelayChanged(u32),
     Undo,
     Clear,
     Save,
@@ -334,6 +345,10 @@ struct ToolbarState {
     modes: Vec<(ModeKind, gtk4::ToggleButton, glib::SignalHandlerId)>,
     cursor: Option<(gtk4::ToggleButton, glib::SignalHandlerId)>,
     passthrough: Option<(gtk4::ToggleButton, glib::SignalHandlerId)>,
+    /// Capture-delay spinner. Populated only when `show_delay_spinner` is true. We keep the
+    /// `value-changed` handler id so external state updates ([`Toolbar::set_delay`]) can
+    /// `block_signal` while writing the new value to avoid re-emitting `DelayChanged`.
+    delay: Option<DelaySpinnerUi>,
     /// Capture-button visuals + live-shift tracking. Populated only when `show_capture` is
     /// true. `install_shortcuts` updates `shift_held` and re-skins the icon/tooltip as Shift
     /// is pressed/released so users get visual feedback before clicking.
@@ -406,6 +421,26 @@ struct FontSizePickerUi {
     handler: glib::SignalHandlerId,
 }
 
+/// Live state for the capture-delay control. An inline segmented group of three
+/// non-focusable widgets: `[−] [3s] [+]`. We previously tried both an inline
+/// `SpinButton` (its internal `GtkText` grabbed focus on a layer-shell selector
+/// surface holding `KeyboardMode::Exclusive`, wedging pointer dispatch to the
+/// sibling Capture button) and a `ToggleButton` opening a popover around the
+/// same `SpinButton` (popover autohide treats clicks inside the spinner as
+/// outside on Hyprland layer-shell, dismissing without applying — the same
+/// limitation that pushed the stroke-style picker to inline toggles). The
+/// segmented group avoids both classes of bug while still giving precise
+/// control: left-click steps by 1 s, right-click steps by 5 s, scroll wheel
+/// adjusts smoothly. The value clamps to the same 0–60 s range the spinner
+/// used.
+struct DelaySpinnerUi {
+    /// Label between the `−` / `+` buttons, displays the current value as "3s".
+    label: gtk4::Label,
+    /// Current value in whole seconds. Source of truth for the control — both
+    /// buttons and the scroll handler mutate this and then refresh the label.
+    value: Rc<Cell<u32>>,
+}
+
 impl CaptureUi {
     fn apply_shift(&self, shift: bool) {
         if self.shift_held.get() == shift {
@@ -467,6 +502,7 @@ impl Toolbar {
         let mut cursor = None;
         let mut passthrough = None;
         let mut capture = None;
+        let mut delay = None;
 
         // Mode buttons (left section).
         let mut mode_group: Option<gtk4::ToggleButton> = None;
@@ -722,7 +758,8 @@ impl Toolbar {
             || spec.show_save
             || spec.show_capture
             || spec.show_cursor_toggle
-            || spec.show_passthrough_toggle;
+            || spec.show_passthrough_toggle
+            || spec.show_delay_spinner;
         if trailing && (!spec.modes.is_empty() || !spec.tools.is_empty()) {
             let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
             spacer.set_hexpand(true);
@@ -781,6 +818,108 @@ impl Toolbar {
             });
             widget.append(&btn);
             cursor = Some((btn, id));
+        }
+
+        // Capture-delay control (selector only). Three-widget segmented group:
+        // `[−] [3s] [+]`. See [`DelaySpinnerUi`] for the rationale for not using a
+        // SpinButton (focus-trap on layer-shell) or a popover (autohide quirks).
+        // Value range 0–60 s; left-click steps by 1 s, right-click by 5 s, scroll
+        // wheel adjusts by the same step.
+        if spec.show_delay_spinner {
+            const DELAY_MIN: u32 = 0;
+            const DELAY_MAX: u32 = 60;
+            const STEP_PRIMARY: i32 = 1;
+            const STEP_SECONDARY: i32 = 5;
+
+            let initial_secs = spec.initial_delay_secs.clamp(DELAY_MIN, DELAY_MAX);
+            let value = Rc::new(Cell::new(initial_secs));
+
+            // Container is a horizontal Box styled as a single linked unit. Same
+            // visual pattern as the stroke-style picker.
+            let group = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            group.add_css_class("linked");
+            group.set_tooltip_text(Some("Delay before capture, in seconds"));
+
+            let minus = gtk4::Button::new();
+            minus.set_child(Some(&icon_only("list-remove-symbolic")));
+            make_unfocusable(&minus);
+
+            let label = gtk4::Label::new(Some(&format_delay_label(initial_secs)));
+            // Pin a width so the label doesn't reflow as values change ("0s" vs
+            // "60s" differ by ~1.5 char). 3 chars covers "60s" comfortably.
+            label.set_width_chars(3);
+            label.set_xalign(0.5);
+            // The label sits on the toolbar surface but must not eat clicks — it's
+            // purely informational. Without this, click-through to the underlying
+            // toolbar Box is fine, but explicit is clearer.
+            label.set_can_target(false);
+
+            let plus = gtk4::Button::new();
+            plus.set_child(Some(&icon_only("list-add-symbolic")));
+            make_unfocusable(&plus);
+
+            group.append(&minus);
+            group.append(&label);
+            group.append(&plus);
+
+            // Shared adjustment + emit closure. `delta` is signed so a single
+            // helper covers both buttons + scroll wheel + secondary-click.
+            let emit = {
+                let value = value.clone();
+                let label = label.clone();
+                let cb = callback.clone();
+                move |delta: i32| {
+                    let current = value.get() as i32;
+                    let next = (current + delta).clamp(DELAY_MIN as i32, DELAY_MAX as i32) as u32;
+                    if next == value.get() {
+                        return;
+                    }
+                    value.set(next);
+                    label.set_text(&format_delay_label(next));
+                    if let Some(f) = cb.borrow().as_ref() {
+                        f(ToolbarAction::DelayChanged(next));
+                    }
+                }
+            };
+
+            // Primary (left) click on `−` / `+` steps by 1; secondary (right) click
+            // steps by 5. We use a GestureClick with `button = 0` (any) to read the
+            // pressed button from the gesture, rather than two separate gestures.
+            let make_gesture = |delta_primary: i32, delta_secondary: i32| {
+                let gesture = gtk4::GestureClick::new();
+                gesture.set_button(0);
+                let emit_for_gesture = emit.clone();
+                gesture.connect_pressed(move |g, _, _, _| {
+                    let delta = if g.current_button() == gdk4::BUTTON_SECONDARY {
+                        delta_secondary
+                    } else {
+                        delta_primary
+                    };
+                    emit_for_gesture(delta);
+                });
+                gesture
+            };
+            minus.add_controller(make_gesture(-STEP_PRIMARY, -STEP_SECONDARY));
+            plus.add_controller(make_gesture(STEP_PRIMARY, STEP_SECONDARY));
+
+            // Scroll wheel over any part of the segmented group adjusts the value.
+            // Vertical-axis scrolls map to step changes (up = increase, down =
+            // decrease) matching common spinner conventions.
+            let scroll =
+                gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+            let emit_for_scroll = emit.clone();
+            scroll.connect_scroll(move |_, _dx, dy| {
+                if dy < 0.0 {
+                    emit_for_scroll(STEP_PRIMARY);
+                } else if dy > 0.0 {
+                    emit_for_scroll(-STEP_PRIMARY);
+                }
+                glib::Propagation::Stop
+            });
+            group.add_controller(scroll);
+
+            widget.append(&group);
+            delay = Some(DelaySpinnerUi { label, value });
         }
 
         if spec.show_passthrough_toggle {
@@ -982,6 +1121,7 @@ impl Toolbar {
             modes,
             cursor,
             passthrough,
+            delay,
             capture,
             color,
             style,
@@ -1030,6 +1170,19 @@ impl Toolbar {
             btn.block_signal(id);
             btn.set_active(on);
             btn.unblock_signal(id);
+        }
+    }
+
+    /// Update the delay control without emitting `DelayChanged`. Used to mirror state
+    /// across per-monitor toolbars in the selector. Refreshes both the cached value and
+    /// the visible label; no signal is fired because the cached value is the source of
+    /// truth read by the click / scroll handlers.
+    #[allow(dead_code)]
+    pub fn set_delay(&self, secs: u32) {
+        if let Some(ui) = &self.state.delay {
+            let clamped = secs.min(60);
+            ui.value.set(clamped);
+            ui.label.set_text(&format_delay_label(clamped));
         }
     }
 
@@ -1261,6 +1414,12 @@ fn icon_only(icon_name: &str) -> gtk4::Image {
 fn make_unfocusable<W: IsA<gtk4::Widget>>(w: &W) {
     w.set_focusable(false);
     w.set_can_focus(false);
+}
+
+/// Format a whole-seconds delay value for the toolbar's delay-trigger label.
+/// Compact "0s" / "3s" / "60s" form; matches the SpinButton's integer-seconds range.
+fn format_delay_label(secs: u32) -> String {
+    format!("{secs}s")
 }
 
 /// `gdk::RGBA` → packed `[f32; 4]` matching the canvas's tool storage format.

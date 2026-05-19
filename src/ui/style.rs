@@ -31,6 +31,19 @@ window.hyprsnap-overlay > * {
     background-color: transparent;
     box-shadow: none;
 }
+
+/* Pre-capture countdown window: full-screen translucent dim with a huge
+ * white seconds-remaining numeral. Used by non-interactive CLI paths
+ * (`--full --delay 3s`, daemon screenshot, tray) where there is no
+ * selector to host the countdown. */
+window.hyprsnap-countdown,
+window.hyprsnap-countdown decoration {
+    background: rgba(0, 0, 0, 0.55);
+}
+window.hyprsnap-countdown label.hyprsnap-countdown-number {
+    color: rgba(255, 255, 255, 0.95);
+    font-weight: bold;
+}
 "#;
 
 /// Install the CSS provider on the default display.

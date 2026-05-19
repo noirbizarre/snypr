@@ -91,6 +91,33 @@ impl Default for OutputConfig {
 pub struct CaptureConfig {
     /// Include the cursor by default.
     pub cursor: bool,
+    /// Default delay before capture, in whole seconds, applied when `--delay` is not
+    /// passed on the CLI. `None` or `0` means no delay. The UI countdown spinner only
+    /// surfaces integer seconds, so the config / CLI representation matches.
+    #[serde(default, with = "delay_secs_opt")]
+    pub delay: Option<u32>,
+}
+
+/// Serde adapter that collapses `Some(0)` to `None` on the way in so a zero-second
+/// delay round-trips as "no delay" rather than a vacuous one-second-zero sleep.
+mod delay_secs_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<u32>, ser: S) -> Result<S::Ok, S::Error> {
+        match value {
+            None => ser.serialize_none(),
+            Some(0) => ser.serialize_none(),
+            Some(n) => ser.serialize_u32(*n),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Option<u32>, D::Error> {
+        let opt: Option<u32> = Option::deserialize(de)?;
+        Ok(match opt {
+            None | Some(0) => None,
+            Some(n) => Some(n),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -291,6 +318,52 @@ mod tests {
         assert!(cfg.notify.success);
         assert!(cfg.notify.error);
         assert_eq!(cfg.notify.timeout_ms, 6000);
+    }
+
+    #[test]
+    fn capture_delay_defaults_to_none() {
+        let cfg = Config::default();
+        assert!(cfg.capture.delay.is_none());
+    }
+
+    #[test]
+    fn capture_delay_parses_integer_seconds() {
+        let toml = r#"
+            [capture]
+            delay = 3
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.capture.delay, Some(3));
+    }
+
+    #[test]
+    fn capture_delay_zero_collapses_to_none() {
+        let toml = r#"
+            [capture]
+            delay = 0
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.capture.delay.is_none());
+    }
+
+    #[test]
+    fn capture_delay_round_trips_via_toml() {
+        let mut cfg = Config::default();
+        cfg.capture.delay = Some(10);
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.capture.delay, cfg.capture.delay);
+    }
+
+    #[test]
+    fn capture_delay_rejects_non_integer() {
+        let toml = r#"
+            [capture]
+            delay = "3s"
+        "#;
+        let err = toml::from_str::<Config>(toml).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("integer") || msg.contains("expected"), "{msg}");
     }
 
     #[test]

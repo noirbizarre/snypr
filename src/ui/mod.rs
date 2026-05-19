@@ -3,6 +3,7 @@
 //! These modules are gated behind the `ui` cargo feature.
 
 pub mod canvas;
+pub mod countdown;
 pub mod overlay;
 pub mod save;
 pub mod selector;

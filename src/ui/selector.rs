@@ -58,6 +58,10 @@ pub struct SelectorOutcome {
     pub selection: Selection,
     /// Final cursor toggle from the floating toolbar; overrides any CLI default.
     pub cursor: bool,
+    /// Final pre-capture delay picked on the toolbar's delay spinner. Whole seconds (sub-
+    /// second precision lives only in the CLI `--delay` flag and isn't surfaced in the UI).
+    /// `Duration::ZERO` means no sleep.
+    pub delay: std::time::Duration,
     /// User asked to open the annotation editor on the captured image (clicked the Annotate
     /// button or pressed Shift+Enter). Distinct from any CLI-level `--edit` flag: the button
     /// choice wins, so Capture always reports `false` here regardless of how the selector was
@@ -81,13 +85,16 @@ pub struct SelectorOutcome {
 pub async fn pick_region(
     _ctx: Ctx,
     initial_cursor: bool,
+    initial_delay: std::time::Duration,
     allow_annotate: bool,
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let clients = fetch_clients_or_warn().await;
-    tokio::task::spawn_blocking(move || run_gtk(tx, initial_cursor, clients, allow_annotate))
-        .await
-        .map_err(|e| anyhow!("selector task panicked: {e}"))??;
+    tokio::task::spawn_blocking(move || {
+        run_gtk(tx, initial_cursor, initial_delay, clients, allow_annotate)
+    })
+    .await
+    .map_err(|e| anyhow!("selector task panicked: {e}"))??;
     let result = rx
         .await
         .map_err(|e| anyhow!("selector channel closed without a result: {e}"))?;
@@ -113,6 +120,7 @@ pub async fn pick_region(
 pub async fn pick_region_in_app(
     app: &gtk4::Application,
     initial_cursor: bool,
+    initial_delay: std::time::Duration,
     allow_annotate: bool,
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
@@ -126,6 +134,7 @@ pub async fn pick_region_in_app(
         app,
         &tx,
         initial_cursor,
+        initial_delay,
         quit_target,
         clients,
         allow_annotate,
@@ -179,6 +188,9 @@ struct SharedSelection {
     mode: ModeKind,
     /// Cursor toggle from the floating toolbar; final value reported in `SelectorOutcome`.
     cursor: bool,
+    /// Pre-capture delay (whole seconds, internally stored as `Duration`) from the floating
+    /// toolbar's spinner; final value reported in `SelectorOutcome`.
+    delay: std::time::Duration,
     /// Monitor currently under the pointer (Screen mode highlight).
     hover_monitor: Option<usize>,
     /// Monitor explicitly picked by clicking (Screen mode). `None` until the user clicks; then
@@ -277,6 +289,7 @@ async fn fetch_clients_or_warn() -> Vec<HyprWindow> {
 fn run_gtk(
     tx: tokio::sync::oneshot::Sender<Result<SelectorOutcome>>,
     initial_cursor: bool,
+    initial_delay: std::time::Duration,
     clients: Vec<HyprWindow>,
     allow_annotate: bool,
 ) -> Result<()> {
@@ -300,6 +313,7 @@ fn run_gtk(
                 app,
                 &tx,
                 initial_cursor,
+                initial_delay,
                 quit_target,
                 clients_snapshot,
                 allow_annotate,
@@ -323,6 +337,7 @@ fn build_overlays(
     app: &gtk4::Application,
     tx: &Sender,
     initial_cursor: bool,
+    initial_delay: std::time::Duration,
     quit_target: glib::WeakRef<gtk4::Application>,
     clients: Vec<HyprWindow>,
     allow_annotate: bool,
@@ -339,6 +354,7 @@ fn build_overlays(
     let shared = SharedState {
         selection: Rc::new(RefCell::new(SharedSelection {
             cursor: initial_cursor,
+            delay: initial_delay,
             ..SharedSelection::default()
         })),
         finalised: Rc::new(RefCell::new(false)),
@@ -348,7 +364,9 @@ fn build_overlays(
         tx: tx.clone(),
         app_weak: quit_target,
         toolbars: Rc::new(RefCell::new(Vec::new())),
+        countdown_source: Rc::new(RefCell::new(None)),
         initial_cursor,
+        initial_delay,
         allow_annotate,
         clients: Rc::new(RefCell::new(clients)),
     };
@@ -423,6 +441,9 @@ fn spawn_monitor_overlay(
         &shared.windows,
         &shared.monitors,
         &shared.app_weak,
+        &shared.areas,
+        &shared.toolbars,
+        &shared.countdown_source,
         info.clone(),
         shared.allow_annotate,
     );
@@ -449,13 +470,19 @@ fn spawn_monitor_overlay(
 /// state. Mode/cursor changes are mirrored to every other monitor's toolbar so the UI stays
 /// consistent regardless of which screen the user clicked.
 fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
+    // Round the initial delay to whole seconds for the UI; sub-second precision (e.g. a
+    // CLI `--delay 500ms`) is preserved only if the user never touches the spinner — the
+    // selector's outcome will then carry whatever `shared.initial_delay` was set to.
+    let initial_delay_secs = shared.initial_delay.as_secs().min(u32::MAX as u64) as u32;
     let toolbar = Toolbar::new(ToolbarSpec {
         modes: SELECTOR_MODES,
         show_cursor_toggle: true,
+        show_delay_spinner: true,
         show_capture: true,
         capture_shift_annotates: shared.allow_annotate,
         initial_mode: Some(ModeKind::Region),
         initial_cursor: shared.initial_cursor,
+        initial_delay_secs,
         ..Default::default()
     });
 
@@ -467,6 +494,7 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
     let monitors = shared.monitors.clone();
     let app_weak = shared.app_weak.clone();
     let toolbars = shared.toolbars.clone();
+    let countdown_source = shared.countdown_source.clone();
     toolbar.connect(move |action| match action {
         ToolbarAction::ModeSelected(mode) => {
             {
@@ -496,6 +524,12 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
                 t.set_cursor(on);
             }
         }
+        ToolbarAction::DelayChanged(secs) => {
+            selection.borrow_mut().delay = std::time::Duration::from_secs(secs as u64);
+            for t in toolbars.borrow().iter() {
+                t.set_delay(secs);
+            }
+        }
         ToolbarAction::Capture => {
             commit(
                 &selection,
@@ -504,6 +538,9 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
                 &windows,
                 &monitors,
                 &app_weak,
+                &areas,
+                &toolbars,
+                &countdown_source,
                 Some(primary.clone()),
                 false,
             );
@@ -516,6 +553,9 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
                 &windows,
                 &monitors,
                 &app_weak,
+                &areas,
+                &toolbars,
+                &countdown_source,
                 Some(primary.clone()),
                 true,
             );
@@ -538,7 +578,18 @@ struct SharedState {
     /// (`pick_region_in_app`) so the caller's app keeps running after the selector resolves.
     app_weak: glib::WeakRef<gtk4::Application>,
     toolbars: ToolbarRegistry,
+    /// `glib::SourceId` of the in-flight 1-second countdown timer, if any. Held so that
+    /// pressing Escape during a pre-capture delay cancels both the timer and the eventual
+    /// capture. Lives in a `RefCell<Option<_>>` because `SourceId::remove` consumes the
+    /// id by value.
+    countdown_source: Rc<RefCell<Option<glib::SourceId>>>,
     initial_cursor: bool,
+    /// Seed value for the toolbar's delay spinner, propagated to every per-monitor toolbar at
+    /// construction. Sourced from the CLI `--delay` flag or, failing that, the
+    /// `[capture].delay` config entry. Sub-second values are rounded to the nearest second
+    /// for display; the CLI / config value is only used end-to-end when the user does not
+    /// touch the spinner.
+    initial_delay: std::time::Duration,
     /// When `false`, the Capture button on every per-monitor toolbar ignores the Shift
     /// modifier and the window-level Enter handler always commits with `edit=false`. Set
     /// by the draw overlay's Save flow so Shift+click / Shift+Enter just save the snapshot
@@ -737,6 +788,9 @@ fn install_keys(
     windows: &WindowRegistry,
     monitors: &MonitorList,
     app_weak: &glib::WeakRef<gtk4::Application>,
+    areas: &AreaRegistry,
+    toolbars: &ToolbarRegistry,
+    countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
     info: MonitorInfo,
     allow_annotate: bool,
 ) {
@@ -747,9 +801,12 @@ fn install_keys(
     let windows = windows.clone();
     let monitors = monitors.clone();
     let app_weak = app_weak.clone();
+    let areas = areas.clone();
+    let toolbars = toolbars.clone();
+    let countdown_source = countdown_source.clone();
     key.connect_key_pressed(move |_, k, _, modifiers| match k {
         gdk4::Key::Escape => {
-            cancel(&tx, &finalised, &windows, &app_weak);
+            cancel(&tx, &finalised, &windows, &app_weak, &countdown_source);
             glib::Propagation::Stop
         }
         gdk4::Key::Return | gdk4::Key::KP_Enter => {
@@ -766,6 +823,9 @@ fn install_keys(
                 &windows,
                 &monitors,
                 &app_weak,
+                &areas,
+                &toolbars,
+                &countdown_source,
                 Some(info.clone()),
                 edit,
             );
@@ -846,6 +906,9 @@ fn commit(
     windows: &WindowRegistry,
     monitors: &MonitorList,
     app_weak: &glib::WeakRef<gtk4::Application>,
+    areas: &AreaRegistry,
+    toolbars: &ToolbarRegistry,
+    countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
     local_info: Option<MonitorInfo>,
     edit: bool,
 ) {
@@ -858,16 +921,81 @@ fn commit(
         return;
     };
     *finalised.borrow_mut() = true;
-    dismiss_overlays(windows);
+
+    // The countdown happens here (inside the selector), so downstream consumers
+    // (`run_capture_flow` / `execute()` / draw save) must not sleep again.
     let outcome = SelectorOutcome {
         selection: sel,
         cursor: state.cursor,
+        delay: std::time::Duration::ZERO,
         edit,
     };
-    send_once(tx, Ok(outcome));
-    if let Some(app) = app_weak.upgrade() {
-        app.quit();
+
+    let total_secs = state.delay.as_secs().min(u32::MAX as u64) as u32;
+    if total_secs == 0 {
+        dismiss_overlays(windows);
+        send_once(tx, Ok(outcome));
+        if let Some(app) = app_weak.upgrade() {
+            app.quit();
+        }
+        return;
     }
+
+    // Pre-capture delay path: hide the per-monitor toolbars and switch each overlay area
+    // into countdown mode. A 1-second timer decrements the remaining seconds; at zero we
+    // dismiss the overlays, send the outcome, and quit the app (if standalone). Pressing
+    // Escape during the countdown is handled by `cancel()`, which removes our timer
+    // source by id and bails before we ever reach the final dispatch.
+    for t in toolbars.borrow().iter() {
+        t.widget().set_visible(false);
+    }
+    for a in areas.borrow().iter() {
+        a.set_countdown(Some(total_secs));
+    }
+
+    let remaining = Rc::new(Cell::new(total_secs));
+    let areas_cloned = areas.clone();
+    let windows_cloned = windows.clone();
+    let tx_cloned = tx.clone();
+    let app_weak_cloned = app_weak.clone();
+    let countdown_source_cloned = countdown_source.clone();
+    let id = glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+        let next = remaining.get().saturating_sub(1);
+        remaining.set(next);
+        if next == 0 {
+            // Drop our own id record before doing dispatch work — `cancel()` checks
+            // this on Escape; clearing it here marks the countdown as "complete, no
+            // need to remove" so a late Escape can't double-fire.
+            countdown_source_cloned.borrow_mut().take();
+            // Clear the numeral *before* dismissing the overlays so the very last
+            // frame Hyprland composites shows only the selector veil + selection
+            // outline, not the trailing "1". Without this step the numeral leaks
+            // into the captured screenshot because the compositor's unmap of the
+            // layer-shell surface lags `dismiss_overlays` by a frame or two.
+            // A short timeout after the redraw request gives Hyprland enough time
+            // to paint the cleared frame before we tear down the windows.
+            for a in areas_cloned.borrow().iter() {
+                a.set_countdown(None);
+            }
+            let windows_for_finish = windows_cloned.clone();
+            let tx_for_finish = tx_cloned.clone();
+            let app_weak_for_finish = app_weak_cloned.clone();
+            let outcome_for_finish = outcome.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
+                dismiss_overlays(&windows_for_finish);
+                send_once(&tx_for_finish, Ok(outcome_for_finish));
+                if let Some(app) = app_weak_for_finish.upgrade() {
+                    app.quit();
+                }
+            });
+            return glib::ControlFlow::Break;
+        }
+        for a in areas_cloned.borrow().iter() {
+            a.set_countdown(Some(next));
+        }
+        glib::ControlFlow::Continue
+    });
+    *countdown_source.borrow_mut() = Some(id);
 }
 
 fn cancel(
@@ -875,13 +1003,23 @@ fn cancel(
     finalised: &Rc<RefCell<bool>>,
     windows: &WindowRegistry,
     app_weak: &glib::WeakRef<gtk4::Application>,
+    countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
 ) {
-    let mut f = finalised.borrow_mut();
-    if *f {
-        return;
+    // An in-flight countdown means `commit()` has already set `finalised = true`. Escape
+    // during the countdown still has to win, so we treat the presence of a live timer
+    // source as a force-cancel signal: remove it and proceed to dismiss + send Err even
+    // though `finalised` is set.
+    let pending = countdown_source.borrow_mut().take();
+    if let Some(id) = pending {
+        id.remove();
+    } else {
+        let mut f = finalised.borrow_mut();
+        if *f {
+            return;
+        }
+        *f = true;
+        drop(f);
     }
-    *f = true;
-    drop(f);
     dismiss_overlays(windows);
     send_once(tx, Err(anyhow::Error::new(Cancelled)));
     if let Some(app) = app_weak.upgrade() {
@@ -907,6 +1045,15 @@ impl SelectorOverlay {
         imp.monitor_index.set(monitor_index);
         obj
     }
+
+    /// Switch the overlay into pre-capture countdown mode (or back out, with `None`).
+    /// When set, [`imp::SelectorOverlay::snapshot`] paints a fully dimmed surface plus a
+    /// huge centered seconds-remaining numeral, suppressing the regular mode-specific
+    /// chrome (selection rectangles, hover outlines, hints).
+    fn set_countdown(&self, value: Option<u32>) {
+        self.imp().countdown.set(value);
+        self.queue_draw();
+    }
 }
 
 impl Default for SelectorOverlay {
@@ -924,6 +1071,9 @@ mod imp {
         #[allow(private_interfaces)]
         pub selection: RefCell<Option<SelectionCell>>,
         pub monitor_index: Cell<usize>,
+        /// When `Some(n)`, the overlay draws a big centered "n" instead of the usual
+        /// mode-specific chrome. Driven by [`super::commit`] during a pre-capture delay.
+        pub countdown: Cell<Option<u32>>,
     }
 
     impl Default for SelectorOverlay {
@@ -931,6 +1081,7 @@ mod imp {
             Self {
                 selection: RefCell::new(None),
                 monitor_index: Cell::new(0),
+                countdown: Cell::new(None),
             }
         }
     }
@@ -951,6 +1102,7 @@ mod imp {
             if w <= 0.0 || h <= 0.0 {
                 return;
             }
+
             let monitor_index = self.monitor_index.get();
             let state = self
                 .selection
@@ -1097,6 +1249,14 @@ mod imp {
                     self.draw_hint(snapshot, w, h, &hint, &label_color);
                 }
             }
+
+            // Countdown overlay: drawn last so it sits above the mode-specific veil and
+            // selection chrome. The selection rectangle and its outline stay visible
+            // underneath so the user sees exactly what is about to be captured.
+            if let Some(secs) = self.countdown.get() {
+                let fg = gtk4::gdk::RGBA::new(1.0, 1.0, 1.0, 0.95);
+                self.draw_countdown(snapshot, w, h, secs, &fg);
+            }
         }
     }
 
@@ -1119,6 +1279,33 @@ mod imp {
             let x = ((w - lw as f32) / 2.0).max(8.0);
             snapshot.save();
             snapshot.translate(&graphene::Point::new(x, 32.0));
+            snapshot.append_layout(&layout, color);
+            snapshot.restore();
+        }
+
+        /// Render the pre-capture countdown numeral, centered on the monitor.
+        /// Sized roughly to a quarter of the shorter monitor dimension so a 5-second
+        /// countdown is unmistakable from across the room.
+        fn draw_countdown(
+            &self,
+            snapshot: &gtk4::Snapshot,
+            w: f32,
+            h: f32,
+            secs: u32,
+            color: &gtk4::gdk::RGBA,
+        ) {
+            let text = secs.to_string();
+            let pt = (h.min(w) / 4.0).max(48.0) as i32;
+            let pango_ctx = self.obj().create_pango_context();
+            let layout = pango::Layout::new(&pango_ctx);
+            let desc = pango::FontDescription::from_string(&format!("Sans Bold {pt}"));
+            layout.set_font_description(Some(&desc));
+            layout.set_text(&text);
+            let (lw, lh) = layout.pixel_size();
+            let x = ((w - lw as f32) / 2.0).max(0.0);
+            let y = ((h - lh as f32) / 2.0).max(0.0);
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(x, y));
             snapshot.append_layout(&layout, color);
             snapshot.restore();
         }

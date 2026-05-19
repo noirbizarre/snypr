@@ -150,11 +150,15 @@ fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
         Command::Screenshot(args) => {
             let selection = screenshot::parse_selection(&args)?;
             let sinks = crate::daemon::sinks_to_specs(&args.to);
+            // CLI flag wins; the daemon side falls back to its own config-loaded default when
+            // the wire field is None. Whole-seconds precision matches the UI countdown.
+            let delay_secs = args.delay;
             Ok(crate::ipc::Request::Screenshot(
                 crate::ipc::ScreenshotRequest {
                     selection: crate::daemon::selection_to_spec(&selection),
                     cursor: args.cursor,
                     edit: args.edit,
+                    delay_secs,
                     sinks,
                 },
             ))

@@ -24,6 +24,11 @@ pub struct ScreenshotRequest {
     /// clients (and tests) keep parsing.
     #[serde(default)]
     pub edit: bool,
+    /// Delay before capture, in whole seconds. `None` (or omitted) skips the sleep
+    /// entirely. The UI countdown only operates on integer seconds, so the wire format
+    /// matches the CLI / config representation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_secs: Option<u32>,
     pub sinks: Vec<SinkSpec>,
 }
 
@@ -78,12 +83,14 @@ mod tests {
         selection: SelectionSpec::Full,
         cursor: false,
         edit: false,
+        delay_secs: None,
         sinks: vec![SinkSpec::Clipboard],
     }))]
     #[case(Request::Screenshot(ScreenshotRequest {
         selection: SelectionSpec::Interactive,
         cursor: true,
         edit: true,
+        delay_secs: Some(3),
         sinks: vec![SinkSpec::File { path: None }],
     }))]
     fn round_trips_requests(#[case] req: Request) {

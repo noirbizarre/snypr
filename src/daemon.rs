@@ -157,9 +157,13 @@ async fn handle_tray_action(
                 } else {
                     Selection::Full
                 };
-                let result =
-                    run_screenshot_with_optional_lock(&ctx, &state, selection, false, sinks, edit)
-                        .await;
+                // Tray entry points have no CLI flag to override; honor `[capture].delay`
+                // straight from config so the persistent default still applies.
+                let delay = ctx.config.capture.delay;
+                let result = run_screenshot_with_optional_lock(
+                    &ctx, &state, selection, false, sinks, edit, delay,
+                )
+                .await;
                 match result {
                     Ok(paths) => {
                         for p in &paths {
@@ -256,15 +260,16 @@ async fn run_screenshot_with_optional_lock(
     cursor: bool,
     sinks: Vec<CliSinkSpec>,
     edit: bool,
+    delay: Option<u32>,
 ) -> Result<Vec<PathBuf>> {
     if edit {
         let _guard = state
             .editor
             .try_lock()
             .map_err(|_| anyhow::anyhow!("another editor session is already in progress"))?;
-        crate::cli::screenshot::execute(ctx.clone(), selection, cursor, sinks, true).await
+        crate::cli::screenshot::execute(ctx.clone(), selection, cursor, sinks, true, delay).await
     } else {
-        crate::cli::screenshot::execute(ctx.clone(), selection, cursor, sinks, false).await
+        crate::cli::screenshot::execute(ctx.clone(), selection, cursor, sinks, false, delay).await
     }
 }
 
@@ -320,9 +325,13 @@ async fn run_screenshot(
 ) -> Result<Response> {
     let selection = selection_from_spec(req.selection);
     let sinks = sinks_from_specs(req.sinks, &ctx);
-    let paths =
-        run_screenshot_with_optional_lock(&ctx, &state, selection, req.cursor, sinks, req.edit)
-            .await?;
+    // CLI-supplied delay wins; otherwise fall back to the daemon's loaded config. Wire
+    // representation is whole seconds (see `crate::ipc::ScreenshotRequest::delay_secs`).
+    let delay = crate::cli::screenshot::effective_delay(req.delay_secs, ctx.config.capture.delay);
+    let paths = run_screenshot_with_optional_lock(
+        &ctx, &state, selection, req.cursor, sinks, req.edit, delay,
+    )
+    .await?;
     Ok(Response::Paths { paths })
 }
 
