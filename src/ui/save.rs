@@ -49,7 +49,7 @@ pub fn sinks_save_fn(
             "saved annotated image"
         );
         #[cfg(feature = "notify")]
-        crate::notify::notify_success(&config.notify, &paths, &png);
+        crate::notify::notify_success(&config, &paths, &png);
         if let Ok(mut g) = collected.lock() {
             g.extend(paths.iter().cloned());
         }

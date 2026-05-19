@@ -10,6 +10,7 @@ pub mod context;
 pub mod hypr;
 pub mod ipc;
 pub mod output;
+pub mod path;
 
 #[cfg(feature = "ui")]
 pub mod bridge;

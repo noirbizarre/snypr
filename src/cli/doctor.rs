@@ -17,6 +17,7 @@ use clap::Args as ClapArgs;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 use crate::config::Config;
+use crate::path::{tilde, tilde_str};
 
 /// `doctor` subcommand arguments. No flags today; the struct is kept around to leave room
 /// for future opt-outs (e.g. `--no-probe`, `--json`) without breaking the dispatch
@@ -302,26 +303,6 @@ fn is_writable(dir: &Path) -> bool {
     }
 }
 
-/// Replace a leading `$HOME` component with `~` so paths are safe to paste in public
-/// issues. Falls back to the original path when `$HOME` is unset or the prefix doesn't
-/// match.
-fn tilde(path: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        if let Ok(rest) = path.strip_prefix(&home) {
-            if rest.as_os_str().is_empty() {
-                return "~".to_owned();
-            }
-            return format!("~/{}", rest.display());
-        }
-    }
-    path.display().to_string()
-}
-
-fn tilde_str(value: &str) -> String {
-    tilde(Path::new(value))
-}
-
 /// Pure formatter — turns a `DoctorState` into the Markdown report. Tested in isolation.
 fn render(state: &DoctorState) -> String {
     let mut out = String::new();
@@ -523,7 +504,6 @@ fn yes_no(b: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
 
     fn sample_state() -> DoctorState {
         let config = Config::default();
@@ -607,18 +587,5 @@ mod tests {
         assert!(last.contains("OK,"));
         assert!(last.contains("WARN,"));
         assert!(last.contains("FAIL"));
-    }
-
-    #[test]
-    fn tilde_replaces_home_prefix() {
-        // Force HOME so the test is hermetic.
-        // SAFETY: tests are single-threaded under cargo nextest's per-process model;
-        // no other thread reads HOME concurrently.
-        unsafe {
-            std::env::set_var("HOME", "/home/u");
-        }
-        assert_eq!(tilde(Path::new("/home/u/.config/x")), "~/.config/x");
-        assert_eq!(tilde(Path::new("/home/u")), "~");
-        assert_eq!(tilde(Path::new("/etc/passwd")), "/etc/passwd");
     }
 }

@@ -229,7 +229,7 @@ pub async fn execute(
 #[inline]
 fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _png: &[u8]) {
     #[cfg(feature = "notify")]
-    crate::notify::notify_success(&_config.notify, _paths, _png);
+    crate::notify::notify_success(_config, _paths, _png);
 }
 
 /// Convert a screencopy `CapturedImage` (BGRA, possibly with padded stride) into a tight RGBA

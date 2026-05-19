@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 
 use notify_rust::Notification;
 
+use crate::config::Config;
 use crate::config::NotifyConfig;
+use crate::path::tilde;
 
 // The notification daemon distinguishes between the human-facing application name
 // (`appname`, surfaced in some notification UIs as a group label) and the desktop-file
@@ -50,17 +52,24 @@ pub fn notify_error(cfg: &NotifyConfig, err: &anyhow::Error) {
 /// * `paths` — files written to disk by the output sinks (empty for clipboard-only runs).
 /// * `png_bytes` — the encoded PNG, used as a thumbnail fallback when `paths` is empty
 ///   (written to a stable scratch path so the previous one is implicitly recycled).
-pub fn notify_success(cfg: &NotifyConfig, paths: &[PathBuf], png_bytes: &[u8]) {
-    if !cfg.success {
+pub fn notify_success(cfg: &Config, paths: &[PathBuf], png_bytes: &[u8]) {
+    if !cfg.notify.success {
         return;
     }
 
+    let default_dir = cfg.save_directory();
     let (summary, body): (&str, Option<String>) = match paths.len() {
         0 => ("Screenshot copied to clipboard", None),
-        1 => ("Screenshot saved", Some(paths[0].display().to_string())),
+        1 => (
+            "Screenshot saved",
+            Some(display_path(&paths[0], &default_dir)),
+        ),
         n => (
             "Screenshots saved",
-            Some(format!("{} ({n} files)", paths[0].display())),
+            Some(format!(
+                "{} ({n} files)",
+                display_path(&paths[0], &default_dir)
+            )),
         ),
     };
 
@@ -84,7 +93,7 @@ pub fn notify_success(cfg: &NotifyConfig, paths: &[PathBuf], png_bytes: &[u8]) {
         .summary(summary)
         .icon(APP_ICON)
         .appname(APP_NAME)
-        .timeout(notify_rust::Timeout::Milliseconds(cfg.timeout_ms));
+        .timeout(notify_rust::Timeout::Milliseconds(cfg.notify.timeout_ms));
     if let Some(body) = body.as_deref() {
         builder.body(body);
     }
@@ -92,6 +101,20 @@ pub fn notify_success(cfg: &NotifyConfig, paths: &[PathBuf], png_bytes: &[u8]) {
         builder.image_path(thumb);
     }
     dispatch(builder);
+}
+
+/// Format a saved screenshot path for display in a notification body.
+///
+/// When the file sits directly in `default_dir` (the configured/derived save directory),
+/// only the basename is shown so the notification stays short. Otherwise the full path
+/// is rendered with `$HOME` collapsed to `~`.
+fn display_path(path: &Path, default_dir: &Path) -> String {
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        && parent == default_dir
+    {
+        return name.to_string_lossy().into_owned();
+    }
+    tilde(path)
 }
 
 /// Send the prepared `Notification` off-thread so the D-Bus round-trip inside
@@ -135,5 +158,39 @@ mod tests {
     fn scratch_path_ends_with_expected_filename() {
         let p = scratch_thumbnail_path();
         assert!(p.ends_with("hyprsnap/last-thumbnail.png"));
+    }
+
+    #[test]
+    fn display_path_shortens_default_dir_to_basename() {
+        let default = Path::new("/home/u/Pictures/Screenshots");
+        assert_eq!(
+            display_path(
+                &PathBuf::from("/home/u/Pictures/Screenshots/shot.png"),
+                default,
+            ),
+            "shot.png"
+        );
+    }
+
+    #[test]
+    fn display_path_falls_back_to_tilde_outside_default_dir() {
+        // SAFETY: tests are single-threaded under cargo nextest's per-process model.
+        unsafe {
+            std::env::set_var("HOME", "/home/u");
+        }
+        let default = Path::new("/home/u/Pictures/Screenshots");
+        // Sibling directory under $HOME → tilde-collapsed full path.
+        assert_eq!(
+            display_path(&PathBuf::from("/home/u/Other/shot.png"), default),
+            "~/Other/shot.png"
+        );
+        // Nested directory under the default dir → keeps relative path (subdir + name).
+        assert_eq!(
+            display_path(
+                &PathBuf::from("/home/u/Pictures/Screenshots/sub/shot.png"),
+                default,
+            ),
+            "~/Pictures/Screenshots/sub/shot.png"
+        );
     }
 }
