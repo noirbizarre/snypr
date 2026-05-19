@@ -20,8 +20,8 @@ pub struct Args {
     pub toggle_passthrough: bool,
 
     /// Sink(s) to receive the image when the user presses Ctrl+S / Save in the overlay.
-    /// Repeatable. When empty, falls back to `[output].sinks` from the config — same shape
-    /// as `screenshot`'s `--to`.
+    /// Repeatable. When empty, falls back to `[output].default_sinks` from the config —
+    /// same shape as `screenshot`'s `--to`.
     #[arg(long = "to", value_name = "SINK")]
     pub to: Vec<SinkSpec>,
 

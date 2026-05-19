@@ -22,7 +22,8 @@ screen and flatten to PNG through Cairo on save.
 | ------------- | --------------------------------------------------------------------------------- |
 | `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the in-place annotation overlay before sinks |
 | `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools; Ctrl+S saves via the zone selector |
-| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`; tray (StatusNotifierItem) when enabled in config |
+| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`, `PassthroughToggle`; tray (StatusNotifierItem) when enabled in config |
+| `doctor`      | Markdown diagnostic report covering version, environment, configuration and live capability probes (Hyprland IPC, wlr-screencopy, daemon socket) |
 
 ## Build
 
@@ -99,9 +100,8 @@ hyprsnap screenshot --region 100,200,800x600 --to file
 # Interactive region selector → in-place annotation overlay → sinks.
 hyprsnap screenshot --edit --to clipboard --to file
 
-# Live draw-on-screen overlay (R/O/A/H/F/N/X tools, Ctrl+Z undo, P passthrough, Esc quit).
-# Press Ctrl+S to save: pops the zone selector to pick what to capture (region/output/
-# window/full); strokes are baked in and the overlay stays open for more drawing.
+# Live draw-on-screen overlay (see the keybind table below for the full tool list,
+# Ctrl+Z undo, P passthrough, Esc quit).
 hyprsnap draw --to file --to clipboard --cursor
 
 # Run the daemon (IPC server; add `--systray` for a StatusNotifierItem icon).
@@ -152,7 +152,7 @@ monitor, window, or full desktop). Because the strokes are already painted on th
 layer-shell surfaces, the captured PNG naturally contains "desktop + strokes" — no
 post-processing. The overlay stays alive with strokes intact after saving, so you can
 keep drawing or save another zone. Sinks come from `--to` (repeatable; defaults to
-`[output].sinks` from the config), and `--cursor` seeds the selector's cursor toggle.
+`[output].default_sinks` from the config), and `--cursor` seeds the selector's cursor toggle.
 
 Next to the color picker, a stroke-style picker offers Solid / Dashed / Dotted dash
 patterns for the outline-rendering tools (Rectangle, Ellipse, Arrow, Line, Freehand).
@@ -195,8 +195,7 @@ hl.bind("SUPER + CTRL + Print",
     hl.dsp.exec_cmd("hyprsnap screenshot --focused --to clipboard"))
 
 -- Live draw-on-screen overlay — ideal for presentations / Google Meet.
--- Inside the overlay: R/A/H/F/N/T/X to pick tools, Ctrl+Z to undo,
--- P to toggle pointer passthrough, Ctrl+L to clear, Esc to quit.
+-- See the README keybind table for the full tool/action list; Esc quits.
 hl.bind("SUPER + ALT + Print", hl.dsp.exec_cmd("hyprsnap draw"))
 
 -- Toggle pointer passthrough on a running draw overlay. Useful because
@@ -250,6 +249,13 @@ compression        = "balanced"
 
 [capture]
 cursor = false
+# Pre-capture delay in whole seconds. `0` (or omitted) means no delay. The CLI's
+# `--delay SECONDS` flag overrides this value.
+delay  = 0
+
+[keybinds.selector]
+cancel  = "Escape"
+confirm = "Return"
 
 [keybinds.editor]
 save = "<Ctrl>s"
@@ -260,6 +266,14 @@ quit = "Escape"
 toggle_passthrough = "p"
 snapshot           = "s"
 quit               = "Escape"
+
+[notify]
+# Emit a desktop notification (with thumbnail) on a successful screenshot.
+success    = true
+# Emit a desktop notification on a fatal error (useful for keybind launches).
+error      = true
+# Notification expiry, in milliseconds.
+timeout_ms = 6000
 ```
 
 Template tokens: `{ts}`, `{date}`, `{time}`, `{output}`, `{selection}`.
@@ -270,14 +284,17 @@ See the design plan at `.opencode/plans/1778929144226-shiny-panda.md` for full d
 
 ```
 src/
-├── cli/         # clap subcommands
+├── cli/         # clap subcommands (screenshot, draw, daemon, doctor)
 ├── capture/     # wlr-screencopy backend (smithay-client-toolkit)
 ├── annotate/    # document model, tool trait, GSK-free helpers
 ├── output/      # file + clipboard sinks
 ├── ui/          # GTK4 windows + AnnotationCanvas (gated behind `ui` feature)
+├── bridge.rs    # async <-> GTK glue (gated behind `ui` feature)
+├── context.rs   # shared Ctx = Arc<Context>
 ├── hypr.rs      # Hyprland IPC
 ├── ipc.rs       # daemon protocol
 ├── daemon.rs    # Unix-socket IPC server
+├── notify.rs    # desktop notifications (gated behind `notify` feature)
 └── config.rs    # TOML configuration
 ```
 

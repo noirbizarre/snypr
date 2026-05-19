@@ -2,7 +2,7 @@
 name = "hyprsnap"
 edition = "2024"
 version = "0.0.1"
-description = "A GTK-based snapshot and annotation tool for Hyprland"
+description = "A GTK4-based screenshot, annotation, and live-drawing tool for Hyprland"
 readme = "README.md"
 repository = "https://github.com/noirbizarre/hyprsnap"
 license = "MIT"

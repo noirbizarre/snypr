@@ -1,6 +1,7 @@
 # AGENTS.md
 
-Repository Purpose: HyprSnap (bin `hyprsnap`) is a snapshot/screenshot/annotation tools for Hyprland.
+Repository Purpose: HyprSnap (bin `hyprsnap`) is a screenshot, annotation, and
+live-drawing tool for Hyprland and other wlroots-based Wayland compositors.
 
 Build/Test:
 - Full build: `cargo build` (or `mise run build`)
@@ -13,13 +14,18 @@ Build/Test:
 Code Style:
 - Edition 2024; use `anyhow::Result` for fallible public fns; prefer `?` and propagate errors; avoid `.unwrap()` outside tests unless guaranteed.
 - Imports: group std / external / crate; avoid wildcard; keep ordering lexical; re-export only intentional items (see `lib.rs`).
-- Types: use explicit `PathBuf`, `Arc<Context>`; alias errors with `Result<T, anyhow::Error>` unless using boxed dynamic (`Expect`); prefer enums over strings for state.
-- Naming: snake_case for functions/vars, PascalCase for types/traits; modules concise (`fs`, `git`); constants UPPER_SNAKE; avoid abbreviations except well-known (`ctx`).
-- Async: traits with `#[async_trait]`; pass cloned `Arc` rather than &mut; avoid blocking in async (wrap with `spawn_blocking`).
-- Error handling: never silence errors; use context via `anyhow!(...)` or `.with_context(...)`; return early on invalid state.
-- CLI: derive `Parser`/`Subcommand`; keep help strings imperative; prefer explicit flags (`--dry-run`).
-- Formatting enforced by `cargo fmt`; do not hand-align; trailing spaces removed (prek).
-- Tests: use `rstest` for parametrization; assertions via `pretty_assertions` when readability matters; unit tests live beside code under `#[cfg(test)]`.
-- Git hooks: commit messages follow Commitizen (conventional commits); prek runs fmt, clippy, Taplo.
+- Types: use explicit `PathBuf`; share state through `Ctx = Arc<Context>` (see `src/context.rs`); prefer enums over strings for state (e.g. `PngCompression`, `SinkSpec`, `SelectionSpec`).
+- Naming: snake_case for functions/vars, PascalCase for types/traits; modules named after their domain (`capture`, `annotate`, `output`, `ui`, `hypr`, `ipc`); constants UPPER_SNAKE; avoid abbreviations except well-known (`ctx`, `cfg`).
+- Async: traits with `#[async_trait]`; pass cloned `Arc<Context>` rather than `&mut`; avoid blocking in async (use `tokio::task::spawn_blocking` for sync work).
+- Error handling: never silence errors; use `anyhow!(...)` / `.context(...)` / `.with_context(...)` for context; return early on invalid state. Use `thiserror` for typed errors that callers branch on (e.g. `CaptureError`, `ProtocolError`, `ui::selector::Cancelled`).
+- CLI: derive `Parser`/`Subcommand`; keep help strings imperative; prefer explicit flags (`--per-output`, `--via-daemon`); document precedence in doc-comments when CLI/config/IPC fields overlap.
+- Configuration: every field optional; types live in `src/config.rs`; the source of truth for default values is `impl Default`. Keep README/manpage examples in sync.
+- Formatting enforced by `cargo fmt`; do not hand-align; trailing whitespace stripped by prek.
+- Tests: use `rstest` for parametrization; assertions via `pretty_assertions` when readability matters; unit tests live beside code under `#[cfg(test)]`. Integration tests requiring a live Wayland compositor go behind the `integration-wayland` feature.
+- Git hooks: commit messages follow Commitizen (conventional commits); prek runs cargo-fmt, cargo-clippy, and Taplo TOML formatting.
 
-General: Do not add new dependencies lightly; prefer existing patterns (progress bars via `indicatif`, styles via `ui::style`). Update docs only if user-facing behavior changes.
+General: Do not add new dependencies lightly; prefer existing patterns
+(notifications via `notify-rust` wrapped in `src/notify.rs`, GTK styling via
+`ui::style`, Hyprland IPC via the in-tree `src/hypr.rs` rather than the upstream
+`hyprland` crate). Update docs (README, `docs/man/hyprsnap.1`) when user-facing
+behavior changes.

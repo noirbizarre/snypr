@@ -53,47 +53,67 @@ edited where they live on the desktop. Incompatible with \fB\-\-per\-output\fR.
 .BR \-\-to " " \fISINK\fR
 Add an output sink. May be passed multiple times. Recognised forms:
 \fBfile\fR (write to the configured directory), \fBfile=\fIPATH\fR (write to \fIPATH\fR),
-\fBclipboard\fR (copy via \fIwl-copy\fR).
+\fBclipboard\fR (write to the Wayland clipboard via the in-process \fIwl-clipboard-rs\fR
+library; no \fIwl-copy\fR is spawned).
 .TP
 .BR \-\-cursor
 Include the hardware cursor in the capture.
 .TP
-.BR \-\-delay " " \fIMS\fR
-Wait \fIMS\fR milliseconds before capturing.
+.BR \-\-delay " " \fISECONDS\fR
+Wait \fISECONDS\fR whole seconds before capturing. \fB0\fR is the same as omitting the
+flag. The UI countdown only operates on integer seconds, so the CLI, config, and IPC
+representations all match.
 .TP
 .BR \-\-via-daemon
 Forward the request to a running \fBhyprsnap daemon\fR over its Unix socket instead of
 executing locally.
 .SS draw
-Launch the live draw-on-screen overlay. Keys: \fBR\fR rectangle, \fBO\fR ellipse,
-\fBA\fR arrow, \fBH\fR highlight, \fBF\fR freehand, \fBN\fR numbered marker, \fBT\fR text,
-\fBX\fR redact, \fBCtrl+Z\fR undo, \fBCtrl+L\fR clear all, \fBP\fR toggle pointer
-passthrough, \fBEsc\fR quit. Also accepts \fB\-\-via-daemon\fR to toggle a
-daemon-managed overlay instead of spawning a new process.
-.SS editor (in-place annotation overlay)
-Opened by \fBscreenshot \-\-edit\fR or by a Shift-click / \fBShift+Enter\fR on the
-selector's Capture button. Save with \fBCtrl+S\fR or \fBEnter\fR; \fBEsc\fR quits.
-A color picker (with alpha) on the toolbar drives the color of the currently selected
-tool; each tool remembers its own color and the picker is disabled for tools with
-hardcoded appearance (\fBBlur\fR, \fBCrop\fR, \fBRedact\fR). The same picker is also
-available in the live \fBdraw\fR overlay.
-.SS selector
-The interactive selector (used by \fBscreenshot\fR without an explicit selection flag)
-shows a floating toolbar with Full / Screen / Window / Region modes, a cursor toggle, and
-a single action button:
+Launch the live draw-on-screen overlay. Tool keys: \fBR\fR rectangle, \fBO\fR ellipse,
+\fBA\fR arrow, \fBL\fR line (no arrowhead), \fBH\fR highlight, \fBF\fR freehand, \fBN\fR
+numbered marker, \fBT\fR text, \fBX\fR redact. Other keys: \fBCtrl+Z\fR undo, \fBCtrl+L\fR
+clear all layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBP\fR toggle
+pointer passthrough, \fBEsc\fR quit. \fBBlur\fR and \fBCrop\fR are editor-only and are
+not available in the live overlay. \fBdraw\fR also accepts \fB\-\-via-daemon\fR to
+toggle a daemon-managed overlay instead of spawning a new process, and
+\fB\-\-toggle-passthrough\fR (requires \fB\-\-via-daemon\fR) to flip pointer passthrough
+on the running overlay from a global keybind.
+.SS daemon
+Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. Pass \fB\-\-systray\fR to
+also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
+.SS doctor
+Print a copy-pasteable Markdown diagnostic report covering version, runtime
+environment, parsed configuration, and live capability probes (Hyprland IPC,
+wlr-screencopy outputs, daemon socket \fBPing\fR). All headings are level 3 so the
+output drops cleanly under a user-supplied level-2 heading. Always exits with status
+\fB0\fR; failed probes surface as \fBWARN\fR / \fBFAIL\fR lines in the report.
+.SH MODES
+The \fBscreenshot\fR subcommand surfaces two interactive UI modes, neither of which is a
+top-level subcommand.
+.SS Selector
+Shown by \fBscreenshot\fR without an explicit selection flag (or with
+\fB\-\-interactive\fR). A floating toolbar offers Full / Screen / Window / Region modes,
+a cursor toggle, a delay spinner, and a single action button:
 .RS
 .IP \(bu 2
 \fBCapture\fR (\fBEnter\fR) commits the selection and writes the result to sinks. Holding
 \fBShift\fR while clicking (or pressing \fBShift+Enter\fR / \fBShift+KP_Enter\fR) instead
-captures and then opens the in-place annotation overlay before writing. The button's icon
+captures and then opens the in-place annotation editor before writing. The button's icon
 and tooltip swap live while Shift is held.
 .RE
 The Shift modifier ORs into the CLI \fB\-\-edit\fR flag: Shift-click on a plain
 \fBscreenshot\fR opens the editor, and \fB\-\-edit\fR still opens the editor even on a
-plain Capture click.
-.SS daemon
-Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. Pass \fB\-\-systray\fR to
-also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
+plain Capture click. Keyboard: \fB1\fR/\fB2\fR/\fB3\fR/\fB4\fR switch modes, \fBEsc\fR
+cancels.
+.SS Editor (in-place annotation overlay)
+Opened by \fBscreenshot \-\-edit\fR or by a Shift-click / \fBShift+Enter\fR on the
+selector's Capture button. Tool keys: \fBR\fR rectangle, \fBO\fR ellipse, \fBA\fR arrow,
+\fBL\fR line, \fBH\fR highlight, \fBF\fR freehand, \fBN\fR numbered marker, \fBT\fR text,
+\fBB\fR blur, \fBX\fR redact, \fBC\fR crop. Other keys: \fBCtrl+Z\fR undo, \fBCtrl+S\fR
+/ \fBEnter\fR save, \fBEsc\fR quit. A color picker (with alpha) and a stroke-style
+picker (Solid / Dashed / Dotted) sit next to the tool buttons; each tool remembers its
+own color and style. The pickers are disabled for tools with hardcoded appearance
+(\fBBlur\fR, \fBCrop\fR, \fBRedact\fR). The same pickers are available in the live
+\fBdraw\fR overlay.
 .SH CONFIGURATION
 .B hyprsnap
 reads \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR. Every field is optional; see the
@@ -112,7 +132,6 @@ Daemon control socket.
 .SH SEE ALSO
 .BR grim (1),
 .BR slurp (1),
-.BR wl-copy (1),
 .BR Hyprland (1)
 .SH AUTHORS
-HyprSnap contributors. Source: https://github.com/anomalyco/hyprsnap
+HyprSnap contributors. Source: https://github.com/noirbizarre/hyprsnap
