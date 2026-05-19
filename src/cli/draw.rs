@@ -62,5 +62,5 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[cfg(not(feature = "ui"))]
 pub async fn run(_args: Args) -> Result<()> {
-    anyhow::bail!("hyprsnap was built without the `ui` feature; `draw` is unavailable")
+    anyhow::bail!("{}", crate::i18n::fl!("error-draw-requires-ui-feature"))
 }

@@ -20,6 +20,34 @@ use std::rc::Rc;
 use gtk4::prelude::*;
 
 use crate::annotate::{StrokeStyle, ToolKind};
+use crate::i18n::fl;
+
+/// Localized tooltip label for an annotation tool.
+fn tool_label(kind: ToolKind) -> String {
+    match kind {
+        ToolKind::Rect => fl!("toolbar-tool-rect"),
+        ToolKind::Ellipse => fl!("toolbar-tool-ellipse"),
+        ToolKind::Arrow => fl!("toolbar-tool-arrow"),
+        ToolKind::Line => fl!("toolbar-tool-line"),
+        ToolKind::Highlight => fl!("toolbar-tool-highlight"),
+        ToolKind::Freehand => fl!("toolbar-tool-freehand"),
+        ToolKind::Number => fl!("toolbar-tool-number"),
+        ToolKind::Text => fl!("toolbar-tool-text"),
+        ToolKind::Blur => fl!("toolbar-tool-blur"),
+        ToolKind::Redact => fl!("toolbar-tool-redact"),
+        ToolKind::Crop => fl!("toolbar-tool-crop"),
+    }
+}
+
+/// Localized tooltip label for a selector mode.
+fn mode_label(kind: ModeKind) -> String {
+    match kind {
+        ModeKind::Full => fl!("toolbar-mode-full"),
+        ModeKind::Screen => fl!("toolbar-mode-screen"),
+        ModeKind::Window => fl!("toolbar-mode-window"),
+        ModeKind::Region => fl!("toolbar-mode-region"),
+    }
+}
 
 /// High-level mode picker used by the interactive selector. Resolved to a concrete
 /// `Selection` by the caller after the user clicks Capture (or commits).
@@ -450,11 +478,11 @@ impl CaptureUi {
         if shift {
             self.icon.set_icon_name(Some("document-edit-symbolic"));
             self.button
-                .set_tooltip_text(Some("Annotate (Shift-click or Shift+Enter)"));
+                .set_tooltip_text(Some(&fl!("toolbar-annotate-tooltip")));
         } else {
             self.icon.set_icon_name(Some("camera-photo-symbolic"));
             self.button
-                .set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
+                .set_tooltip_text(Some(&fl!("toolbar-capture-tooltip-shift")));
         }
     }
 }
@@ -509,7 +537,7 @@ impl Toolbar {
         for entry in spec.modes {
             let btn = gtk4::ToggleButton::new();
             btn.set_child(Some(&icon_only(entry.icon)));
-            btn.set_tooltip_text(Some(entry.label));
+            btn.set_tooltip_text(Some(&mode_label(entry.kind)));
             make_unfocusable(&btn);
             if let Some(first) = &mode_group {
                 btn.set_group(Some(first));
@@ -546,7 +574,7 @@ impl Toolbar {
         for entry in spec.tools {
             let btn = gtk4::ToggleButton::new();
             btn.set_child(Some(&icon_only(entry.icon)));
-            btn.set_tooltip_text(Some(entry.label));
+            btn.set_tooltip_text(Some(&tool_label(entry.kind)));
             make_unfocusable(&btn);
             if let Some(first) = &tool_group {
                 btn.set_group(Some(first));
@@ -618,7 +646,7 @@ impl Toolbar {
 
             let btn = gtk4::Button::new();
             btn.set_child(Some(&swatch));
-            btn.set_tooltip_text(Some("Tool color (alpha included)"));
+            btn.set_tooltip_text(Some(&fl!("toolbar-color-tooltip")));
             make_unfocusable(&btn);
 
             // On click: walk to the root window, temporarily relax layer-shell keyboard
@@ -670,10 +698,10 @@ impl Toolbar {
             let mut toggles: Vec<(StrokeStyle, gtk4::ToggleButton, glib::SignalHandlerId)> =
                 Vec::new();
             let mut toggle_group: Option<gtk4::ToggleButton> = None;
-            for (style, tooltip) in [
-                (StrokeStyle::Solid, "Solid stroke"),
-                (StrokeStyle::Dashed, "Dashed stroke"),
-                (StrokeStyle::Dotted, "Dotted stroke"),
+            for (style, tooltip_key) in [
+                (StrokeStyle::Solid, "toolbar-stroke-solid"),
+                (StrokeStyle::Dashed, "toolbar-stroke-dashed"),
+                (StrokeStyle::Dotted, "toolbar-stroke-dotted"),
             ] {
                 let toggle = gtk4::ToggleButton::new();
                 let sample = gtk4::DrawingArea::new();
@@ -687,7 +715,12 @@ impl Toolbar {
                     draw_style_swatch(cr, w as f64, h as f64, style);
                 });
                 toggle.set_child(Some(&sample));
-                toggle.set_tooltip_text(Some(tooltip));
+                let tooltip = match tooltip_key {
+                    "toolbar-stroke-solid" => fl!("toolbar-stroke-solid"),
+                    "toolbar-stroke-dashed" => fl!("toolbar-stroke-dashed"),
+                    _ => fl!("toolbar-stroke-dotted"),
+                };
+                toggle.set_tooltip_text(Some(&tooltip));
                 make_unfocusable(&toggle);
                 if let Some(first) = &toggle_group {
                     toggle.set_group(Some(first));
@@ -734,7 +767,7 @@ impl Toolbar {
             let adj = gtk4::Adjustment::new(18.0, 6.0, 200.0, 1.0, 4.0, 0.0);
             let spin = gtk4::SpinButton::new(Some(&adj), 1.0, 0);
             spin.set_numeric(true);
-            spin.set_tooltip_text(Some("Font size (pt)"));
+            spin.set_tooltip_text(Some(&fl!("toolbar-font-size-tooltip")));
             spin.set_width_chars(3);
             spin.set_max_width_chars(3);
             // Keep keyboard focus on the parent window's shortcut dispatcher rather
@@ -769,7 +802,7 @@ impl Toolbar {
         if spec.show_undo {
             let btn = gtk4::Button::new();
             btn.set_child(Some(&icon_only("edit-undo-symbolic")));
-            btn.set_tooltip_text(Some("Undo (Ctrl+Z)"));
+            btn.set_tooltip_text(Some(&fl!("toolbar-undo-tooltip")));
             make_unfocusable(&btn);
             let cb = callback.clone();
             btn.connect_clicked(move |_| {
@@ -788,7 +821,7 @@ impl Toolbar {
         if spec.show_clear {
             let btn = gtk4::Button::new();
             btn.set_child(Some(&icon_only("edit-clear-all-symbolic")));
-            btn.set_tooltip_text(Some("Clear (Ctrl+L)"));
+            btn.set_tooltip_text(Some(&fl!("toolbar-clear-tooltip")));
             make_unfocusable(&btn);
             let cb = callback.clone();
             btn.connect_clicked(move |_| {
@@ -807,7 +840,7 @@ impl Toolbar {
         if spec.show_cursor_toggle {
             let btn = gtk4::ToggleButton::new();
             btn.set_child(Some(&icon_only("pointer-primary-click-symbolic")));
-            btn.set_tooltip_text(Some("Include cursor in capture"));
+            btn.set_tooltip_text(Some(&fl!("toolbar-cursor-tooltip")));
             make_unfocusable(&btn);
             btn.set_active(spec.initial_cursor);
             let cb = callback.clone();
@@ -838,7 +871,7 @@ impl Toolbar {
             // visual pattern as the stroke-style picker.
             let group = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
             group.add_css_class("linked");
-            group.set_tooltip_text(Some("Delay before capture, in seconds"));
+            group.set_tooltip_text(Some(&fl!("toolbar-delay-tooltip")));
 
             let minus = gtk4::Button::new();
             minus.set_child(Some(&icon_only("list-remove-symbolic")));
@@ -925,7 +958,7 @@ impl Toolbar {
         if spec.show_passthrough_toggle {
             let btn = gtk4::ToggleButton::new();
             btn.set_child(Some(&icon_only("mouse-click-symbolic")));
-            btn.set_tooltip_text(Some("Toggle pointer passthrough (P)"));
+            btn.set_tooltip_text(Some(&fl!("toolbar-passthrough-tooltip")));
             make_unfocusable(&btn);
             btn.set_active(spec.initial_passthrough);
             let cb = callback.clone();
@@ -946,7 +979,7 @@ impl Toolbar {
         if spec.show_save {
             let btn = gtk4::Button::new();
             btn.set_child(Some(&icon_only("document-save-symbolic")));
-            btn.set_tooltip_text(Some("Save (Ctrl+S or Enter)"));
+            btn.set_tooltip_text(Some(&fl!("toolbar-save-tooltip")));
             make_unfocusable(&btn);
             let cb = callback.clone();
             btn.connect_clicked(move |_| {
@@ -997,9 +1030,9 @@ impl Toolbar {
             let icon = icon_only("camera-photo-symbolic");
             btn.set_child(Some(&icon));
             if shift_annotates {
-                btn.set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
+                btn.set_tooltip_text(Some(&fl!("toolbar-capture-tooltip-shift")));
             } else {
-                btn.set_tooltip_text(Some("Capture (Enter)"));
+                btn.set_tooltip_text(Some(&fl!("toolbar-capture-tooltip-plain")));
             }
             btn.add_css_class("suggested-action");
             make_unfocusable(&btn);
@@ -1062,12 +1095,11 @@ impl Toolbar {
                         shift_for_timer.set(shift);
                         if shift {
                             icon_for_timer.set_icon_name(Some("document-edit-symbolic"));
-                            btn_for_timer
-                                .set_tooltip_text(Some("Annotate (Shift-click or Shift+Enter)"));
+                            btn_for_timer.set_tooltip_text(Some(&fl!("toolbar-annotate-tooltip")));
                         } else {
                             icon_for_timer.set_icon_name(Some("camera-photo-symbolic"));
                             btn_for_timer
-                                .set_tooltip_text(Some("Capture (Enter) — Shift to annotate"));
+                                .set_tooltip_text(Some(&fl!("toolbar-capture-tooltip-shift")));
                         }
                     }
                     glib::ControlFlow::Continue
@@ -1417,9 +1449,10 @@ fn make_unfocusable<W: IsA<gtk4::Widget>>(w: &W) {
 }
 
 /// Format a whole-seconds delay value for the toolbar's delay-trigger label.
-/// Compact "0s" / "3s" / "60s" form; matches the SpinButton's integer-seconds range.
+/// Localized via the `toolbar-delay-label` Fluent message so French gets
+/// the canonical "3 s" with a non-breaking space.
 fn format_delay_label(secs: u32) -> String {
-    format!("{secs}s")
+    fl!("toolbar-delay-label", secs = secs)
 }
 
 /// `gdk::RGBA` → packed `[f32; 4]` matching the canvas's tool storage format.
@@ -1552,9 +1585,10 @@ fn open_color_dialog(
             Vec::new()
         };
 
+    let dialog_title = fl!("toolbar-color-dialog-title");
     let dialog = gtk4::ColorDialog::builder()
         .with_alpha(true)
-        .title("Pick a Color")
+        .title(&dialog_title)
         .modal(true)
         .build();
     let initial = current.get();
@@ -1589,36 +1623,34 @@ fn open_color_dialog(
     // scrollbar appears instead of growing to fit. We can't influence the window at
     // creation time, but we can find it via the toplevel list after `choose_rgba` and
     // tweak its widget tree so it refits naturally on every visible-child swap.
-    schedule_color_dialog_refit(3);
+    schedule_color_dialog_refit(dialog_title, 3);
 }
 
 /// Try to locate the just-opened color dialog and apply [`refit_color_dialog`].
 /// The dialog window is created and mapped asynchronously by GTK; retry on a short
 /// timeout up to `remaining` times, then give up silently.
-fn schedule_color_dialog_refit(remaining: u32) {
+fn schedule_color_dialog_refit(title: String, remaining: u32) {
     gtk4::glib::idle_add_local_once(move || {
-        if let Some(dlg) = find_color_dialog_window() {
+        if let Some(dlg) = find_color_dialog_window(&title) {
             refit_color_dialog(&dlg);
         } else if remaining > 0 {
             gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
-                schedule_color_dialog_refit(remaining - 1)
+                schedule_color_dialog_refit(title, remaining - 1)
             });
         }
     });
 }
 
-/// Scan the application's toplevels for a window titled exactly `"Pick a Color"` —
+/// Scan the application's toplevels for a window titled exactly `title` —
 /// the title we set on the `ColorDialog`. Returns the first match.
-fn find_color_dialog_window() -> Option<gtk4::Window> {
+/// The expected title is threaded through from `open_color_dialog` so the
+/// match stays in sync with the localized title we set on the dialog.
+fn find_color_dialog_window(title: &str) -> Option<gtk4::Window> {
     for obj in gtk4::Window::list_toplevels() {
         let Ok(win) = obj.downcast::<gtk4::Window>() else {
             continue;
         };
-        if win
-            .title()
-            .map(|t| t.as_str() == "Pick a Color")
-            .unwrap_or(false)
-        {
+        if win.title().map(|t| t.as_str() == title).unwrap_or(false) {
             return Some(win);
         }
     }

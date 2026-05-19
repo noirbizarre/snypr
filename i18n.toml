@@ -1,0 +1,6 @@
+# Configuration for i18n-embed-fl / cargo-i18n.
+# https://github.com/kellpossible/cargo-i18n
+fallback_language = "en"
+
+[fluent]
+assets_dir = "i18n"

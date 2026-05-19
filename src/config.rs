@@ -12,6 +12,10 @@ use crate::cli::SinkSpec;
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
+    /// Active UI language as a BCP-47 tag (e.g. `"fr"`, `"en-US"`). `None`
+    /// (the default) lets HyprSnap auto-detect from `LC_ALL`/`LC_MESSAGES`/
+    /// `LANG`. The `--lang` CLI flag overrides this field.
+    pub language: Option<String>,
     pub output: OutputConfig,
     pub capture: CaptureConfig,
     pub keybinds: KeybindConfig,

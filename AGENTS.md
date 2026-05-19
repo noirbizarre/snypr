@@ -29,3 +29,14 @@ General: Do not add new dependencies lightly; prefer existing patterns
 `ui::style`, Hyprland IPC via the in-tree `src/hypr.rs` rather than the upstream
 `hyprland` crate). Update docs (README, `docs/man/hyprsnap.1`) when user-facing
 behavior changes.
+
+Translations: user-facing UI strings (toolbar/selector/tray tooltips, desktop
+notifications, errors surfaced via `eprintln!` / `notify_error`) go through
+Fluent via the `fl!` macro re-exported from `src/i18n.rs`. Catalogs live at
+`i18n/<lang>/hyprsnap.ftl` and are embedded into the binary. English (`en`) is
+the fallback and source of truth; add a new language by dropping a new file in
+`i18n/<code>/` and translating every key. The active locale is resolved at
+startup with precedence `--lang` flag > `language` config field >
+`LC_ALL`/`LC_MESSAGES`/`LANG` > `en`. Developer-oriented strings (tracing logs,
+low-level I/O `anyhow::Context`, the `doctor` Markdown report, clap `--help`)
+stay English on purpose.

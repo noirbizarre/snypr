@@ -11,6 +11,8 @@ use std::sync::OnceLock;
 use anyhow::{Context as _, Result};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::i18n::fl;
+
 /// Embedded HyprSnap logo, shipped alongside the source so the tray works out-of-the-box even
 /// on systems where the icon theme hasn't been installed system-wide. The file is also the
 /// canonical app icon and gets installed to `/usr/share/icons/hicolor/256x256/apps/` by the
@@ -81,7 +83,7 @@ impl ksni::Tray for HyprSnapTray {
         use ksni::menu::*;
         vec![
             StandardItem {
-                label: "Screenshot (full)".into(),
+                label: fl!("tray-screenshot-full"),
                 icon_name: "camera-photo".into(),
                 activate: Box::new(|this: &mut Self| {
                     this.send(TrayAction::Screenshot { edit: false })
@@ -90,7 +92,7 @@ impl ksni::Tray for HyprSnapTray {
             }
             .into(),
             StandardItem {
-                label: "Annotate region…".into(),
+                label: fl!("tray-annotate-region"),
                 icon_name: "edit-cut".into(),
                 activate: Box::new(|this: &mut Self| {
                     this.send(TrayAction::Screenshot { edit: true })
@@ -99,7 +101,7 @@ impl ksni::Tray for HyprSnapTray {
             }
             .into(),
             StandardItem {
-                label: "Draw on screen".into(),
+                label: fl!("tray-draw-on-screen"),
                 icon_name: "draw-freehand".into(),
                 activate: Box::new(|this: &mut Self| this.send(TrayAction::OpenDraw)),
                 ..Default::default()
@@ -107,7 +109,7 @@ impl ksni::Tray for HyprSnapTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
-                label: "Quit".into(),
+                label: fl!("tray-quit"),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|this: &mut Self| this.send(TrayAction::Quit)),
                 ..Default::default()

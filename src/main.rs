@@ -13,6 +13,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Resolve the active locale before any user-facing string is emitted.
+    // Precedence: `--lang` flag > `[language]` in config > env > English fallback.
+    // Config load is best-effort: failures here just fall through to env detection.
+    let lang_override = cli.lang.clone().or_else(|| {
+        hyprsnap::config::Config::load_default()
+            .ok()
+            .and_then(|c| c.language)
+    });
+    hyprsnap::i18n::init(lang_override.as_deref());
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

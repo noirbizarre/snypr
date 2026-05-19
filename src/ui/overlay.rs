@@ -306,7 +306,7 @@ fn build_overlays(
     }
 
     if windows.is_empty() {
-        bail!("no monitor intersected the requested edit region; nothing to annotate");
+        bail!("{}", crate::i18n::fl!("error-overlay-no-monitor"));
     }
     // Two-phase: every per-monitor window is fully built above, so the loop below can
     // commit the initial Wayland surfaces back-to-back without GTK doing any widget /

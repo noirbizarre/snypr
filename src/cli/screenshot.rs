@@ -7,6 +7,7 @@ use super::SinkSpec;
 use crate::capture::{Capturer, Selection, wlr::WlrCapturer};
 use crate::config::Config;
 use crate::context::Context;
+use crate::i18n::fl;
 use crate::output::Outputs;
 
 #[derive(Debug, Default, ClapArgs)]
@@ -115,9 +116,7 @@ pub async fn execute(
     let edit = edit || selector_edit;
 
     if edit && matches!(selection, Selection::PerOutput) {
-        bail!(
-            "`--edit` is incompatible with `--per-output` (the annotation editor operates on a single image)"
-        );
+        bail!("{}", fl!("error-edit-incompatible-per-output"));
     }
 
     // Apply the pre-capture sleep after the selector closes so the countdown does not block
@@ -207,9 +206,7 @@ pub async fn execute(
         }
         #[cfg(not(feature = "ui"))]
         {
-            anyhow::bail!(
-                "`--edit` requires the `ui` cargo feature; rebuild with it or drop the flag"
-            );
+            anyhow::bail!("{}", fl!("error-edit-requires-ui-feature"));
         }
     }
 
@@ -336,9 +333,7 @@ async fn resolve_selection(
             #[cfg(not(feature = "ui"))]
             {
                 let _ = initial_delay;
-                anyhow::bail!(
-                    "interactive selector requires the `ui` cargo feature; pass a concrete --region, --full, or other flag"
-                );
+                anyhow::bail!("{}", fl!("error-interactive-requires-ui-feature"));
             }
         }
         Selection::Window => {
@@ -392,19 +387,14 @@ pub(crate) fn parse_selection(args: &Args) -> Result<Selection> {
 }
 
 fn parse_region(spec: &str) -> Result<crate::capture::region::Rect> {
+    let invalid_region = || anyhow::anyhow!("{}", fl!("error-invalid-region", spec = spec));
     let mut parts = spec.splitn(3, ',');
-    let x = parts
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("invalid region: {spec} (expected X,Y,WxH)"))?;
-    let y = parts
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("invalid region: {spec} (expected X,Y,WxH)"))?;
-    let size = parts
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("invalid region: {spec} (expected X,Y,WxH)"))?;
+    let x = parts.next().ok_or_else(invalid_region)?;
+    let y = parts.next().ok_or_else(invalid_region)?;
+    let size = parts.next().ok_or_else(invalid_region)?;
     let (ws, hs) = size
         .split_once('x')
-        .ok_or_else(|| anyhow::anyhow!("invalid region size: {size} (expected WxH)"))?;
+        .ok_or_else(|| anyhow::anyhow!("{}", fl!("error-invalid-region-size", size = size)))?;
 
     Ok(crate::capture::region::Rect {
         x: x.trim().parse()?,

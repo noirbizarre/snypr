@@ -23,6 +23,12 @@ pub struct Cli {
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Override the active language as a BCP-47 tag (e.g. `fr`, `en-US`).
+    /// Falls back to the `language` config field, then `LC_ALL`/`LC_MESSAGES`/`LANG`,
+    /// then English.
+    #[arg(long, global = true, value_name = "BCP47", env = "HYPRSNAP_LANG")]
+    pub lang: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -129,7 +135,7 @@ async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
         .await
         .context("reading daemon response")?;
     if line.trim().is_empty() {
-        bail!("daemon closed connection without responding");
+        bail!("{}", crate::i18n::fl!("error-daemon-no-response"));
     }
     let resp: crate::ipc::Response = serde_json::from_str(line.trim())
         .with_context(|| format!("parsing daemon response `{}`", line.trim()))?;
@@ -141,7 +147,10 @@ async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        crate::ipc::Response::Error { message } => Err(anyhow!("daemon: {message}")),
+        crate::ipc::Response::Error { message } => Err(anyhow!(
+            "{}",
+            crate::i18n::fl!("error-daemon-message", message = message)
+        )),
     }
 }
 

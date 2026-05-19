@@ -58,17 +58,18 @@ pub fn notify_success(cfg: &Config, paths: &[PathBuf], png_bytes: &[u8]) {
     }
 
     let default_dir = cfg.save_directory();
-    let (summary, body): (&str, Option<String>) = match paths.len() {
-        0 => ("Screenshot copied to clipboard", None),
+    let (summary, body): (String, Option<String>) = match paths.len() {
+        0 => (crate::i18n::fl!("notify-copied"), None),
         1 => (
-            "Screenshot saved",
+            crate::i18n::fl!("notify-saved-single"),
             Some(display_path(&paths[0], &default_dir)),
         ),
         n => (
-            "Screenshots saved",
-            Some(format!(
-                "{} ({n} files)",
-                display_path(&paths[0], &default_dir)
+            crate::i18n::fl!("notify-saved-multi"),
+            Some(crate::i18n::fl!(
+                "notify-saved-multi-body",
+                first = display_path(&paths[0], &default_dir),
+                count = n
             )),
         ),
     };
@@ -90,7 +91,7 @@ pub fn notify_success(cfg: &Config, paths: &[PathBuf], png_bytes: &[u8]) {
 
     let mut builder = Notification::new();
     builder
-        .summary(summary)
+        .summary(&summary)
         .icon(APP_ICON)
         .appname(APP_NAME)
         .timeout(notify_rust::Timeout::Milliseconds(cfg.notify.timeout_ms));

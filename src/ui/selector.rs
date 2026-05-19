@@ -34,6 +34,7 @@ use crate::capture::Selection;
 use crate::capture::region::Rect;
 use crate::context::Ctx;
 use crate::hypr::{self, HyprWindow};
+use crate::i18n::fl;
 use crate::ui::toolbar::{ModeKind, SELECTOR_MODES, Toolbar, ToolbarAction, ToolbarSpec};
 
 /// Marker error indicating the user dismissed the interactive selector
@@ -1129,7 +1130,7 @@ mod imp {
                             snapshot,
                             w,
                             h,
-                            "Drag to select a region — Enter to confirm, Esc to cancel",
+                            &fl!("selector-hint-region-empty"),
                             &label_color,
                         );
                         return;
@@ -1152,9 +1153,10 @@ mod imp {
                     let stroke = gtk4::gsk::Stroke::new(1.5);
                     snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
 
-                    let hint = format!(
-                        "{} × {} — Enter to confirm, Esc to cancel",
-                        rw as i32, rh as i32
+                    let hint = fl!(
+                        "selector-hint-region-size",
+                        width = (rw as i32),
+                        height = (rh as i32),
                     );
                     let pango_ctx = self.obj().create_pango_context();
                     let layout = pango::Layout::new(&pango_ctx);
@@ -1170,13 +1172,7 @@ mod imp {
                 ModeKind::Full => {
                     // Light dim across the whole desktop to signal "full grab pending".
                     snapshot.append_color(&dim_light, &graphene::Rect::new(0.0, 0.0, w, h));
-                    self.draw_hint(
-                        snapshot,
-                        w,
-                        h,
-                        "Full desktop — Enter to confirm, Esc to cancel",
-                        &label_color,
-                    );
+                    self.draw_hint(snapshot, w, h, &fl!("selector-hint-full"), &label_color);
                 }
                 ModeKind::Screen => {
                     let selected = state.selected_monitor == Some(monitor_index);
@@ -1197,11 +1193,11 @@ mod imp {
                         snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
                     }
                     let hint = if state.selected_monitor.is_some() {
-                        "Screen selected — Enter to confirm, Esc to cancel"
+                        fl!("selector-hint-screen-selected")
                     } else {
-                        "Click a screen — Enter to confirm, Esc to cancel"
+                        fl!("selector-hint-screen-pick")
                     };
-                    self.draw_hint(snapshot, w, h, hint, &label_color);
+                    self.draw_hint(snapshot, w, h, &hint, &label_color);
                 }
                 ModeKind::Window => {
                     snapshot.append_color(&dim_strong, &graphene::Rect::new(0.0, 0.0, w, h));
@@ -1234,17 +1230,19 @@ mod imp {
                     }
 
                     let hint = match &state.selected_window {
-                        Some(p) if !p.class.is_empty() && !p.title.is_empty() => {
-                            format!("{}: {} — Enter to confirm, Esc to cancel", p.class, p.title)
-                        }
+                        Some(p) if !p.class.is_empty() && !p.title.is_empty() => fl!(
+                            "selector-hint-window-class-title",
+                            class = p.class.as_str(),
+                            title = p.title.as_str()
+                        ),
                         Some(p) if !p.class.is_empty() => {
-                            format!("{} — Enter to confirm, Esc to cancel", p.class)
+                            fl!("selector-hint-window-class", class = p.class.as_str())
                         }
                         Some(p) if !p.title.is_empty() => {
-                            format!("{} — Enter to confirm, Esc to cancel", p.title)
+                            fl!("selector-hint-window-title", title = p.title.as_str())
                         }
-                        Some(_) => "Window selected — Enter to confirm, Esc to cancel".to_owned(),
-                        None => "Click a window — Enter to confirm, Esc to cancel".to_owned(),
+                        Some(_) => fl!("selector-hint-window-selected"),
+                        None => fl!("selector-hint-window-pick"),
                     };
                     self.draw_hint(snapshot, w, h, &hint, &label_color);
                 }

@@ -100,6 +100,17 @@ ksni = { version = "0.3", optional = true }
 # Desktop notifications (optional via `notify` feature)
 notify-rust = { version = "4", optional = true }
 
+# Internationalization (Fluent + embedded catalogs)
+i18n-embed = { version = "0.15", features = [
+  "fluent-system",
+  "desktop-requester",
+] }
+i18n-embed-fl = "0.9"
+rust-embed = "8"
+fluent = "0.16"
+unic-langid = "0.9"
+once_cell = "1"
+
 [build-dependencies]
 glib-build-tools = "0.22"
 
