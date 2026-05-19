@@ -14,11 +14,12 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::i18n::fl;
 
 /// Embedded HyprSnap logo, shipped alongside the source so the tray works out-of-the-box even
-/// on systems where the icon theme hasn't been installed system-wide. The file is also the
-/// canonical app icon and gets installed to `/usr/share/icons/hicolor/256x256/apps/` by the
-/// packaging rules.
+/// on systems where the icon theme hasn't been installed system-wide. 64×64 is sized for SNI
+/// panels (typical render size 16–32 px, doubled for HiDPI), keeping the ARGB pixmap that
+/// crosses D-Bus small. The full theme — 16/32/64/128/256/512 sizes under
+/// `…/icons/hicolor/<size>/apps/` — is installed by the packaging rules.
 const LOGO_PNG: &[u8] =
-    include_bytes!("../../data/icons/hicolor/256x256/apps/noirbizar.re.HyprSnap.png");
+    include_bytes!("../../data/icons/hicolor/64x64/apps/noirbizar.re.HyprSnap.png");
 
 /// Side-effect requested by the user via the tray menu.
 #[derive(Debug, Clone, Copy)]

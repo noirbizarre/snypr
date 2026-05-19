@@ -1,0 +1,27 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=HyprSnap
+GenericName=Screenshot Tool
+Comment=Capture, annotate, and draw on your Wayland screen
+Exec=hyprsnap screenshot --interactive
+TryExec=hyprsnap
+Icon=noirbizar.re.HyprSnap
+Terminal=false
+Categories=Graphics;Utility;2DGraphics;RasterGraphics;
+Keywords=screenshot;screen;capture;annotate;draw;hyprland;wayland;wlroots;
+StartupNotify=true
+StartupWMClass=noirbizar.re.HyprSnap
+Actions=Screenshot;ScreenshotFull;Draw;
+
+[Desktop Action Screenshot]
+Name=Take Screenshot (region)
+Exec=hyprsnap screenshot --interactive
+
+[Desktop Action ScreenshotFull]
+Name=Take Full-Screen Screenshot
+Exec=hyprsnap screenshot --full
+
+[Desktop Action Draw]
+Name=Draw on Screen
+Exec=hyprsnap draw

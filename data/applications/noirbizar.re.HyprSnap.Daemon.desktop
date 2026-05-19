@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=HyprSnap Daemon
+GenericName=Screenshot Daemon
+Comment=Background daemon with systray for quick screenshots and drawing
+Exec=hyprsnap daemon --systray
+TryExec=hyprsnap
+Icon=noirbizar.re.HyprSnap
+Terminal=false
+Categories=Graphics;Utility;
+Keywords=screenshot;daemon;systray;hyprland;wayland;
+StartupNotify=false
+X-GNOME-Autostart-Enabled=true

@@ -75,6 +75,35 @@ No external CLI helpers are invoked: `hyprctl`, `grim`, `slurp`, and
 command socket, Wayland capture goes through `zwlr_screencopy_manager_v1`,
 and clipboard writes use `wl-clipboard-rs`.
 
+## Install
+
+End-user installs will arrive via distribution packages (AUR, Debian/Ubuntu,
+Nix, …) once published — that's the supported path. In the meantime you can
+`cargo install --path .` (or `mise run setup`) to drop the binary in
+`~/.cargo/bin`; the launcher integration below assumes a proper package.
+
+For packagers, the source tree ships these artifacts ready to install under
+`$PREFIX` (typically `/usr`):
+
+| Path                                                                | Provenance                                       |
+| ------------------------------------------------------------------- | ------------------------------------------------ |
+| `$PREFIX/bin/hyprsnap`                                              | `cargo build --release` → `target/release/hyprsnap` |
+| `$PREFIX/share/icons/hicolor/<size>/apps/noirbizar.re.HyprSnap.png` | `data/icons/hicolor/<size>/apps/…` — sizes 16, 32, 64, 128, 256, 512 |
+| `$PREFIX/share/applications/noirbizar.re.HyprSnap.desktop`          | Standalone launcher with Screenshot/Draw actions |
+| `$PREFIX/share/applications/noirbizar.re.HyprSnap.Daemon.desktop`   | Visible launcher for `hyprsnap daemon --systray` |
+| `$PREFIX/share/man/man1/hyprsnap.1`                                 | `docs/man/hyprsnap.1`                            |
+
+After installation, package post-install hooks should run
+`update-desktop-database` against `$PREFIX/share/applications` and
+`gtk-update-icon-cache -qtf $PREFIX/share/icons/hicolor`.
+
+The standalone `.desktop` exposes three launcher actions (visible via
+right-click in most launchers): **Take Screenshot (region)**, **Take
+Full-Screen Screenshot**, and **Draw on Screen**. The daemon entry
+(`noirbizar.re.HyprSnap.Daemon.desktop`) carries
+`X-GNOME-Autostart-Enabled=true`, so users who prefer XDG autostart over
+the Hyprland snippet below can symlink it into `~/.config/autostart/`.
+
 ## Usage
 
 ```sh
