@@ -10,8 +10,8 @@
 //! Other monitors show only the dimming/HUD layer.
 //!
 //! Workflow per mode:
-//!   - `Region` (default): drag a rectangle, then press Enter / click Capture.
-//!   - `Screen`: hover a monitor to highlight it, click to commit a per-monitor capture.
+//!   - `Screen` (default): hover a monitor to highlight it, click to commit a per-monitor capture.
+//!   - `Region`: drag a rectangle, then press Enter / click Capture.
 //!   - `Window`: focused-window bounds outlined; click Capture to commit.
 //!   - `Full`: every monitor dim-highlighted as one stitched bbox; click Capture to commit.
 //!
@@ -480,7 +480,7 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
         show_delay_spinner: true,
         show_capture: true,
         capture_shift_annotates: shared.allow_annotate,
-        initial_mode: Some(ModeKind::Region),
+        initial_mode: Some(ModeKind::Screen),
         initial_cursor: shared.initial_cursor,
         initial_delay_secs,
         ..Default::default()

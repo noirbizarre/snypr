@@ -26,9 +26,9 @@ use crate::annotate::{StrokeStyle, ToolKind};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub enum ModeKind {
     Full,
+    #[default]
     Screen,
     Window,
-    #[default]
     Region,
 }
 
@@ -1682,8 +1682,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn mode_kind_default_is_region() {
-        assert_eq!(ModeKind::default(), ModeKind::Region);
+    fn mode_kind_default_is_screen() {
+        assert_eq!(ModeKind::default(), ModeKind::Screen);
     }
 
     #[test]
