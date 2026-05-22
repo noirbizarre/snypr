@@ -53,8 +53,18 @@ edited where they live on the desktop. Incompatible with \fB\-\-per\-output\fR.
 .BR \-\-to " " \fISINK\fR
 Add an output sink. May be passed multiple times. Recognised forms:
 \fBfile\fR (write to the configured directory), \fBfile=\fIPATH\fR (write to \fIPATH\fR),
-\fBclipboard\fR (write to the Wayland clipboard via the in-process \fIwl-clipboard-rs\fR
-library; no \fIwl-copy\fR is spawned).
+\fBclipboard\fR (write to the Wayland clipboard via \fIwl-clipboard-rs\fR; no
+\fIwl-copy\fR binary is spawned),
+\fBclipboard=\fIKIND\fR where \fIKIND\fR is \fBregular\fR, \fBprimary\fR, or \fBboth\fR
+(per-sink override of \fB\-\-clipboard\-type\fR).
+When running outside the daemon, the clipboard sink forks a short detached child
+process that keeps serving the selection after \fBhyprsnap\fR exits so paste
+keeps working until another client overtakes the selection.
+.TP
+.BR \-\-clipboard\-type " " \fIKIND\fR
+Default clipboard selection (\fBregular\fR, \fBprimary\fR, or \fBboth\fR) used for every
+\fB\-\-to clipboard\fR sink that does not carry an explicit \fI=KIND\fR suffix.
+Falls back to \fB[clipboard].default_kind\fR in \fIconfig.toml\fR, then to \fBregular\fR.
 .TP
 .BR \-\-cursor
 Include the hardware cursor in the capture.

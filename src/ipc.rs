@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cli::ClipboardKind;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
@@ -47,8 +49,16 @@ pub enum SelectionSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SinkSpec {
-    File { path: Option<PathBuf> },
-    Clipboard,
+    File {
+        path: Option<PathBuf>,
+    },
+    /// Wayland clipboard sink. `clipboard_kind = None` means the daemon
+    /// should fall back to its own configured default; `Some(kind)` pins
+    /// the kind for this entry.
+    Clipboard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clipboard_kind: Option<ClipboardKind>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +94,14 @@ mod tests {
         cursor: false,
         edit: false,
         delay_secs: None,
-        sinks: vec![SinkSpec::Clipboard],
+        sinks: vec![SinkSpec::Clipboard { clipboard_kind: None }],
+    }))]
+    #[case(Request::Screenshot(ScreenshotRequest {
+        selection: SelectionSpec::Full,
+        cursor: false,
+        edit: false,
+        delay_secs: None,
+        sinks: vec![SinkSpec::Clipboard { clipboard_kind: Some(ClipboardKind::Primary) }],
     }))]
     #[case(Request::Screenshot(ScreenshotRequest {
         selection: SelectionSpec::Interactive,

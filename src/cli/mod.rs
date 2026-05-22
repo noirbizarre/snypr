@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 
 pub mod daemon;
 pub mod doctor;
@@ -56,11 +57,49 @@ pub enum SinkKind {
     Clipboard,
 }
 
-/// Output target specification (`--to file=PATH`, `--to clipboard`, or `--to file`).
+/// Which Wayland selection(s) the clipboard sink targets.
+///
+/// Wayland exposes two independent selections: the *regular* clipboard
+/// (Ctrl+C / Ctrl+V) and the *primary* selection (middle-click paste). By
+/// default hyprsnap publishes the screenshot to the regular clipboard
+/// only — matching how most graphical apps treat copy/paste.
+#[derive(Debug, Default, Copy, Clone, ValueEnum, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
+pub enum ClipboardKind {
+    /// Regular clipboard (Ctrl+V). Default.
+    #[default]
+    Regular,
+    /// Primary selection (middle-click paste).
+    Primary,
+    /// Publish to both selections.
+    Both,
+}
+
+/// Output target specification (`--to file=PATH`, `--to clipboard`,
+/// `--to clipboard=primary`, or `--to file`). The `clipboard=KIND` form
+/// overrides the global `--clipboard-type` for this specific entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SinkSpec {
     File(Option<PathBuf>),
-    Clipboard,
+    /// Wayland clipboard sink. `None` means "use the effective default
+    /// kind" (resolved from `--clipboard-type` or config); `Some(kind)`
+    /// pins the kind on this entry.
+    Clipboard(Option<ClipboardKind>),
+}
+
+impl SinkSpec {
+    /// Replace `Clipboard(None)` entries with `Clipboard(Some(default))`,
+    /// resolving the effective kind for each clipboard sink. `Clipboard`
+    /// entries that already pin a kind are left untouched, as are file
+    /// sinks. Used after CLI / config / IPC parsing so downstream code
+    /// only ever sees fully-resolved kinds.
+    pub fn resolve_clipboard_default(self, default: ClipboardKind) -> Self {
+        match self {
+            SinkSpec::Clipboard(None) => SinkSpec::Clipboard(Some(default)),
+            other => other,
+        }
+    }
 }
 
 impl std::str::FromStr for SinkSpec {
@@ -73,13 +112,15 @@ impl std::str::FromStr for SinkSpec {
         };
         match kind {
             "file" => Ok(SinkSpec::File(rest.map(PathBuf::from))),
-            "clipboard" => {
-                if rest.is_some() {
-                    Err(format!("`clipboard` sink does not take a value: {s}"))
-                } else {
-                    Ok(SinkSpec::Clipboard)
-                }
-            }
+            "clipboard" => match rest {
+                None => Ok(SinkSpec::Clipboard(None)),
+                Some("regular") => Ok(SinkSpec::Clipboard(Some(ClipboardKind::Regular))),
+                Some("primary") => Ok(SinkSpec::Clipboard(Some(ClipboardKind::Primary))),
+                Some("both") => Ok(SinkSpec::Clipboard(Some(ClipboardKind::Both))),
+                Some(other) => Err(format!(
+                    "unknown clipboard kind `{other}` (expected `regular`, `primary`, or `both`)"
+                )),
+            },
             other => Err(format!(
                 "unknown sink `{other}` (expected `file` or `clipboard`)"
             )),
@@ -158,7 +199,21 @@ fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
     match command {
         Command::Screenshot(args) => {
             let selection = screenshot::parse_selection(&args)?;
-            let sinks = crate::daemon::sinks_to_specs(&args.to);
+            // Pre-apply `--clipboard-type` to any `--to clipboard` entries that didn't pin a
+            // kind via `=KIND` syntax. Entries that did pin one are left untouched. Entries
+            // that still carry `None` after this (because neither `--to clipboard=KIND` nor
+            // `--clipboard-type` was supplied) will fall back to the daemon's own
+            // `[clipboard].default_kind` config on the server side.
+            let resolved: Vec<SinkSpec> = match args.clipboard_type {
+                Some(kind) => args
+                    .to
+                    .iter()
+                    .cloned()
+                    .map(|s| s.resolve_clipboard_default(kind))
+                    .collect(),
+                None => args.to.clone(),
+            };
+            let sinks = crate::daemon::sinks_to_specs(&resolved);
             // CLI flag wins; the daemon side falls back to its own config-loaded default when
             // the wire field is None. Whole-seconds precision matches the UI countdown.
             let delay_secs = args.delay;
@@ -203,16 +258,49 @@ mod tests {
     #[rstest]
     #[case::file_no_path("file", SinkSpec::File(None))]
     #[case::file_with_path("file=/tmp/x.png", SinkSpec::File(Some("/tmp/x.png".into())))]
-    #[case::clipboard("clipboard", SinkSpec::Clipboard)]
+    #[case::clipboard_bare("clipboard", SinkSpec::Clipboard(None))]
+    #[case::clipboard_regular(
+        "clipboard=regular",
+        SinkSpec::Clipboard(Some(ClipboardKind::Regular))
+    )]
+    #[case::clipboard_primary(
+        "clipboard=primary",
+        SinkSpec::Clipboard(Some(ClipboardKind::Primary))
+    )]
+    #[case::clipboard_both("clipboard=both", SinkSpec::Clipboard(Some(ClipboardKind::Both)))]
     fn parses_sink_spec(#[case] input: &str, #[case] expected: SinkSpec) {
         assert_eq!(SinkSpec::from_str(input).unwrap(), expected);
     }
 
     #[rstest]
     #[case::unknown_kind("ftp")]
-    #[case::clipboard_with_value("clipboard=foo")]
+    #[case::clipboard_unknown_value("clipboard=foo")]
+    #[case::clipboard_empty_value("clipboard=")]
     fn rejects_invalid_sink_spec(#[case] input: &str) {
         assert!(SinkSpec::from_str(input).is_err());
+    }
+
+    #[test]
+    fn resolve_clipboard_default_pins_unspecified_kind() {
+        assert_eq!(
+            SinkSpec::Clipboard(None).resolve_clipboard_default(ClipboardKind::Primary),
+            SinkSpec::Clipboard(Some(ClipboardKind::Primary))
+        );
+    }
+
+    #[test]
+    fn resolve_clipboard_default_preserves_explicit_kind() {
+        assert_eq!(
+            SinkSpec::Clipboard(Some(ClipboardKind::Regular))
+                .resolve_clipboard_default(ClipboardKind::Primary),
+            SinkSpec::Clipboard(Some(ClipboardKind::Regular))
+        );
+    }
+
+    #[test]
+    fn resolve_clipboard_default_ignores_file_sinks() {
+        let f = SinkSpec::File(Some("/tmp/a.png".into()));
+        assert_eq!(f.clone().resolve_clipboard_default(ClipboardKind::Both), f);
     }
 
     #[test]

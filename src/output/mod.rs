@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use crate::capture::CapturedImage;
 use crate::cli::SinkSpec;
-use crate::config::{Config, FilenameContext, PngCompression};
+use crate::config::{FilenameContext, PngCompression};
+use crate::context::Ctx;
 
 #[async_trait]
 pub trait OutputSink: Send + Sync {
@@ -22,31 +23,37 @@ impl Outputs {
     /// Build the sink list from CLI/config specs, expanding `{output}`/`{selection}` tokens in
     /// the configured filename template against `ctx`. Callers that want per-image filenames
     /// (e.g. `--per-output`) rebuild `Outputs` once per image with the appropriate context.
+    ///
+    /// `app_ctx` is the shared application context; the only field used here is
+    /// [`Ctx::running_as_daemon`], which lets the clipboard sink choose between forking
+    /// (one-shot CLI) and staying in-process (daemon).
     pub fn from_specs(
         specs: &[SinkSpec],
-        config: &Config,
+        app_ctx: &Ctx,
         ctx: &FilenameContext<'_>,
     ) -> Result<Self> {
-        Self::from_specs_with(specs, config, ctx, false)
+        Self::from_specs_with(specs, app_ctx, ctx, false)
     }
 
-    /// Like [`Self::from_specs`] but uses [`Config::expand_filename_per_output`] which guarantees
+    /// Like [`Self::from_specs`] but uses [`crate::config::Config::expand_filename_per_output`] which guarantees
     /// the basename varies with the output name (auto-inserting `-{output}` when the user's
     /// template lacks it).
     pub fn from_specs_per_output(
         specs: &[SinkSpec],
-        config: &Config,
+        app_ctx: &Ctx,
         ctx: &FilenameContext<'_>,
     ) -> Result<Self> {
-        Self::from_specs_with(specs, config, ctx, true)
+        Self::from_specs_with(specs, app_ctx, ctx, true)
     }
 
     fn from_specs_with(
         specs: &[SinkSpec],
-        config: &Config,
+        app_ctx: &Ctx,
         ctx: &FilenameContext<'_>,
         per_output: bool,
     ) -> Result<Self> {
+        let config = &app_ctx.config;
+        let default_kind = config.clipboard.default_kind;
         let mut sinks: Vec<Box<dyn OutputSink>> = Vec::new();
         for spec in specs {
             match spec {
@@ -66,8 +73,16 @@ impl Outputs {
                     };
                     sinks.push(Box::new(file::FileSink::new(p)));
                 }
-                SinkSpec::Clipboard => {
-                    sinks.push(Box::new(clipboard::ClipboardSink::new()));
+                SinkSpec::Clipboard(kind) => {
+                    // Defence-in-depth: by the time we reach `from_specs` the kind has been
+                    // resolved by the CLI / config layer. If a `None` still slips through
+                    // (e.g. a future code path forgot to resolve it), fall back to the
+                    // config default rather than panicking.
+                    let kind = kind.unwrap_or(default_kind);
+                    sinks.push(Box::new(clipboard::ClipboardSink::new(
+                        kind,
+                        app_ctx.running_as_daemon,
+                    )));
                 }
             }
         }

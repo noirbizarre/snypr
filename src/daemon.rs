@@ -372,11 +372,17 @@ fn sinks_from_specs(specs: Vec<SinkSpec>, ctx: &Ctx) -> Vec<CliSinkSpec> {
     if specs.is_empty() {
         return ctx.config.default_sinks();
     }
+    let default_kind = ctx.config.clipboard.default_kind;
     specs
         .into_iter()
         .map(|s| match s {
             SinkSpec::File { path } => CliSinkSpec::File(path),
-            SinkSpec::Clipboard => CliSinkSpec::Clipboard,
+            SinkSpec::Clipboard { clipboard_kind } => {
+                // Apply the daemon's configured default when the wire field is missing so
+                // clients that never set `--clipboard-type` still observe the daemon's
+                // `[clipboard].default_kind`.
+                CliSinkSpec::Clipboard(Some(clipboard_kind.unwrap_or(default_kind)))
+            }
         })
         .collect()
 }
@@ -388,7 +394,9 @@ pub fn sinks_to_specs(sinks: &[CliSinkSpec]) -> Vec<SinkSpec> {
         .iter()
         .map(|s| match s {
             CliSinkSpec::File(path) => SinkSpec::File { path: path.clone() },
-            CliSinkSpec::Clipboard => SinkSpec::Clipboard,
+            CliSinkSpec::Clipboard(kind) => SinkSpec::Clipboard {
+                clipboard_kind: *kind,
+            },
         })
         .collect()
 }
@@ -421,10 +429,13 @@ mod tests {
 
     #[test]
     fn sinks_round_trip() {
+        use crate::cli::ClipboardKind;
         let cli = vec![
             CliSinkSpec::File(None),
             CliSinkSpec::File(Some("/tmp/x.png".into())),
-            CliSinkSpec::Clipboard,
+            CliSinkSpec::Clipboard(Some(ClipboardKind::Regular)),
+            CliSinkSpec::Clipboard(Some(ClipboardKind::Primary)),
+            CliSinkSpec::Clipboard(Some(ClipboardKind::Both)),
         ];
         let wire = sinks_to_specs(&cli);
         // We can't easily fake a Ctx here, so emulate the no-default fast-path manually.
@@ -432,7 +443,7 @@ mod tests {
             .into_iter()
             .map(|s| match s {
                 SinkSpec::File { path } => CliSinkSpec::File(path),
-                SinkSpec::Clipboard => CliSinkSpec::Clipboard,
+                SinkSpec::Clipboard { clipboard_kind } => CliSinkSpec::Clipboard(clipboard_kind),
             })
             .collect();
         assert_eq!(cli, back);

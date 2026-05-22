@@ -12,7 +12,8 @@ use anyhow::Result;
 
 use crate::capture::CapturedImage;
 use crate::cli::SinkSpec;
-use crate::config::{Config, FilenameContext};
+use crate::config::FilenameContext;
+use crate::context::Ctx;
 use crate::output::Outputs;
 
 /// Save action invoked when the user hits Ctrl+S / clicks Save. Returns the paths that were
@@ -24,24 +25,24 @@ pub type SaveFn = Arc<dyn Fn(&CapturedImage) -> Result<Vec<PathBuf>> + Send + Sy
 /// We capture the tokio runtime handle so the GTK thread (inside `spawn_blocking`) can
 /// `block_on` the async clipboard/file writes without spinning up a second runtime.
 pub fn sinks_save_fn(
-    config: Config,
+    app_ctx: Ctx,
     sinks: Vec<SinkSpec>,
     selection_label: &'static str,
     collected: Arc<Mutex<Vec<PathBuf>>>,
 ) -> SaveFn {
     let handle = tokio::runtime::Handle::current();
     let sinks = if sinks.is_empty() {
-        config.default_sinks()
+        app_ctx.config.default_sinks()
     } else {
         sinks
     };
     Arc::new(move |img: &CapturedImage| {
-        let png = crate::output::encode_png(img, config.output.compression)?;
+        let png = crate::output::encode_png(img, app_ctx.config.output.compression)?;
         let ctx = FilenameContext {
             output: img.source.as_ref().map(|o| o.name.as_str()),
             selection: Some(selection_label),
         };
-        let outputs = Outputs::from_specs(&sinks, &config, &ctx)?;
+        let outputs = Outputs::from_specs(&sinks, &app_ctx, &ctx)?;
         let paths = handle.block_on(outputs.write_png(&png))?;
         tracing::info!(
             bytes = png.len(),
@@ -49,7 +50,7 @@ pub fn sinks_save_fn(
             "saved annotated image"
         );
         #[cfg(feature = "notify")]
-        crate::notify::notify_success(&config, &paths, &png);
+        crate::notify::notify_success(&app_ctx.config, &paths, &png);
         if let Ok(mut g) = collected.lock() {
             g.extend(paths.iter().cloned());
         }

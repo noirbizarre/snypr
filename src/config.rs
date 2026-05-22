@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::SinkSpec;
+use crate::cli::{ClipboardKind, SinkSpec};
 
 /// Top-level configuration.
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -18,6 +18,7 @@ pub struct Config {
     pub language: Option<String>,
     pub output: OutputConfig,
     pub capture: CaptureConfig,
+    pub clipboard: ClipboardConfig,
     pub keybinds: KeybindConfig,
     pub notify: NotifyConfig,
 }
@@ -124,6 +125,17 @@ mod delay_secs_opt {
     }
 }
 
+/// Clipboard-sink defaults. Applied when `--to clipboard` is passed
+/// without a `=KIND` suffix and the global `--clipboard-type` flag is
+/// also absent. See [`crate::cli::ClipboardKind`].
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ClipboardConfig {
+    /// Default selection target for `--to clipboard`. Defaults to
+    /// [`ClipboardKind::Regular`] (the Ctrl-V clipboard).
+    pub default_kind: ClipboardKind,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KeybindConfig {
@@ -194,12 +206,16 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
-    /// Parse the configured default sinks.
+    /// Parse the configured default sinks. Clipboard entries inherit
+    /// the configured [`ClipboardConfig::default_kind`] so callers see
+    /// a fully-resolved kind.
     pub fn default_sinks(&self) -> Vec<SinkSpec> {
+        let kind = self.clipboard.default_kind;
         self.output
             .default_sinks
             .iter()
             .filter_map(|s| s.parse::<SinkSpec>().ok())
+            .map(|s| s.resolve_clipboard_default(kind))
             .collect()
     }
 
@@ -279,7 +295,10 @@ mod tests {
         assert_eq!(cfg.output.filename_template, "shot_{date}_{output}.png");
         assert_eq!(
             cfg.default_sinks(),
-            vec![SinkSpec::File(None), SinkSpec::Clipboard]
+            vec![
+                SinkSpec::File(None),
+                SinkSpec::Clipboard(Some(ClipboardKind::Regular))
+            ]
         );
     }
 
@@ -368,6 +387,39 @@ mod tests {
         let err = toml::from_str::<Config>(toml).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("integer") || msg.contains("expected"), "{msg}");
+    }
+
+    #[test]
+    fn clipboard_defaults_to_regular() {
+        let cfg = Config::default();
+        assert_eq!(cfg.clipboard.default_kind, ClipboardKind::Regular);
+    }
+
+    #[test]
+    fn clipboard_default_kind_propagates_to_default_sinks() {
+        let toml = r#"
+            [clipboard]
+            default_kind = "primary"
+
+            [output]
+            default_sinks = ["clipboard"]
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.clipboard.default_kind, ClipboardKind::Primary);
+        assert_eq!(
+            cfg.default_sinks(),
+            vec![SinkSpec::Clipboard(Some(ClipboardKind::Primary))]
+        );
+    }
+
+    #[test]
+    fn clipboard_section_round_trips() {
+        let toml = r#"
+            [clipboard]
+            default_kind = "both"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.clipboard.default_kind, ClipboardKind::Both);
     }
 
     #[test]

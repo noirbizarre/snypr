@@ -73,7 +73,9 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
 No external CLI helpers are invoked: `hyprctl`, `grim`, `slurp`, and
 `wl-copy` are **not** required. Hyprland IPC is spoken directly over the
 command socket, Wayland capture goes through `zwlr_screencopy_manager_v1`,
-and clipboard writes use `wl-clipboard-rs`.
+and clipboard writes use `wl-clipboard-rs`. One-shot invocations briefly fork a
+detached child to keep serving the Wayland selection after the CLI exits — the
+daemon publishes in-process and skips that fork.
 
 ## Install
 
@@ -119,6 +121,10 @@ hyprsnap screenshot --full --per-output
 
 # Specific output by name, copied to the clipboard.
 hyprsnap screenshot --output DP-1 --to clipboard
+
+# Send the screenshot to both the regular clipboard and the X11-style primary
+# selection (middle-click paste). Per-sink form: --to clipboard=primary.
+hyprsnap screenshot --full --to clipboard --clipboard-type both
 
 # Focused window, queried over Hyprland IPC.
 hyprsnap screenshot --focused
@@ -281,6 +287,12 @@ cursor = false
 # Pre-capture delay in whole seconds. `0` (or omitted) means no delay. The CLI's
 # `--delay SECONDS` flag overrides this value.
 delay  = 0
+
+[clipboard]
+# Default selection used by bare `--to clipboard` sinks. One of `regular`
+# (Ctrl-V paste, default), `primary` (middle-click paste), or `both`. Overridden
+# per-invocation by `--clipboard-type`, and per-sink by `--to clipboard=KIND`.
+default_kind = "regular"
 
 [keybinds.selector]
 cancel  = "Escape"

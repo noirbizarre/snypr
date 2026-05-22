@@ -32,7 +32,7 @@ use crate::annotate::{Document, DocumentBase, ToolKind};
 use crate::capture::region::{Rect, slice_pixels};
 use crate::capture::{CapturedImage, Capturer};
 use crate::cli::SinkSpec;
-use crate::config::{Config, FilenameContext};
+use crate::config::FilenameContext;
 use crate::context::Ctx;
 use crate::output::Outputs;
 use crate::ui::canvas::AnnotationCanvas;
@@ -248,7 +248,7 @@ fn build_overlays(
             let draw_save = DrawSaveState {
                 sinks,
                 cursor,
-                config: ctx.config.clone(),
+                app_ctx: ctx.clone(),
                 runtime: tokio::runtime::Handle::current(),
                 collected: collected.clone(),
             };
@@ -261,7 +261,7 @@ fn build_overlays(
         } => {
             // Save closure is built once, shared across every monitor's toolbar. The
             // `selection_label` populates the `{selection}` token in the filename template.
-            let save = sinks_save_fn(ctx.config.clone(), sinks, "edit", collected);
+            let save = sinks_save_fn(ctx.clone(), sinks, "edit", collected);
             (
                 false,
                 Some(EditState {
@@ -328,12 +328,13 @@ struct EditState {
 
 /// State that's only present in Draw mode (with a save target). Carries everything
 /// `run_draw_save` needs to drive a Save action: the sinks list, the cursor default for the
-/// zone selector, the config (for filename templating + PNG compression + default sinks
-/// fallback), and the path-collection vec the outer `overlay::run` returns.
+/// zone selector, the shared application context (for filename templating + PNG
+/// compression + default sinks fallback + the daemon-mode flag), and the path-collection
+/// vec the outer `overlay::run` returns.
 struct DrawSaveState {
     sinks: Vec<SinkSpec>,
     cursor: bool,
-    config: Config,
+    app_ctx: Ctx,
     /// Captured tokio runtime handle. The Save flow needs to `await` tokio futures
     /// (`WlrCapturer::capture`, `Outputs::write_png`) from inside a `glib::MainContext`
     /// task; we offload that work to a `tokio::spawn`ed task whose `JoinHandle` we then
@@ -1033,11 +1034,11 @@ async fn run_draw_save(
     let selection = outcome.selection.clone();
     let cursor = outcome.cursor;
     let sinks = if draw_save.sinks.is_empty() {
-        draw_save.config.default_sinks()
+        draw_save.app_ctx.config.default_sinks()
     } else {
         draw_save.sinks.clone()
     };
-    let config = draw_save.config.clone();
+    let app_ctx = draw_save.app_ctx.clone();
     let collected = draw_save.collected.clone();
     let label = crate::cli::screenshot::selection_label(&selection);
 
@@ -1048,12 +1049,12 @@ async fn run_draw_save(
             .await
             .map_err(|e| anyhow!("capturing {selection:?}: {e}"))?;
         let stitched = crate::capture::region::stitch(&images, &selection)?;
-        let png = crate::output::encode_png(&stitched, config.output.compression)?;
+        let png = crate::output::encode_png(&stitched, app_ctx.config.output.compression)?;
         let ctx_fname = FilenameContext {
             output: None,
             selection: Some(label),
         };
-        let outputs = Outputs::from_specs(&sinks, &config, &ctx_fname)?;
+        let outputs = Outputs::from_specs(&sinks, &app_ctx, &ctx_fname)?;
         let paths = outputs.write_png(&png).await?;
         anyhow::Ok(paths)
     });

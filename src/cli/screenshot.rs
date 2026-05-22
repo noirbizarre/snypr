@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result, bail};
 use clap::Args as ClapArgs;
 
-use super::SinkSpec;
+use super::{ClipboardKind, SinkSpec};
 use crate::capture::{Capturer, Selection, wlr::WlrCapturer};
 use crate::config::Config;
 use crate::context::Context;
@@ -43,6 +43,13 @@ pub struct Args {
     #[arg(long = "to", value_name = "SINK")]
     pub to: Vec<SinkSpec>,
 
+    /// Default selection target for `--to clipboard` when no `=KIND`
+    /// suffix is given on the entry itself. Precedence:
+    /// `--to clipboard=KIND` > `--clipboard-type` > `[clipboard].default_kind`
+    /// config > `regular`.
+    #[arg(long, value_name = "KIND", value_enum)]
+    pub clipboard_type: Option<ClipboardKind>,
+
     /// Delay before capture, in whole seconds (e.g. `--delay 3`). `0` is the same as
     /// omitting the flag. The UI countdown only operates on integer seconds, so the
     /// CLI / config / IPC representation all match.
@@ -63,10 +70,15 @@ pub async fn run(args: Args) -> Result<()> {
     let ctx = Context::new(config).await?;
 
     let selection = parse_selection(&args)?;
+    let kind = effective_clipboard_kind(args.clipboard_type, &ctx.config);
     let sinks = if args.to.is_empty() {
         ctx.config.default_sinks()
     } else {
-        args.to.clone()
+        args.to
+            .iter()
+            .cloned()
+            .map(|s| s.resolve_clipboard_default(kind))
+            .collect()
     };
 
     // Effective delay: CLI flag wins, otherwise fall back to the `[capture].delay` config.
@@ -85,6 +97,15 @@ pub async fn run(args: Args) -> Result<()> {
 /// `None` so the sleep is a true no-op rather than a vacuous zero-length sleep round-trip.
 pub fn effective_delay(cli: Option<u32>, config: Option<u32>) -> Option<u32> {
     cli.or(config).filter(|n| *n > 0)
+}
+
+/// Resolve the effective default [`ClipboardKind`] using the documented precedence:
+/// CLI `--clipboard-type` flag wins, otherwise fall back to
+/// `[clipboard].default_kind` from the config. The per-entry
+/// `--to clipboard=KIND` syntax overrides this on a sink-by-sink basis
+/// (handled separately in [`SinkSpec::resolve_clipboard_default`]).
+pub fn effective_clipboard_kind(cli: Option<ClipboardKind>, config: &Config) -> ClipboardKind {
+    cli.unwrap_or(config.clipboard.default_kind)
 }
 /// Headless core of the screenshot pipeline used by both the CLI (`run`) and the daemon's IPC
 /// handler. Resolves compositor-aware selections, captures, encodes, and writes — returning the
@@ -164,7 +185,7 @@ pub async fn execute(
                 output: Some(name),
                 selection: Some("output"),
             };
-            let outputs = Outputs::from_specs_per_output(&sinks, &ctx.config, &ctx_fname)?;
+            let outputs = Outputs::from_specs_per_output(&sinks, &ctx, &ctx_fname)?;
             let png = crate::output::encode_png(img, ctx.config.output.compression)?;
             let paths = outputs.write_png(&png).await?;
             notify_written(&ctx.config, &paths, &png);
@@ -214,7 +235,7 @@ pub async fn execute(
         output: None,
         selection: Some(selection_label(&selection)),
     };
-    let outputs = Outputs::from_specs(&sinks, &ctx.config, &ctx_fname)?;
+    let outputs = Outputs::from_specs(&sinks, &ctx, &ctx_fname)?;
     let png = crate::output::encode_png(&stitched, ctx.config.output.compression)?;
     let paths = outputs.write_png(&png).await?;
     notify_written(&ctx.config, &paths, &png);
