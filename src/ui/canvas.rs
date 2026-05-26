@@ -19,7 +19,7 @@ use gtk4::pango;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 
-use crate::annotate::render::{arrowhead, drag_rect};
+use crate::annotate::render::{arrowhead, drag_rect, drag_square};
 use crate::annotate::tools::arrow::ArrowTool;
 use crate::annotate::tools::blur::BlurTool;
 use crate::annotate::tools::ellipse::EllipseTool;
@@ -634,7 +634,11 @@ fn snapshot_blur(snap: &gtk4::Snapshot, t: &BlurTool, base: Option<&DocumentBase
 fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke, doc_size: (u32, u32)) {
     match p.kind {
         ToolKind::Rect => {
-            let r = drag_rect(p.from, p.to);
+            let r = if p.constrain {
+                drag_square(p.from, p.to)
+            } else {
+                drag_rect(p.from, p.to)
+            };
             // Drag previews always use a marquee-style dash so the user can distinguish a
             // live drag from a committed layer regardless of the tool's chosen style.
             snap.append_stroke(
@@ -644,7 +648,11 @@ fn snapshot_pending(snap: &gtk4::Snapshot, p: &PendingStroke, doc_size: (u32, u3
             );
         }
         ToolKind::Ellipse => {
-            let r = drag_rect(p.from, p.to);
+            let r = if p.constrain {
+                drag_square(p.from, p.to)
+            } else {
+                drag_rect(p.from, p.to)
+            };
             snap.append_stroke(
                 &ellipse_path(&r),
                 &dashed_stroke(2.0, &[6.0, 4.0]),
@@ -773,6 +781,12 @@ pub struct PendingStroke {
     /// (a.k.a. reverse blur / focus mode). Sampled once and locked for the stroke so
     /// the preview can't flicker if the user releases SHIFT mid-drag.
     invert: bool,
+    /// Refreshed on every drag-update from the live SHIFT modifier state. Only the
+    /// Rect/Ellipse tools consult it: when set, the preview and committed bounds use
+    /// [`drag_square`] instead of [`drag_rect`] so the user gets a perfect square /
+    /// circle. Unlike `invert`, this is *not* latched at drag-begin — the user can
+    /// press and release SHIFT freely during the drag and the preview tracks it.
+    constrain: bool,
 }
 
 /// An in-progress WYSIWYG text edit. Lives in `imp.pending_text` while the user types;
@@ -952,6 +966,17 @@ mod imp {
     }
 }
 
+/// True when SHIFT is held during the in-flight gesture event. Uses
+/// [`gtk4::EventController::current_event_state`] which is cheaper than the
+/// `Display → Seat → Keyboard` roundtrip and reflects the modifier state at
+/// the moment of the dispatched event — perfect for live-tracking SHIFT
+/// during a drag.
+fn shift_held(g: &gtk4::GestureDrag) -> bool {
+    use gtk4::prelude::EventControllerExt;
+    g.current_event_state()
+        .contains(gdk4::ModifierType::SHIFT_MASK)
+}
+
 fn install_drag(canvas: &AnnotationCanvas) {
     let drag = gtk4::GestureDrag::new();
 
@@ -999,6 +1024,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                 color,
                 style,
                 invert,
+                constrain: false,
             }));
             c.queue_draw();
         });
@@ -1016,6 +1042,12 @@ fn install_drag(canvas: &AnnotationCanvas) {
                 if matches!(stroke.kind, ToolKind::Freehand) {
                     stroke.points.push(stroke.to);
                 }
+                // Rect/Ellipse honour SHIFT live: refresh on every update so the
+                // preview snaps/unsnaps to a square as the user presses/releases the
+                // modifier mid-drag. Other tools skip the lookup.
+                if matches!(stroke.kind, ToolKind::Rect | ToolKind::Ellipse) {
+                    stroke.constrain = shift_held(g);
+                }
                 drop(p);
                 c.queue_draw();
             }
@@ -1031,13 +1063,23 @@ fn install_drag(canvas: &AnnotationCanvas) {
             let stroke = c.imp().pending.borrow_mut().take();
             let Some(mut stroke) = stroke else { return };
             stroke.to = (sx + dx, sy + dy);
+            // Sample SHIFT one last time so a press right before mouse-up takes effect.
+            // Only Rect/Ellipse consume this; the existing `invert` field is locked at
+            // drag-begin and serves a different (Blur-specific) purpose.
+            if matches!(stroke.kind, ToolKind::Rect | ToolKind::Ellipse) {
+                stroke.constrain = shift_held(g);
+            }
             let Some(doc_rc) = c.imp().doc.borrow().clone() else {
                 return;
             };
             let mut doc = doc_rc.borrow_mut();
             match stroke.kind {
                 ToolKind::Rect => {
-                    let r = drag_rect(stroke.from, stroke.to);
+                    let r = if stroke.constrain {
+                        drag_square(stroke.from, stroke.to)
+                    } else {
+                        drag_rect(stroke.from, stroke.to)
+                    };
                     if r.w >= 2 && r.h >= 2 {
                         let mut t = RectTool::new(r);
                         if let Some(color) = c.tool_color(ToolKind::Rect) {
@@ -1048,7 +1090,11 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     }
                 }
                 ToolKind::Ellipse => {
-                    let r = drag_rect(stroke.from, stroke.to);
+                    let r = if stroke.constrain {
+                        drag_square(stroke.from, stroke.to)
+                    } else {
+                        drag_rect(stroke.from, stroke.to)
+                    };
                     if r.w >= 2 && r.h >= 2 {
                         let mut t = EllipseTool::new(r);
                         if let Some(color) = c.tool_color(ToolKind::Ellipse) {
