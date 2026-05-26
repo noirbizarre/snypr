@@ -209,9 +209,16 @@ pub struct UiConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SelectorStyleConfig {
-    /// Stroke color for the region rectangle, hovered/selected screen, and
-    /// hovered/selected window outlines. Default: `#FFFFFFF2`.
+    /// Stroke color for the active / selected zone: the region rectangle,
+    /// the currently selected screen (Screen mode), and the currently selected
+    /// window (Window mode). Default: `#FFFFFFF2`.
     pub outline: Color,
+    /// Stroke color for the *hovered* (not yet committed) zone outline in
+    /// Screen and Window mode. Drawn with a thinner stroke than [`Self::outline`]
+    /// so users can distinguish "about to pick" from "already picked".
+    /// Defaults to the same value as `outline` (`#FFFFFFF2`) so existing
+    /// configs render identically until this field is overridden.
+    pub outline_hover: Color,
     /// Fill color for the region size legend (drawn inside the region rect)
     /// and the top-of-monitor hint text. Default: `#FFFFFFE6`.
     pub label: Color,
@@ -237,6 +244,7 @@ impl Default for SelectorStyleConfig {
     fn default() -> Self {
         Self {
             outline: Color::from_rgba_f32(1.0, 1.0, 1.0, 0.95),
+            outline_hover: Color::from_rgba_f32(1.0, 1.0, 1.0, 0.95),
             label: Color::from_rgba_f32(1.0, 1.0, 1.0, 0.9),
             dim_strong: Color::from_rgba_f32(0.0, 0.0, 0.0, 0.55),
             dim_full: Color::from_rgba_f32(0.0, 0.0, 0.0, 0.45),
@@ -767,12 +775,28 @@ mod tests {
         let s = SelectorStyleConfig::default();
         // Values mirror the literals previously hardcoded in src/ui/selector.rs.
         assert_eq!(s.outline, Color::from_rgba_f32(1.0, 1.0, 1.0, 0.95));
+        // `outline_hover` opts into the same default as `outline` so configs
+        // that pre-date the field render identically.
+        assert_eq!(s.outline_hover, s.outline);
         assert_eq!(s.label, Color::from_rgba_f32(1.0, 1.0, 1.0, 0.9));
         assert_eq!(s.dim_strong, Color::from_rgba_f32(0.0, 0.0, 0.0, 0.55));
         assert_eq!(s.dim_full, Color::from_rgba_f32(0.0, 0.0, 0.0, 0.45));
         assert_eq!(s.dim_light, Color::from_rgba_f32(0.0, 0.0, 0.0, 0.25));
         assert_eq!(s.countdown_fg, Color::from_rgba_f32(1.0, 1.0, 1.0, 0.95));
         assert_eq!(s.countdown_bg, Color::from_rgba_f32(0.0, 0.0, 0.0, 0.55));
+    }
+
+    #[test]
+    fn outline_hover_falls_back_to_default_when_omitted() {
+        let toml = r##"
+            [ui.selector]
+            outline = "#FF00FFFF"
+        "##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            cfg.ui.selector.outline_hover,
+            SelectorStyleConfig::default().outline_hover
+        );
     }
 
     #[test]

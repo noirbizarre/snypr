@@ -1332,6 +1332,7 @@ mod imp {
             let dim_full = self.style.borrow().dim_full.to_rgba();
             let dim_light = self.style.borrow().dim_light.to_rgba();
             let outline = self.style.borrow().outline.to_rgba();
+            let outline_hover = self.style.borrow().outline_hover.to_rgba();
             let label_color = self.style.borrow().label.to_rgba();
 
             match state.mode {
@@ -1406,7 +1407,8 @@ mod imp {
                         let pb = gtk4::gsk::PathBuilder::new();
                         pb.add_rect(&graphene::Rect::new(1.5, 1.5, w - 3.0, h - 3.0));
                         let stroke = gtk4::gsk::Stroke::new(if selected { 4.0 } else { 2.0 });
-                        snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
+                        let color = if selected { &outline } else { &outline_hover };
+                        snapshot.append_stroke(&pb.to_path(), &stroke, color);
                     }
                     let hint = if state.selected_monitor.is_some() {
                         fl!("selector-hint-screen-selected")
@@ -1433,7 +1435,7 @@ mod imp {
                         let pb = gtk4::gsk::PathBuilder::new();
                         pb.add_rect(&graphene::Rect::new(rx + 0.5, ry + 0.5, rw - 1.0, rh - 1.0));
                         let stroke = gtk4::gsk::Stroke::new(2.0);
-                        snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
+                        snapshot.append_stroke(&pb.to_path(), &stroke, &outline_hover);
                     }
                     if let Some(picked) = &state.selected_window
                         && let Some((rx, ry, rw, rh)) =

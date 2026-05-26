@@ -325,7 +325,8 @@ timeout_ms = 6000
 # Chrome colors for the region/full/screen/window selector and the standalone
 # pre-capture countdown window. Hex RGBA strings: "#RRGGBB" (fully opaque) or
 # "#RRGGBBAA". Every field is optional; omitted fields keep their defaults.
-outline      = "#FFFFFFF2"  # zone/region/window/screen border stroke
+outline      = "#FFFFFFF2"  # active/selected zone (region rect, selected screen/window)
+outline_hover = "#FFFFFFF2" # hovered (not yet committed) screen/window outline
 label        = "#FFFFFFE6"  # region size legend + top-of-monitor hint text
 dim_strong   = "#0000008C"  # heavy veil outside selection / non-selected screens
 dim_full     = "#00000073"  # veil in region mode before a rectangle is drawn
