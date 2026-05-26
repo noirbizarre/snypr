@@ -22,6 +22,7 @@ pub struct Config {
     pub keybinds: KeybindConfig,
     pub notify: NotifyConfig,
     pub ui: UiConfig,
+    pub annotate: AnnotateConfig,
 }
 
 /// Desktop-notification preferences. Notifications are best-effort: failures to talk to the
@@ -102,6 +103,29 @@ pub struct CaptureConfig {
     /// surfaces integer seconds, so the config / CLI representation matches.
     #[serde(default, with = "delay_secs_opt")]
     pub delay: Option<u32>,
+    /// Mode button pre-selected when the interactive selector opens. Defaults to
+    /// `screen` (per-monitor mode), matching the historical hardcoded behavior. The
+    /// runtime mode buttons still let the user switch freely; this only affects the
+    /// initial state.
+    pub initial_mode: InitialMode,
+}
+
+/// Pre-selected mode button for the interactive selector. Mirrors
+/// [`crate::ui::toolbar::ModeKind`] but lives in the config layer so that
+/// `serde` does not bleed into the GTK-facing toolbar module. Convert with
+/// `From<InitialMode> for ModeKind` at the boundary.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InitialMode {
+    /// All monitors captured at once.
+    Full,
+    /// Focused monitor highlighted (historical default).
+    #[default]
+    Screen,
+    /// Click-to-pick a window from the Hyprland client list.
+    Window,
+    /// Drag-to-pick a rectangle.
+    Region,
 }
 
 /// Serde adapter that collapses `Some(0)` to `None` on the way in so a zero-second
@@ -248,6 +272,18 @@ impl Color {
         }
     }
 
+    /// Convert to a `[f32; 4]` array (RGBA channels in the `[0.0, 1.0]` range).
+    /// Used by the annotation canvas, which stores tool colors in this format
+    /// for direct consumption by GSK render nodes.
+    pub fn to_f32_array(self) -> [f32; 4] {
+        [
+            self.r as f32 / 255.0,
+            self.g as f32 / 255.0,
+            self.b as f32 / 255.0,
+            self.a as f32 / 255.0,
+        ]
+    }
+
     /// Convert to a GDK `RGBA` for use with GSK snapshot draws.
     #[cfg(feature = "ui")]
     pub fn to_rgba(self) -> gtk4::gdk::RGBA {
@@ -336,6 +372,62 @@ impl<'de> Deserialize<'de> for Color {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let s = String::deserialize(de)?;
         Color::parse_hex(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Annotation-tool defaults applied when a fresh canvas is created.
+///
+/// Only the `colors` table is exposed for now; future per-tool defaults
+/// (font sizes, stroke styles, …) can grow next to it without breaking
+/// the namespace.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AnnotateConfig {
+    /// Per-tool default stroke / fill colors. See [`AnnotateColors`].
+    pub colors: AnnotateColors,
+}
+
+/// Initial color picked by each annotation tool when the editor / draw
+/// overlay opens. Each field is an RGBA hex string in TOML (`"#RRGGBB"` or
+/// `"#RRGGBBAA"`). Defaults match the historical hardcoded values in
+/// `src/ui/canvas.rs::AnnotationCanvas::default`.
+///
+/// `Blur`, `Crop`, and `Redact` are intentionally absent: those tools have
+/// no user-controllable color (the toolbar color picker disables itself
+/// for them).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AnnotateColors {
+    /// Rectangle outline color. Default: `#FF0000` (opaque red).
+    pub rect: Color,
+    /// Ellipse outline color. Default: `#FF0000`.
+    pub ellipse: Color,
+    /// Arrow stroke + head fill color. Default: `#FF0000`.
+    pub arrow: Color,
+    /// Straight-line stroke color. Default: `#FF0000`.
+    pub line: Color,
+    /// Freehand stroke color. Default: `#FF0000`.
+    pub freehand: Color,
+    /// Highlight fill color. Default: `#FFFF0059` (translucent yellow).
+    pub highlight: Color,
+    /// Number badge background fill. Default: `#E61A1A` (dark red).
+    pub number: Color,
+    /// Text foreground color. Default: `#FFF333` (warm yellow).
+    pub text: Color,
+}
+
+impl Default for AnnotateColors {
+    fn default() -> Self {
+        Self {
+            rect: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
+            ellipse: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
+            arrow: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
+            line: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
+            freehand: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
+            highlight: Color::from_rgba_f32(1.0, 1.0, 0.0, 0.35),
+            number: Color::from_rgba_f32(0.9, 0.1, 0.1, 1.0),
+            text: Color::from_rgba_f32(1.0, 0.95, 0.2, 1.0),
+        }
     }
 }
 
@@ -740,5 +832,116 @@ mod tests {
         let text = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.ui, cfg.ui);
+    }
+
+    #[test]
+    fn initial_mode_defaults_to_screen() {
+        let cfg = Config::default();
+        assert_eq!(cfg.capture.initial_mode, InitialMode::Screen);
+    }
+
+    #[test]
+    fn initial_mode_parses_kebab_case_variants() {
+        for (raw, expected) in [
+            ("full", InitialMode::Full),
+            ("screen", InitialMode::Screen),
+            ("window", InitialMode::Window),
+            ("region", InitialMode::Region),
+        ] {
+            let toml = format!("[capture]\ninitial_mode = \"{raw}\"\n");
+            let cfg: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(cfg.capture.initial_mode, expected, "raw = {raw:?}");
+        }
+    }
+
+    #[test]
+    fn initial_mode_rejects_unknown_value() {
+        let toml = r#"
+            [capture]
+            initial_mode = "wat"
+        "#;
+        let err = toml::from_str::<Config>(toml).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant") || msg.contains("expected"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn annotate_colors_defaults_match_canvas_literals() {
+        // Values mirror the literals previously hardcoded in
+        // `src/ui/canvas.rs::AnnotationCanvas::default`.
+        let c = AnnotateColors::default();
+        assert_eq!(c.rect.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(c.ellipse.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(c.arrow.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(c.line.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(c.freehand.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
+        // Highlight alpha rounds to 0x59 (=89) at u8 precision (0.35 * 255 + 0.5 = 89.75).
+        assert_eq!(c.highlight.r, 0xFF);
+        assert_eq!(c.highlight.g, 0xFF);
+        assert_eq!(c.highlight.b, 0x00);
+        assert_eq!(c.highlight.a, 0x59);
+        assert_eq!(c.number.r, 0xE6);
+        assert_eq!(c.number.g, 0x1A);
+        assert_eq!(c.number.b, 0x1A);
+        assert_eq!(c.number.a, 0xFF);
+        assert_eq!(c.text.a, 0xFF);
+    }
+
+    #[test]
+    fn annotate_section_parses_partial_override() {
+        let toml = r##"
+            [annotate.colors]
+            rect      = "#00FF00"
+            highlight = "#00FFFF80"
+        "##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            cfg.annotate.colors.rect,
+            Color {
+                r: 0x00,
+                g: 0xFF,
+                b: 0x00,
+                a: 0xFF
+            }
+        );
+        assert_eq!(
+            cfg.annotate.colors.highlight,
+            Color {
+                r: 0x00,
+                g: 0xFF,
+                b: 0xFF,
+                a: 0x80
+            }
+        );
+        // Untouched fields keep their defaults.
+        assert_eq!(cfg.annotate.colors.text, AnnotateColors::default().text);
+    }
+
+    #[test]
+    fn annotate_section_round_trips_via_toml() {
+        let mut cfg = Config::default();
+        cfg.annotate.colors.arrow = Color {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56,
+            a: 0xFF,
+        };
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.annotate, cfg.annotate);
+    }
+
+    #[test]
+    fn annotate_rejects_malformed_color() {
+        let toml = r##"
+            [annotate.colors]
+            rect = "tomato"
+        "##;
+        let err = toml::from_str::<Config>(toml).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("must start with '#'"), "{msg}");
     }
 }

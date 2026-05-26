@@ -60,6 +60,17 @@ pub enum ModeKind {
     Region,
 }
 
+impl From<crate::config::InitialMode> for ModeKind {
+    fn from(value: crate::config::InitialMode) -> Self {
+        match value {
+            crate::config::InitialMode::Full => ModeKind::Full,
+            crate::config::InitialMode::Screen => ModeKind::Screen,
+            crate::config::InitialMode::Window => ModeKind::Window,
+            crate::config::InitialMode::Region => ModeKind::Region,
+        }
+    }
+}
+
 /// Description of a single tool button. Static so the same definition can be shared between
 /// editor and overlay specs.
 #[derive(Copy, Clone, Debug)]
@@ -1716,6 +1727,17 @@ mod tests {
     #[test]
     fn mode_kind_default_is_screen() {
         assert_eq!(ModeKind::default(), ModeKind::Screen);
+    }
+
+    #[test]
+    fn mode_kind_from_initial_mode_maps_all_variants() {
+        use crate::config::InitialMode;
+        assert_eq!(ModeKind::from(InitialMode::Full), ModeKind::Full);
+        assert_eq!(ModeKind::from(InitialMode::Screen), ModeKind::Screen);
+        assert_eq!(ModeKind::from(InitialMode::Window), ModeKind::Window);
+        assert_eq!(ModeKind::from(InitialMode::Region), ModeKind::Region);
+        // Defaults must agree so an absent config key preserves historical behavior.
+        assert_eq!(ModeKind::from(InitialMode::default()), ModeKind::default());
     }
 
     #[test]

@@ -131,7 +131,13 @@ sample in the project README. Filename template tokens: \fB{ts}\fR, \fB{date}\fR
 \fB{time}\fR, \fB{output}\fR, \fB{selection}\fR. The \fB[ui.selector]\fR table
 overrides the selector chrome colors (\fIoutline\fR, \fIlabel\fR, \fIdim_strong\fR,
 \fIdim_full\fR, \fIdim_light\fR, \fIcountdown_fg\fR, \fIcountdown_bg\fR) as
-\fB#RRGGBB\fR or \fB#RRGGBBAA\fR hex strings.
+\fB#RRGGBB\fR or \fB#RRGGBBAA\fR hex strings. The \fB[capture]\fR table accepts
+\fIinitial_mode\fR (\fBfull\fR / \fBscreen\fR / \fBwindow\fR / \fBregion\fR; default
+\fBscreen\fR) to pre-select a mode button in the interactive selector. The
+\fB[annotate.colors]\fR table sets the default color of each annotation tool
+(\fIrect\fR, \fIellipse\fR, \fIarrow\fR, \fIline\fR, \fIfreehand\fR, \fIhighlight\fR,
+\fInumber\fR, \fItext\fR) as \fB#RRGGBB\fR or \fB#RRGGBBAA\fR hex strings; the
+toolbar color picker still lets the user change colors at runtime.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/hyprsnap/config.toml

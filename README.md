@@ -287,6 +287,11 @@ cursor = false
 # Pre-capture delay in whole seconds. `0` (or omitted) means no delay. The CLI's
 # `--delay SECONDS` flag overrides this value.
 delay  = 0
+# Mode button pre-selected when the interactive selector opens. One of
+# `full` (all monitors), `screen` (focused monitor, default), `window`
+# (click-to-pick), or `region` (drag-to-pick). The selector's mode buttons
+# still let the user switch freely; this only seeds the initial state.
+initial_mode = "screen"
 
 [clipboard]
 # Default selection used by bare `--to clipboard` sinks. One of `regular`
@@ -327,6 +332,21 @@ dim_full     = "#00000073"  # veil in region mode before a rectangle is drawn
 dim_light    = "#00000040"  # full mode + hovered/selected screen
 countdown_fg = "#FFFFFFF2"  # pre-capture countdown numeral fill
 countdown_bg = "#0000008C"  # standalone countdown window background
+
+[annotate.colors]
+# Default color picked by each annotation tool when the editor / draw overlay
+# opens. Hex RGBA strings: "#RRGGBB" (fully opaque) or "#RRGGBBAA". Every field
+# is optional; omitted fields keep their defaults. The toolbar's color picker
+# still lets the user change colors at runtime. `Blur`, `Crop`, and `Redact`
+# are not listed because their appearance is hardcoded.
+rect      = "#FF0000"    # rectangle outline
+ellipse   = "#FF0000"    # ellipse outline
+arrow     = "#FF0000"    # arrow stroke + head fill
+line      = "#FF0000"    # straight-line stroke
+freehand  = "#FF0000"    # freehand stroke
+highlight = "#FFFF0059"  # translucent yellow fill
+number    = "#E61A1A"    # number badge background (text stays white)
+text      = "#FFF333"    # text foreground
 ```
 
 Template tokens: `{ts}`, `{date}`, `{time}`, `{output}`, `{selection}`.

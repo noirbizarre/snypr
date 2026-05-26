@@ -290,6 +290,7 @@ fn build_overlays(
         edit: edit.map(Rc::new),
         draw_save,
         blur_capture_in_flight: Rc::new(Cell::new(false)),
+        annotate_colors: Rc::new(ctx.config.annotate.colors.clone()),
     };
 
     let mut windows = Vec::with_capacity(n as usize);
@@ -359,6 +360,10 @@ struct Shared {
     /// `true` while the lazy Draw-mode Blur desktop capture is in flight. Prevents the user
     /// from re-triggering the capture by tapping Blur again before the first capture lands.
     blur_capture_in_flight: Rc<Cell<bool>>,
+    /// Per-tool default colors applied to every freshly-constructed
+    /// [`AnnotationCanvas`] in [`spawn_monitor_overlay`]. Cloned from
+    /// `ctx.config.annotate.colors` in [`build_overlays`].
+    annotate_colors: Rc<crate::config::AnnotateColors>,
 }
 
 /// Build (or skip) one overlay window for a monitor. Returns `Some(window)` when a window
@@ -424,6 +429,7 @@ fn spawn_monitor_overlay(
     window.set_default_size(mon_w, mon_h);
 
     let canvas = AnnotationCanvas::new();
+    canvas.apply_color_defaults(&shared.annotate_colors);
     if let (Some(edit), Some(slice)) = (shared.edit.as_ref(), slice) {
         // Slice the unified base into this monitor's portion. The canvas widget is sized to
         // the monitor's full logical rect (so layer-shell anchoring lines up); inside the
@@ -1010,6 +1016,7 @@ async fn run_draw_save(
         std::time::Duration::ZERO,
         false,
         draw_save.app_ctx.config.ui.selector.clone(),
+        draw_save.app_ctx.config.capture.initial_mode.into(),
     )
     .await
     {

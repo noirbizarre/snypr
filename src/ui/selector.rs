@@ -94,6 +94,7 @@ pub async fn pick_region(
     let focused_monitor = fetch_focused_monitor_or_log().await;
     let focused_window = fetch_active_window_or_log().await;
     let style = ctx.config.ui.selector.clone();
+    let initial_mode: ModeKind = ctx.config.capture.initial_mode.into();
     tokio::task::spawn_blocking(move || {
         run_gtk(
             tx,
@@ -104,6 +105,7 @@ pub async fn pick_region(
             focused_window,
             allow_annotate,
             style,
+            initial_mode,
         )
     })
     .await
@@ -138,6 +140,7 @@ pub async fn pick_region_in_app(
     initial_delay: std::time::Duration,
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
+    initial_mode: ModeKind,
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let tx: Sender = Arc::new(Mutex::new(Some(tx)));
@@ -159,6 +162,7 @@ pub async fn pick_region_in_app(
         focused_window,
         allow_annotate,
         style,
+        initial_mode,
     ) {
         send_once(&tx, Err(err));
     }
@@ -367,6 +371,7 @@ fn run_gtk(
     focused_window: Option<hypr::ActiveWindow>,
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
+    initial_mode: ModeKind,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
@@ -400,6 +405,7 @@ fn run_gtk(
                 focused_window_snapshot,
                 allow_annotate,
                 (*style).clone(),
+                initial_mode,
             ) {
                 send_once(&tx, Err(err));
                 app.quit();
@@ -428,6 +434,7 @@ fn build_overlays(
     focused_window: Option<hypr::ActiveWindow>,
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
+    initial_mode: ModeKind,
 ) -> Result<()> {
     crate::ui::style::install();
 
@@ -479,6 +486,7 @@ fn build_overlays(
             delay: initial_delay,
             selected_monitor,
             selected_window,
+            mode: initial_mode,
             ..SharedSelection::default()
         })),
         finalised: Rc::new(RefCell::new(false)),
@@ -491,6 +499,7 @@ fn build_overlays(
         countdown_source: Rc::new(RefCell::new(None)),
         initial_cursor,
         initial_delay,
+        initial_mode,
         allow_annotate,
         clients: Rc::new(RefCell::new(clients)),
     };
@@ -596,7 +605,7 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
         show_delay_spinner: true,
         show_capture: true,
         capture_shift_annotates: shared.allow_annotate,
-        initial_mode: Some(ModeKind::Screen),
+        initial_mode: Some(shared.initial_mode),
         initial_cursor: shared.initial_cursor,
         initial_delay_secs,
         ..Default::default()
@@ -707,6 +716,11 @@ struct SharedState {
     /// for display; the CLI / config value is only used end-to-end when the user does not
     /// touch the spinner.
     initial_delay: std::time::Duration,
+    /// Mode button pre-selected when the selector opens. Cloned from
+    /// [`crate::config::CaptureConfig::initial_mode`] (Screen by default).
+    /// Mirrored into the initial `SharedSelection.mode` so keyboard shortcuts
+    /// and the toolbar's mode group agree.
+    initial_mode: ModeKind,
     /// When `false`, the Capture button on every per-monitor toolbar ignores the Shift
     /// modifier and the window-level Enter handler always commits with `edit=false`. Set
     /// by the draw overlay's Save flow so Shift+click / Shift+Enter just save the snapshot

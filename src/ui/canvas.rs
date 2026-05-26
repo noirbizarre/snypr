@@ -88,6 +88,23 @@ impl AnnotationCanvas {
         self.imp().tool_colors.borrow().get(&kind).copied()
     }
 
+    /// Replace the built-in per-tool color defaults with values from the user's
+    /// [`crate::config::AnnotateColors`] table. Called once per canvas right after
+    /// construction so the toolbar's color picker (and any subsequent fresh strokes)
+    /// pick up the configured colors. Tools without a user-controllable color
+    /// (Blur / Crop / Redact) are untouched.
+    pub fn apply_color_defaults(&self, colors: &crate::config::AnnotateColors) {
+        let mut map = self.imp().tool_colors.borrow_mut();
+        map.insert(ToolKind::Rect, colors.rect.to_f32_array());
+        map.insert(ToolKind::Ellipse, colors.ellipse.to_f32_array());
+        map.insert(ToolKind::Arrow, colors.arrow.to_f32_array());
+        map.insert(ToolKind::Line, colors.line.to_f32_array());
+        map.insert(ToolKind::Freehand, colors.freehand.to_f32_array());
+        map.insert(ToolKind::Highlight, colors.highlight.to_f32_array());
+        map.insert(ToolKind::Number, colors.number.to_f32_array());
+        map.insert(ToolKind::Text, colors.text.to_f32_array());
+    }
+
     /// Override the color stored for `kind`. Has no effect on already-committed layers;
     /// only affects subsequent drags / clicks that produce a fresh tool instance.
     /// When a text edit is currently in progress for this kind, the in-flight
