@@ -100,10 +100,12 @@ pub async fn pick_region(
         .await
         .map_err(|e| anyhow!("selector channel closed without a result: {e}"))?;
     if result.is_ok() {
-        // Overlays are destroyed + flushed synchronously inside `commit()`, but Hyprland still
-        // processes the unmap on its own event loop. A short grace window avoids the dimmed
-        // veil leaking into the wlr-screencopy frame.
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let grace = post_dismiss_grace();
+        tracing::debug!(
+            grace_ms = grace.as_millis() as u64,
+            "selector dismissed; waiting for compositor to unmap before capture"
+        );
+        tokio::time::sleep(grace).await;
     }
     result
 }
@@ -146,9 +148,28 @@ pub async fn pick_region_in_app(
         .await
         .map_err(|e| anyhow!("selector channel closed without a result: {e}"))?;
     if result.is_ok() {
-        glib::timeout_future(std::time::Duration::from_millis(30)).await;
+        let grace = post_dismiss_grace();
+        tracing::debug!(
+            grace_ms = grace.as_millis() as u64,
+            "embeddable selector dismissed; waiting for compositor to unmap before capture"
+        );
+        glib::timeout_future(grace).await;
     }
     result
+}
+
+/// Post-dismiss grace window. Defaults to 30 ms but can be overridden at runtime via the
+/// `HYPRSNAP_CAPTURE_GRACE_MS` env var. The two-phase `blank_and_dismiss` teardown should
+/// already make this grace mostly redundant — the surface is fully transparent before
+/// destroy, so Hyprland's `fadeOut` has nothing to leak — but a tiny safety margin doesn't
+/// hurt and gives users on unusually slow compositors a way to dial it up further.
+fn post_dismiss_grace() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("HYPRSNAP_CAPTURE_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30),
+    )
 }
 
 /// Per-monitor descriptor needed by signal handlers.
@@ -840,6 +861,8 @@ fn install_keys(
 /// Tear down every overlay window synchronously and flush the Wayland connection so the
 /// compositor processes the unmap requests *before* we hand control back to the caller.
 fn dismiss_overlays(windows: &WindowRegistry) {
+    let count = windows.borrow().len();
+    let t0 = std::time::Instant::now();
     for window in windows.borrow_mut().drain(..) {
         window.set_visible(false);
         window.destroy();
@@ -847,6 +870,66 @@ fn dismiss_overlays(windows: &WindowRegistry) {
     if let Some(display) = gdk4::Display::default() {
         display.flush();
     }
+    tracing::debug!(
+        count,
+        elapsed_us = t0.elapsed().as_micros() as u64,
+        "dismissed selector overlay windows (set_visible(false) + destroy() + display.flush())"
+    );
+}
+
+/// Number of milliseconds we wait between blanking the overlay surfaces and destroying
+/// them. Has to cover a couple of compositor frames so Hyprland actually composites the
+/// fully-transparent state before the destroy triggers its layer `fadeOut` animation —
+/// otherwise the animation interpolates from our colored chrome to nothing and leaks the
+/// selector into the wlr-screencopy frame. 50 ms ≈ 3 frames at 60 Hz, well under the
+/// human-perception threshold for "the selector closed instantly."
+const BLANK_FRAME_MS: u64 = 50;
+
+/// Two-phase teardown that hides the visible chrome (toolbars + dim veil + selection rect
+/// + outline + legend + countdown numeral) *before* destroying the layer-shell surfaces.
+///
+/// Hyprland (and other wlroots compositors with layer-shell `fadeOut` animations) keeps the
+/// surface composited for the duration of the animation after the client sends
+/// `wl_surface.destroy`. With the colored chrome still on the surface, the fade-out frames
+/// leak into the subsequent `wlr-screencopy` capture — the user sees a dimmed toolbar, the
+/// region outline and the `WxH — Enter…` legend baked into the saved PNG.
+///
+/// By blanking the snapshot first, hiding the toolbars, flushing the connection, and only
+/// then scheduling the destroy a few frames later, the surface goes into fadeOut already
+/// fully transparent, so the animation has nothing to leak.
+fn blank_and_dismiss(
+    windows: &WindowRegistry,
+    areas: &AreaRegistry,
+    toolbars: &ToolbarRegistry,
+    tx: &Sender,
+    app_weak: &glib::WeakRef<gtk4::Application>,
+    outcome: SelectorOutcome,
+) {
+    for t in toolbars.borrow().iter() {
+        t.widget().set_visible(false);
+    }
+    for a in areas.borrow().iter() {
+        a.blank();
+    }
+    // Push the new (empty) frame to the compositor immediately so it can start compositing
+    // before the post-dismiss grace fires.
+    if let Some(display) = gdk4::Display::default() {
+        display.flush();
+    }
+
+    let windows = windows.clone();
+    let tx = tx.clone();
+    let app_weak = app_weak.clone();
+    glib::timeout_add_local_once(
+        std::time::Duration::from_millis(BLANK_FRAME_MS),
+        move || {
+            dismiss_overlays(&windows);
+            send_once(&tx, Ok(outcome));
+            if let Some(app) = app_weak.upgrade() {
+                app.quit();
+            }
+        },
+    );
 }
 
 /// Resolve the current shared state into a `Selection` based on the active mode.
@@ -934,19 +1017,15 @@ fn commit(
 
     let total_secs = state.delay.as_secs().min(u32::MAX as u64) as u32;
     if total_secs == 0 {
-        dismiss_overlays(windows);
-        send_once(tx, Ok(outcome));
-        if let Some(app) = app_weak.upgrade() {
-            app.quit();
-        }
+        blank_and_dismiss(windows, areas, toolbars, tx, app_weak, outcome);
         return;
     }
 
     // Pre-capture delay path: hide the per-monitor toolbars and switch each overlay area
     // into countdown mode. A 1-second timer decrements the remaining seconds; at zero we
-    // dismiss the overlays, send the outcome, and quit the app (if standalone). Pressing
-    // Escape during the countdown is handled by `cancel()`, which removes our timer
-    // source by id and bails before we ever reach the final dispatch.
+    // hand off to `blank_and_dismiss` for the same fadeOut-safe teardown the zero-delay
+    // path uses. Pressing Escape during the countdown is handled by `cancel()`, which
+    // removes our timer source by id and bails before we ever reach the final dispatch.
     for t in toolbars.borrow().iter() {
         t.widget().set_visible(false);
     }
@@ -956,6 +1035,7 @@ fn commit(
 
     let remaining = Rc::new(Cell::new(total_secs));
     let areas_cloned = areas.clone();
+    let toolbars_cloned = toolbars.clone();
     let windows_cloned = windows.clone();
     let tx_cloned = tx.clone();
     let app_weak_cloned = app_weak.clone();
@@ -968,27 +1048,18 @@ fn commit(
             // this on Escape; clearing it here marks the countdown as "complete, no
             // need to remove" so a late Escape can't double-fire.
             countdown_source_cloned.borrow_mut().take();
-            // Clear the numeral *before* dismissing the overlays so the very last
-            // frame Hyprland composites shows only the selector veil + selection
-            // outline, not the trailing "1". Without this step the numeral leaks
-            // into the captured screenshot because the compositor's unmap of the
-            // layer-shell surface lags `dismiss_overlays` by a frame or two.
-            // A short timeout after the redraw request gives Hyprland enough time
-            // to paint the cleared frame before we tear down the windows.
-            for a in areas_cloned.borrow().iter() {
-                a.set_countdown(None);
-            }
-            let windows_for_finish = windows_cloned.clone();
-            let tx_for_finish = tx_cloned.clone();
-            let app_weak_for_finish = app_weak_cloned.clone();
-            let outcome_for_finish = outcome.clone();
-            glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
-                dismiss_overlays(&windows_for_finish);
-                send_once(&tx_for_finish, Ok(outcome_for_finish));
-                if let Some(app) = app_weak_for_finish.upgrade() {
-                    app.quit();
-                }
-            });
+            // Hand off to the same blank-then-dismiss teardown the zero-delay path uses:
+            // it clears the countdown numeral (and everything else) before destroying the
+            // surfaces, so Hyprland's layer fadeOut animation has nothing to leak into the
+            // captured screenshot.
+            blank_and_dismiss(
+                &windows_cloned,
+                &areas_cloned,
+                &toolbars_cloned,
+                &tx_cloned,
+                &app_weak_cloned,
+                outcome.clone(),
+            );
             return glib::ControlFlow::Break;
         }
         for a in areas_cloned.borrow().iter() {
@@ -1055,6 +1126,16 @@ impl SelectorOverlay {
         self.imp().countdown.set(value);
         self.queue_draw();
     }
+
+    /// Stop painting the dim veil, selection rectangle, outline, legend and hint. Used right
+    /// before the overlay surfaces are destroyed so the *last* frame the compositor sees is
+    /// fully transparent — Hyprland's `fadeOut` layer animation then fades from "blank" to
+    /// "gone" instead of fading our colored chrome out into whatever `wlr-screencopy`
+    /// happens to grab next.
+    fn blank(&self) {
+        self.imp().blanked.set(true);
+        self.queue_draw();
+    }
 }
 
 impl Default for SelectorOverlay {
@@ -1075,6 +1156,11 @@ mod imp {
         /// When `Some(n)`, the overlay draws a big centered "n" instead of the usual
         /// mode-specific chrome. Driven by [`super::commit`] during a pre-capture delay.
         pub countdown: Cell<Option<u32>>,
+        /// When true, [`WidgetImpl::snapshot`] short-circuits and paints nothing. Set right
+        /// before the overlay surfaces are destroyed so the compositor's last composited
+        /// frame is fully transparent — defeats Hyprland's layer `fadeOut` animation
+        /// leaking the selection chrome into the captured screenshot.
+        pub blanked: Cell<bool>,
     }
 
     impl Default for SelectorOverlay {
@@ -1083,6 +1169,7 @@ mod imp {
                 selection: RefCell::new(None),
                 monitor_index: Cell::new(0),
                 countdown: Cell::new(None),
+                blanked: Cell::new(false),
             }
         }
     }
@@ -1101,6 +1188,18 @@ mod imp {
             let w = self.obj().width() as f32;
             let h = self.obj().height() as f32;
             if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+
+            // Pre-dismiss: paint an explicit transparent fill over the whole surface so
+            // GTK actually submits a new (empty) `wl_buffer` to the compositor. Returning
+            // here without `snapshot.append_*` would let GTK skip the redraw entirely, the
+            // compositor would keep our last colored frame as the surface contents, and
+            // Hyprland's layer `fadeOut` animation would happily fade that into the
+            // screenshot. See [`super::SelectorOverlay::blank`].
+            if self.blanked.get() {
+                let transparent = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0);
+                snapshot.append_color(&transparent, &graphene::Rect::new(0.0, 0.0, w, h));
                 return;
             }
 

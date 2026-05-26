@@ -158,6 +158,7 @@ pub async fn execute(
 
     let capturer = WlrCapturer::new()?;
     let t0 = std::time::Instant::now();
+    tracing::debug!(?selection, "starting wlr-screencopy capture");
     let images = capturer
         .capture(selection.clone(), cursor)
         .await
