@@ -91,8 +91,18 @@ pub async fn pick_region(
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let clients = fetch_clients_or_warn().await;
+    let focused_monitor = fetch_focused_monitor_or_log().await;
+    let focused_window = fetch_active_window_or_log().await;
     tokio::task::spawn_blocking(move || {
-        run_gtk(tx, initial_cursor, initial_delay, clients, allow_annotate)
+        run_gtk(
+            tx,
+            initial_cursor,
+            initial_delay,
+            clients,
+            focused_monitor,
+            focused_window,
+            allow_annotate,
+        )
     })
     .await
     .map_err(|e| anyhow!("selector task panicked: {e}"))??;
@@ -129,6 +139,8 @@ pub async fn pick_region_in_app(
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let tx: Sender = Arc::new(Mutex::new(Some(tx)));
     let clients = fetch_clients_or_warn().await;
+    let focused_monitor = fetch_focused_monitor_or_log().await;
+    let focused_window = fetch_active_window_or_log().await;
     // Empty WeakRef → commit/cancel's `app.upgrade()` returns None → no `app.quit()` fires
     // against the caller's app. Windows are still parented to `app` (required by GTK), but
     // they're destroyed by `dismiss_overlays` so they don't keep the app alive on their own.
@@ -140,6 +152,8 @@ pub async fn pick_region_in_app(
         initial_delay,
         quit_target,
         clients,
+        focused_monitor,
+        focused_window,
         allow_annotate,
     ) {
         send_once(&tx, Err(err));
@@ -308,11 +322,44 @@ async fn fetch_clients_or_warn() -> Vec<HyprWindow> {
     }
 }
 
+/// Try to read Hyprland's focused monitor name. Used to pre-select the current monitor
+/// in Screen mode. Failure (non-Hyprland host, IPC error, no focused monitor) is silently
+/// dropped so the selector still opens with the legacy "click to pick" UX.
+async fn fetch_focused_monitor_or_log() -> Option<String> {
+    match hypr::focused_monitor().await {
+        Ok(name) => Some(name),
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not determine focused Hyprland monitor; selector will open with no monitor pre-selected"
+            );
+            None
+        }
+    }
+}
+
+/// Try to read Hyprland's active window. Used to pre-select the current window in Window
+/// mode. Failure (non-Hyprland host, IPC error, no focused client) is silently dropped.
+async fn fetch_active_window_or_log() -> Option<hypr::ActiveWindow> {
+    match hypr::active_window().await {
+        Ok(aw) => Some(aw),
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not determine active Hyprland window; selector will open with no window pre-selected"
+            );
+            None
+        }
+    }
+}
+
 fn run_gtk(
     tx: tokio::sync::oneshot::Sender<Result<SelectorOutcome>>,
     initial_cursor: bool,
     initial_delay: std::time::Duration,
     clients: Vec<HyprWindow>,
+    focused_monitor: Option<String>,
+    focused_window: Option<hypr::ActiveWindow>,
     allow_annotate: bool,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
@@ -323,6 +370,8 @@ fn run_gtk(
     {
         let tx = tx.clone();
         let clients = Rc::new(RefCell::new(clients));
+        let focused_monitor = Rc::new(RefCell::new(focused_monitor));
+        let focused_window = Rc::new(RefCell::new(focused_window));
         app.connect_activate(move |app| {
             crate::ui::install_icon_resources();
             // Standalone: pass `app.downgrade()` as the quit target so commit / cancel tear
@@ -331,6 +380,8 @@ fn run_gtk(
             // alone.
             let quit_target = app.downgrade();
             let clients_snapshot = clients.borrow().clone();
+            let focused_monitor_snapshot = focused_monitor.borrow().clone();
+            let focused_window_snapshot = focused_window.borrow().clone();
             if let Err(err) = build_overlays(
                 app,
                 &tx,
@@ -338,6 +389,8 @@ fn run_gtk(
                 initial_delay,
                 quit_target,
                 clients_snapshot,
+                focused_monitor_snapshot,
+                focused_window_snapshot,
                 allow_annotate,
             ) {
                 send_once(&tx, Err(err));
@@ -355,6 +408,7 @@ fn run_gtk(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_overlays(
     app: &gtk4::Application,
     tx: &Sender,
@@ -362,6 +416,8 @@ fn build_overlays(
     initial_delay: std::time::Duration,
     quit_target: glib::WeakRef<gtk4::Application>,
     clients: Vec<HyprWindow>,
+    focused_monitor: Option<String>,
+    focused_window: Option<hypr::ActiveWindow>,
     allow_annotate: bool,
 ) -> Result<()> {
     crate::ui::style::install();
@@ -373,10 +429,47 @@ fn build_overlays(
         bail!("no monitors reported by GDK");
     }
 
+    // Build the per-monitor info list up front so we can resolve the focused monitor's
+    // connector → index mapping before seeding the shared selection state.
+    let mut monitor_infos: Vec<(MonitorInfo, gdk4::Monitor)> = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let Some(obj) = monitors_list.item(i) else {
+            continue;
+        };
+        let Ok(monitor) = obj.downcast::<gdk4::Monitor>() else {
+            continue;
+        };
+        let info = MonitorInfo {
+            index: i as usize,
+            connector: monitor.connector().map(|s| s.to_string()),
+        };
+        monitor_infos.push((info, monitor));
+    }
+
+    // Pre-select the focused monitor (Screen mode default) so users can hit Enter without
+    // an extra click. Silent fallback to `None` if Hyprland didn't report a focused
+    // monitor or the connector doesn't match any GDK monitor.
+    let selected_monitor = focused_monitor.as_deref().and_then(|name| {
+        monitor_infos
+            .iter()
+            .find(|(info, _)| info.connector.as_deref() == Some(name))
+            .map(|(info, _)| info.index)
+    });
+
+    // Pre-select the focused window (Window mode default). Built from `ActiveWindow`
+    // directly so we don't depend on a `focused` flag in the clients snapshot.
+    let selected_window = focused_window.as_ref().map(|aw| PickedWindow {
+        rect: aw.rect(),
+        title: aw.title.clone(),
+        class: aw.class.clone(),
+    });
+
     let shared = SharedState {
         selection: Rc::new(RefCell::new(SharedSelection {
             cursor: initial_cursor,
             delay: initial_delay,
+            selected_monitor,
+            selected_window,
             ..SharedSelection::default()
         })),
         finalised: Rc::new(RefCell::new(false)),
@@ -393,18 +486,8 @@ fn build_overlays(
         clients: Rc::new(RefCell::new(clients)),
     };
 
-    let mut windows = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let Some(obj) = monitors_list.item(i) else {
-            continue;
-        };
-        let Ok(monitor) = obj.downcast::<gdk4::Monitor>() else {
-            continue;
-        };
-        let info = MonitorInfo {
-            index: i as usize,
-            connector: monitor.connector().map(|s| s.to_string()),
-        };
+    let mut windows = Vec::with_capacity(monitor_infos.len());
+    for (info, monitor) in monitor_infos {
         shared.monitors.borrow_mut().push(info.clone());
         windows.push(spawn_monitor_overlay(app, &monitor, info, &shared));
     }
@@ -529,10 +612,11 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
                     s.start = None;
                     s.current = None;
                 }
-                // Switching modes always clears any previously "armed" zone so the user
-                // doesn't accidentally commit a stale selection from a different mode.
-                s.selected_monitor = None;
-                s.selected_window = None;
+                // Preserve per-mode selections across mode switches so the default
+                // (focused monitor / window) — or whatever the user previously picked in
+                // that mode — is still active when they switch back. Only `hover_window`
+                // is cleared, since it's pointer-driven and would be stale until the next
+                // `motion` event re-resolves it.
                 s.hover_window = None;
             }
             for t in toolbars.borrow().iter() {
@@ -774,7 +858,6 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
             match mode {
                 ModeKind::Screen => {
                     s.selected_monitor = Some(monitor_index);
-                    s.selected_window = None;
                 }
                 ModeKind::Window => {
                     let picked = local_to_logical(monitor_index, x, y).and_then(|(lx, ly)| {
@@ -782,7 +865,6 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
                     });
                     if picked.is_some() {
                         s.selected_window = picked;
-                        s.selected_monitor = None;
                     }
                     // Click on empty space in Window mode: keep the previous selection (if
                     // any) so accidentally missing a window doesn't blow away the user's
