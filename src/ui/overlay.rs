@@ -1009,6 +1009,7 @@ async fn run_draw_save(
         draw_save.cursor,
         std::time::Duration::ZERO,
         false,
+        draw_save.app_ctx.config.ui.selector.clone(),
     )
     .await
     {

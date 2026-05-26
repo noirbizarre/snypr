@@ -35,13 +35,10 @@ window.hyprsnap-overlay > * {
 /* Pre-capture countdown window: full-screen translucent dim with a huge
  * white seconds-remaining numeral. Used by non-interactive CLI paths
  * (`--full --delay 3s`, daemon screenshot, tray) where there is no
- * selector to host the countdown. */
-window.hyprsnap-countdown,
-window.hyprsnap-countdown decoration {
-    background: rgba(0, 0, 0, 0.55);
-}
+ * selector to host the countdown. Colors are injected per-invocation by
+ * `crate::ui::countdown::install_countdown_css` from `[ui.selector]` config
+ * (`countdown_bg`, `countdown_fg`); only the structural rules live here. */
 window.hyprsnap-countdown label.hyprsnap-countdown-number {
-    color: rgba(255, 255, 255, 0.95);
     font-weight: bold;
 }
 "#;

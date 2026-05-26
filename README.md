@@ -315,6 +315,18 @@ success    = true
 error      = true
 # Notification expiry, in milliseconds.
 timeout_ms = 6000
+
+[ui.selector]
+# Chrome colors for the region/full/screen/window selector and the standalone
+# pre-capture countdown window. Hex RGBA strings: "#RRGGBB" (fully opaque) or
+# "#RRGGBBAA". Every field is optional; omitted fields keep their defaults.
+outline      = "#FFFFFFF2"  # zone/region/window/screen border stroke
+label        = "#FFFFFFE6"  # region size legend + top-of-monitor hint text
+dim_strong   = "#0000008C"  # heavy veil outside selection / non-selected screens
+dim_full     = "#00000073"  # veil in region mode before a rectangle is drawn
+dim_light    = "#00000040"  # full mode + hovered/selected screen
+countdown_fg = "#FFFFFFF2"  # pre-capture countdown numeral fill
+countdown_bg = "#0000008C"  # standalone countdown window background
 ```
 
 Template tokens: `{ts}`, `{date}`, `{time}`, `{output}`, `{selection}`.

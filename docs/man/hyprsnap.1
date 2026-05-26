@@ -128,7 +128,10 @@ own color and style. The pickers are disabled for tools with hardcoded appearanc
 .B hyprsnap
 reads \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR. Every field is optional; see the
 sample in the project README. Filename template tokens: \fB{ts}\fR, \fB{date}\fR,
-\fB{time}\fR, \fB{output}\fR, \fB{selection}\fR.
+\fB{time}\fR, \fB{output}\fR, \fB{selection}\fR. The \fB[ui.selector]\fR table
+overrides the selector chrome colors (\fIoutline\fR, \fIlabel\fR, \fIdim_strong\fR,
+\fIdim_full\fR, \fIdim_light\fR, \fIcountdown_fg\fR, \fIcountdown_bg\fR) as
+\fB#RRGGBB\fR or \fB#RRGGBBAA\fR hex strings.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/hyprsnap/config.toml

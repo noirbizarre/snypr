@@ -20,22 +20,28 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
+use crate::config::SelectorStyleConfig;
+
 /// Display a fullscreen pre-capture countdown across every monitor for `duration`, then
 /// return. A zero duration is a no-op.
 ///
 /// Spawns a private `gtk4::Application` on a `spawn_blocking` thread because GTK is not
 /// `Send` and cannot run on a tokio worker. The function resolves once the timer hits
 /// zero (or immediately on any setup error).
-pub async fn show_countdown(duration: Duration) -> Result<()> {
+///
+/// `style` supplies the `countdown_bg` / `countdown_fg` colors. The countdown window
+/// styling is intentionally driven through [`SelectorStyleConfig`] so both the embedded
+/// (in-selector) and standalone countdowns honor the same `[ui.selector]` overrides.
+pub async fn show_countdown(duration: Duration, style: SelectorStyleConfig) -> Result<()> {
     if duration.is_zero() {
         return Ok(());
     }
-    tokio::task::spawn_blocking(move || run_gtk(duration))
+    tokio::task::spawn_blocking(move || run_gtk(duration, style))
         .await
         .map_err(|e| anyhow!("countdown task panicked: {e}"))?
 }
 
-fn run_gtk(duration: Duration) -> Result<()> {
+fn run_gtk(duration: Duration, style: SelectorStyleConfig) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
         .build();
@@ -43,9 +49,11 @@ fn run_gtk(duration: Duration) -> Result<()> {
     let setup_error: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
     {
         let setup_error = setup_error.clone();
+        let style = Rc::new(style);
         app.connect_activate(move |app| {
             crate::ui::install_icon_resources();
             crate::ui::style::install();
+            install_countdown_css(&style);
             if let Err(err) = build_overlays(app, duration) {
                 *setup_error.lock().unwrap() = Some(err);
                 app.quit();
@@ -168,4 +176,33 @@ fn build_overlays(app: &gtk4::Application, duration: Duration) -> Result<()> {
 /// size can be varied freely without installing per-window CSS.
 fn set_label_value(label: &gtk4::Label, secs: u32, pt: i32) {
     label.set_markup(&format!("<span font_desc=\"Sans Bold {pt}\">{secs}</span>"));
+}
+
+/// Install a CSS provider that carries the configured countdown background + numeral
+/// colors. Registered at `STYLE_PROVIDER_PRIORITY_USER` so it wins against the
+/// (theme-agnostic, structure-only) rules baked into [`crate::ui::style`].
+fn install_countdown_css(style: &SelectorStyleConfig) {
+    let css = format!(
+        r"
+window.hyprsnap-countdown,
+window.hyprsnap-countdown decoration {{
+    background: {bg};
+}}
+window.hyprsnap-countdown label.hyprsnap-countdown-number {{
+    color: {fg};
+    font-weight: bold;
+}}
+",
+        bg = style.countdown_bg.to_css_rgba(),
+        fg = style.countdown_fg.to_css_rgba(),
+    );
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_string(&css);
+    if let Some(display) = gdk4::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_USER,
+        );
+    }
 }

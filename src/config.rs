@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::cli::{ClipboardKind, SinkSpec};
 
@@ -21,6 +21,7 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     pub keybinds: KeybindConfig,
     pub notify: NotifyConfig,
+    pub ui: UiConfig,
 }
 
 /// Desktop-notification preferences. Notifications are best-effort: failures to talk to the
@@ -165,6 +166,176 @@ impl Default for KeybindConfig {
             editor,
             overlay,
         }
+    }
+}
+
+/// UI-styling overrides. Currently scopes only to the selector overlay; future
+/// per-surface tables (`ui.editor`, `ui.overlay`, `ui.toolbar`) can live next
+/// to it without breaking the namespace.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct UiConfig {
+    pub selector: SelectorStyleConfig,
+}
+
+/// Chrome colors painted by the region/full/screen/window selector and the
+/// standalone pre-capture countdown window. Each field is an RGBA hex string
+/// in TOML (`"#RRGGBB"` or `"#RRGGBBAA"`). Defaults live in
+/// [`SelectorStyleConfig::default`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SelectorStyleConfig {
+    /// Stroke color for the region rectangle, hovered/selected screen, and
+    /// hovered/selected window outlines. Default: `#FFFFFFF2`.
+    pub outline: Color,
+    /// Fill color for the region size legend (drawn inside the region rect)
+    /// and the top-of-monitor hint text. Default: `#FFFFFFE6`.
+    pub label: Color,
+    /// Heavy veil painted outside the region rect, over non-selected screens
+    /// in screen mode, and across the full surface in window mode. Default:
+    /// `#0000008C`.
+    pub dim_strong: Color,
+    /// Veil painted across the whole monitor in region mode when the user has
+    /// not started dragging a rectangle yet. Default: `#00000073`.
+    pub dim_full: Color,
+    /// Lighter veil painted in full mode and on the currently
+    /// selected/hovered screen in screen mode. Default: `#00000040`.
+    pub dim_light: Color,
+    /// Fill for the pre-capture countdown numeral, used both by the selector
+    /// path and the standalone countdown window. Default: `#FFFFFFF2`.
+    pub countdown_fg: Color,
+    /// Background of the standalone countdown window
+    /// ([`crate::ui::countdown`]). Default: `#0000008C`.
+    pub countdown_bg: Color,
+}
+
+impl Default for SelectorStyleConfig {
+    fn default() -> Self {
+        Self {
+            outline: Color::from_rgba_f32(1.0, 1.0, 1.0, 0.95),
+            label: Color::from_rgba_f32(1.0, 1.0, 1.0, 0.9),
+            dim_strong: Color::from_rgba_f32(0.0, 0.0, 0.0, 0.55),
+            dim_full: Color::from_rgba_f32(0.0, 0.0, 0.0, 0.45),
+            dim_light: Color::from_rgba_f32(0.0, 0.0, 0.0, 0.25),
+            countdown_fg: Color::from_rgba_f32(1.0, 1.0, 1.0, 0.95),
+            countdown_bg: Color::from_rgba_f32(0.0, 0.0, 0.0, 0.55),
+        }
+    }
+}
+
+/// 8-bit RGBA color, serialized as a `#RRGGBB` or `#RRGGBBAA` hex string.
+///
+/// Stored as bytes so [`Eq`] / [`Hash`] are derivable (unlike `gtk4::gdk::RGBA`,
+/// which holds `f32` channels). Convert into a `gdk::RGBA` at the draw site
+/// with [`Color::to_rgba`].
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Color {
+    /// Build a color from float RGBA channels in the `[0.0, 1.0]` range.
+    /// Out-of-range components are clamped. Used by [`SelectorStyleConfig::default`].
+    pub const fn from_rgba_f32(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self {
+            r: f32_to_u8(r),
+            g: f32_to_u8(g),
+            b: f32_to_u8(b),
+            a: f32_to_u8(a),
+        }
+    }
+
+    /// Convert to a GDK `RGBA` for use with GSK snapshot draws.
+    #[cfg(feature = "ui")]
+    pub fn to_rgba(self) -> gtk4::gdk::RGBA {
+        gtk4::gdk::RGBA::new(
+            self.r as f32 / 255.0,
+            self.g as f32 / 255.0,
+            self.b as f32 / 255.0,
+            self.a as f32 / 255.0,
+        )
+    }
+
+    /// Render the color as a CSS `rgba(...)` literal suitable for embedding
+    /// into a `gtk4::CssProvider` string.
+    pub fn to_css_rgba(self) -> String {
+        format!(
+            "rgba({}, {}, {}, {:.4})",
+            self.r,
+            self.g,
+            self.b,
+            self.a as f32 / 255.0
+        )
+    }
+
+    /// Render as a `#RRGGBB` (when fully opaque) or `#RRGGBBAA` hex literal.
+    pub fn to_hex(self) -> String {
+        if self.a == 0xFF {
+            format!("#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
+        } else {
+            format!("#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
+        }
+    }
+
+    /// Strict hex-string parser. Accepts only `#RRGGBB` and `#RRGGBBAA` (no
+    /// 3/4-digit short form, no named colors, no whitespace). Returns a
+    /// human-readable error when the input is malformed.
+    pub fn parse_hex(s: &str) -> Result<Self, String> {
+        let Some(hex) = s.strip_prefix('#') else {
+            return Err(format!(
+                "color {s:?} must start with '#' and be #RRGGBB or #RRGGBBAA"
+            ));
+        };
+        match hex.len() {
+            6 => {
+                let r = u8_from_hex(&hex[0..2], s)?;
+                let g = u8_from_hex(&hex[2..4], s)?;
+                let b = u8_from_hex(&hex[4..6], s)?;
+                Ok(Self { r, g, b, a: 0xFF })
+            }
+            8 => {
+                let r = u8_from_hex(&hex[0..2], s)?;
+                let g = u8_from_hex(&hex[2..4], s)?;
+                let b = u8_from_hex(&hex[4..6], s)?;
+                let a = u8_from_hex(&hex[6..8], s)?;
+                Ok(Self { r, g, b, a })
+            }
+            other => Err(format!(
+                "color {s:?} has {other} hex digit(s); expected 6 (#RRGGBB) or 8 (#RRGGBBAA)"
+            )),
+        }
+    }
+}
+
+const fn f32_to_u8(v: f32) -> u8 {
+    let scaled = v * 255.0 + 0.5;
+    if scaled <= 0.0 {
+        0
+    } else if scaled >= 255.0 {
+        255
+    } else {
+        scaled as u8
+    }
+}
+
+fn u8_from_hex(pair: &str, full: &str) -> Result<u8, String> {
+    u8::from_str_radix(pair, 16)
+        .map_err(|_| format!("color {full:?} contains non-hex digits in {pair:?}"))
+}
+
+impl Serialize for Color {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for Color {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        Color::parse_hex(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -434,5 +605,140 @@ mod tests {
         assert!(!cfg.notify.success);
         assert!(cfg.notify.error);
         assert_eq!(cfg.notify.timeout_ms, 2500);
+    }
+
+    #[test]
+    fn color_parses_six_and_eight_digit_hex() {
+        assert_eq!(
+            Color::parse_hex("#FF8000").unwrap(),
+            Color {
+                r: 0xFF,
+                g: 0x80,
+                b: 0x00,
+                a: 0xFF
+            }
+        );
+        assert_eq!(
+            Color::parse_hex("#01020304").unwrap(),
+            Color {
+                r: 0x01,
+                g: 0x02,
+                b: 0x03,
+                a: 0x04
+            }
+        );
+    }
+
+    #[test]
+    fn color_parser_is_case_insensitive() {
+        assert_eq!(
+            Color::parse_hex("#aabbcc").unwrap(),
+            Color::parse_hex("#AABBCC").unwrap(),
+        );
+    }
+
+    #[test]
+    fn color_parser_rejects_short_and_named_forms() {
+        for bad in [
+            "fff", "#fff", "#ffff", "#fffff", "#fffffff", "red", "#GGHHII",
+        ] {
+            assert!(
+                Color::parse_hex(bad).is_err(),
+                "{bad:?} should not parse as a Color"
+            );
+        }
+    }
+
+    #[test]
+    fn color_hex_round_trips() {
+        let c = Color {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56,
+            a: 0x78,
+        };
+        assert_eq!(c.to_hex(), "#12345678");
+        assert_eq!(Color::parse_hex(&c.to_hex()).unwrap(), c);
+
+        let opaque = Color {
+            r: 0xAB,
+            g: 0xCD,
+            b: 0xEF,
+            a: 0xFF,
+        };
+        assert_eq!(opaque.to_hex(), "#ABCDEF");
+        assert_eq!(Color::parse_hex(&opaque.to_hex()).unwrap(), opaque);
+    }
+
+    #[test]
+    fn selector_style_defaults_match_legacy_literals() {
+        let s = SelectorStyleConfig::default();
+        // Values mirror the literals previously hardcoded in src/ui/selector.rs.
+        assert_eq!(s.outline, Color::from_rgba_f32(1.0, 1.0, 1.0, 0.95));
+        assert_eq!(s.label, Color::from_rgba_f32(1.0, 1.0, 1.0, 0.9));
+        assert_eq!(s.dim_strong, Color::from_rgba_f32(0.0, 0.0, 0.0, 0.55));
+        assert_eq!(s.dim_full, Color::from_rgba_f32(0.0, 0.0, 0.0, 0.45));
+        assert_eq!(s.dim_light, Color::from_rgba_f32(0.0, 0.0, 0.0, 0.25));
+        assert_eq!(s.countdown_fg, Color::from_rgba_f32(1.0, 1.0, 1.0, 0.95));
+        assert_eq!(s.countdown_bg, Color::from_rgba_f32(0.0, 0.0, 0.0, 0.55));
+    }
+
+    #[test]
+    fn ui_selector_section_parses_partial_overrides() {
+        let toml = r##"
+            [ui.selector]
+            outline      = "#FF00FFFF"
+            dim_strong   = "#00008080"
+        "##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            cfg.ui.selector.outline,
+            Color {
+                r: 0xFF,
+                g: 0x00,
+                b: 0xFF,
+                a: 0xFF
+            }
+        );
+        assert_eq!(
+            cfg.ui.selector.dim_strong,
+            Color {
+                r: 0x00,
+                g: 0x00,
+                b: 0x80,
+                a: 0x80
+            }
+        );
+        // Untouched fields keep their defaults.
+        assert_eq!(cfg.ui.selector.label, SelectorStyleConfig::default().label);
+        assert_eq!(
+            cfg.ui.selector.countdown_bg,
+            SelectorStyleConfig::default().countdown_bg
+        );
+    }
+
+    #[test]
+    fn ui_selector_rejects_malformed_color() {
+        let toml = r##"
+            [ui.selector]
+            outline = "not-a-color"
+        "##;
+        let err = toml::from_str::<Config>(toml).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("must start with '#'"), "{msg}");
+    }
+
+    #[test]
+    fn ui_section_round_trips_via_toml() {
+        let mut cfg = Config::default();
+        cfg.ui.selector.outline = Color {
+            r: 0xAA,
+            g: 0xBB,
+            b: 0xCC,
+            a: 0xDD,
+        };
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.ui, cfg.ui);
     }
 }

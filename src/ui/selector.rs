@@ -84,7 +84,7 @@ pub struct SelectorOutcome {
 /// already provide an annotation surface (the draw overlay) pass `false` so Shift behaves
 /// as a no-op modifier.
 pub async fn pick_region(
-    _ctx: Ctx,
+    ctx: Ctx,
     initial_cursor: bool,
     initial_delay: std::time::Duration,
     allow_annotate: bool,
@@ -93,6 +93,7 @@ pub async fn pick_region(
     let clients = fetch_clients_or_warn().await;
     let focused_monitor = fetch_focused_monitor_or_log().await;
     let focused_window = fetch_active_window_or_log().await;
+    let style = ctx.config.ui.selector.clone();
     tokio::task::spawn_blocking(move || {
         run_gtk(
             tx,
@@ -102,6 +103,7 @@ pub async fn pick_region(
             focused_monitor,
             focused_window,
             allow_annotate,
+            style,
         )
     })
     .await
@@ -135,6 +137,7 @@ pub async fn pick_region_in_app(
     initial_cursor: bool,
     initial_delay: std::time::Duration,
     allow_annotate: bool,
+    style: crate::config::SelectorStyleConfig,
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let tx: Sender = Arc::new(Mutex::new(Some(tx)));
@@ -155,6 +158,7 @@ pub async fn pick_region_in_app(
         focused_monitor,
         focused_window,
         allow_annotate,
+        style,
     ) {
         send_once(&tx, Err(err));
     }
@@ -353,6 +357,7 @@ async fn fetch_active_window_or_log() -> Option<hypr::ActiveWindow> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gtk(
     tx: tokio::sync::oneshot::Sender<Result<SelectorOutcome>>,
     initial_cursor: bool,
@@ -361,6 +366,7 @@ fn run_gtk(
     focused_monitor: Option<String>,
     focused_window: Option<hypr::ActiveWindow>,
     allow_annotate: bool,
+    style: crate::config::SelectorStyleConfig,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
@@ -372,6 +378,7 @@ fn run_gtk(
         let clients = Rc::new(RefCell::new(clients));
         let focused_monitor = Rc::new(RefCell::new(focused_monitor));
         let focused_window = Rc::new(RefCell::new(focused_window));
+        let style = Rc::new(style);
         app.connect_activate(move |app| {
             crate::ui::install_icon_resources();
             // Standalone: pass `app.downgrade()` as the quit target so commit / cancel tear
@@ -392,6 +399,7 @@ fn run_gtk(
                 focused_monitor_snapshot,
                 focused_window_snapshot,
                 allow_annotate,
+                (*style).clone(),
             ) {
                 send_once(&tx, Err(err));
                 app.quit();
@@ -419,6 +427,7 @@ fn build_overlays(
     focused_monitor: Option<String>,
     focused_window: Option<hypr::ActiveWindow>,
     allow_annotate: bool,
+    style: crate::config::SelectorStyleConfig,
 ) -> Result<()> {
     crate::ui::style::install();
 
@@ -487,9 +496,10 @@ fn build_overlays(
     };
 
     let mut windows = Vec::with_capacity(monitor_infos.len());
+    let style = Rc::new(style);
     for (info, monitor) in monitor_infos {
         shared.monitors.borrow_mut().push(info.clone());
-        windows.push(spawn_monitor_overlay(app, &monitor, info, &shared));
+        windows.push(spawn_monitor_overlay(app, &monitor, info, &shared, &style));
     }
     // Two-phase: build every per-monitor selector window above, then commit them in a
     // tight loop so the compositor maps them in the same frame (see §23).
@@ -504,6 +514,7 @@ fn spawn_monitor_overlay(
     monitor: &gdk4::Monitor,
     info: MonitorInfo,
     shared: &SharedState,
+    style: &Rc<crate::config::SelectorStyleConfig>,
 ) -> gtk4::ApplicationWindow {
     let geo = monitor.geometry();
     let mon_w = geo.width();
@@ -532,7 +543,7 @@ fn spawn_monitor_overlay(
     window.set_keyboard_mode(KeyboardMode::Exclusive);
     window.set_default_size(mon_w.max(1), mon_h.max(1));
 
-    let area = SelectorOverlay::new(shared.selection.clone(), info.index);
+    let area = SelectorOverlay::new(shared.selection.clone(), info.index, (**style).clone());
     area.set_hexpand(true);
     area.set_vexpand(true);
 
@@ -1192,11 +1203,16 @@ glib::wrapper! {
 }
 
 impl SelectorOverlay {
-    fn new(selection: SelectionCell, monitor_index: usize) -> Self {
+    fn new(
+        selection: SelectionCell,
+        monitor_index: usize,
+        style: crate::config::SelectorStyleConfig,
+    ) -> Self {
         let obj: Self = glib::Object::new();
         let imp = obj.imp();
         imp.selection.replace(Some(selection));
         imp.monitor_index.set(monitor_index);
+        imp.style.replace(style);
         obj
     }
 
@@ -1235,6 +1251,10 @@ mod imp {
         #[allow(private_interfaces)]
         pub selection: RefCell<Option<SelectionCell>>,
         pub monitor_index: Cell<usize>,
+        /// Chrome colors. Populated by [`super::SelectorOverlay::new`] from the active
+        /// `[ui.selector]` config table; falls back to defaults for the GObject default
+        /// constructor.
+        pub style: RefCell<crate::config::SelectorStyleConfig>,
         /// When `Some(n)`, the overlay draws a big centered "n" instead of the usual
         /// mode-specific chrome. Driven by [`super::commit`] during a pre-capture delay.
         pub countdown: Cell<Option<u32>>,
@@ -1250,6 +1270,7 @@ mod imp {
             Self {
                 selection: RefCell::new(None),
                 monitor_index: Cell::new(0),
+                style: RefCell::new(crate::config::SelectorStyleConfig::default()),
                 countdown: Cell::new(None),
                 blanked: Cell::new(false),
             }
@@ -1293,11 +1314,11 @@ mod imp {
                 .map(|s| s.borrow().clone())
                 .unwrap_or_default();
 
-            let dim_strong = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.55);
-            let dim_full = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.45);
-            let dim_light = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.25);
-            let outline = gtk4::gdk::RGBA::new(1.0, 1.0, 1.0, 0.95);
-            let label_color = gtk4::gdk::RGBA::new(1.0, 1.0, 1.0, 0.9);
+            let dim_strong = self.style.borrow().dim_strong.to_rgba();
+            let dim_full = self.style.borrow().dim_full.to_rgba();
+            let dim_light = self.style.borrow().dim_light.to_rgba();
+            let outline = self.style.borrow().outline.to_rgba();
+            let label_color = self.style.borrow().label.to_rgba();
 
             match state.mode {
                 ModeKind::Region => {
@@ -1433,7 +1454,7 @@ mod imp {
             // selection chrome. The selection rectangle and its outline stay visible
             // underneath so the user sees exactly what is about to be captured.
             if let Some(secs) = self.countdown.get() {
-                let fg = gtk4::gdk::RGBA::new(1.0, 1.0, 1.0, 0.95);
+                let fg = self.style.borrow().countdown_fg.to_rgba();
                 self.draw_countdown(snapshot, w, h, secs, &fg);
             }
         }

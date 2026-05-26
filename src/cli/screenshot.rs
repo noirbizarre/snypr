@@ -151,7 +151,7 @@ pub async fn execute(
     {
         let d = std::time::Duration::from_secs(secs as u64);
         #[cfg(feature = "ui")]
-        crate::ui::countdown::show_countdown(d).await?;
+        crate::ui::countdown::show_countdown(d, ctx.config.ui.selector.clone()).await?;
         #[cfg(not(feature = "ui"))]
         tokio::time::sleep(d).await;
     }
