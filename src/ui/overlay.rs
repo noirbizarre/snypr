@@ -25,7 +25,11 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Result, anyhow, bail};
 use gtk4::cairo;
+use gtk4::glib;
+use gtk4::glib::subclass::prelude::*;
+use gtk4::graphene;
 use gtk4::prelude::*;
+use gtk4::subclass::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::annotate::{Document, DocumentBase, ToolKind};
@@ -291,6 +295,10 @@ fn build_overlays(
         draw_save,
         blur_capture_in_flight: Rc::new(Cell::new(false)),
         annotate_colors: Rc::new(ctx.config.annotate.colors.clone()),
+        // Edit mode mirrors the selector's `dim_strong` veil around the captured slice so
+        // the visual context the user just had in the region selector persists into the
+        // annotation editor. `None` in Draw mode keeps the overlay fully transparent.
+        edit_veil_dim: ctx.config.ui.selector.dim_strong.to_rgba(),
     };
 
     let mut windows = Vec::with_capacity(n as usize);
@@ -364,6 +372,10 @@ struct Shared {
     /// [`AnnotationCanvas`] in [`spawn_monitor_overlay`]. Cloned from
     /// `ctx.config.annotate.colors` in [`build_overlays`].
     annotate_colors: Rc<crate::config::AnnotateColors>,
+    /// Color for the [`EditVeil`] strips painted around the captured slice in Edit mode.
+    /// Sourced from `ctx.config.ui.selector.dim_strong` so the annotation editor reuses the
+    /// exact veil the user just saw in the region selector. Unused in Draw mode.
+    edit_veil_dim: gtk4::gdk::RGBA,
 }
 
 /// Build (or skip) one overlay window for a monitor. Returns `Some(window)` when a window
@@ -503,9 +515,23 @@ fn spawn_monitor_overlay(
         canvas.set_margin_start(offset_x);
         canvas.set_margin_top(offset_y);
         canvas.set_size_request(slice.w as i32, slice.h as i32);
+
+        // Veil: paint `dim_strong` over the four strips around the slice so the annotation
+        // editor inherits the visual context the user just saw in the region selector. The
+        // veil widget fills the layer-shell surface (full monitor) and sits *below* the
+        // canvas in the overlay z-order; the canvas covers the transparent hole. The
+        // toolbar (added below) stays on top of both.
+        let veil = EditVeil::new(
+            shared.edit_veil_dim,
+            (offset_x, offset_y),
+            (slice.w, slice.h),
+        );
+        overlay.set_child(Some(&veil));
+        overlay.add_overlay(&canvas);
+    } else {
+        overlay.set_child(Some(&canvas));
     }
 
-    overlay.set_child(Some(&canvas));
     toolbar.widget().set_halign(gtk4::Align::Center);
     toolbar.widget().set_valign(gtk4::Align::End);
     toolbar.widget().set_margin_bottom(24);
@@ -1222,5 +1248,98 @@ fn tear_down(windows: &WindowRegistry, app_weak: &glib::WeakRef<gtk4::Applicatio
     }
     if let Some(app) = app_weak.upgrade() {
         app.quit();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Edit-mode veil widget
+// ---------------------------------------------------------------------------
+
+glib::wrapper! {
+    /// Custom widget that paints the four `dim_strong` strips around the captured slice in
+    /// Edit mode. Mirrors the selector's Region veil (see
+    /// `src/ui/selector.rs::imp::SelectorOverlay::snapshot`, lines 1357-1366) so the visual
+    /// context the user just saw while drawing the region persists into the annotation
+    /// editor. The widget is placed as the `gtk4::Overlay`'s main child, sized to the full
+    /// monitor; the [`AnnotationCanvas`] is then added on top via `add_overlay` and covers
+    /// the transparent hole the strips leave around the slice.
+    pub struct EditVeil(ObjectSubclass<imp_veil::EditVeil>)
+        @extends gtk4::Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
+}
+
+impl EditVeil {
+    fn new(color: gtk4::gdk::RGBA, slice_offset: (i32, i32), slice_size: (u32, u32)) -> Self {
+        let obj: Self = glib::Object::new();
+        let imp = obj.imp();
+        imp.color.set(color);
+        imp.slice_offset.set(slice_offset);
+        imp.slice_size.set(slice_size);
+        // Fill the whole gtk4::Overlay allocation (i.e. the layer-shell surface for the
+        // monitor). Without this the widget would request 0x0 and the four-strips math
+        // below would have nothing to paint over.
+        obj.set_hexpand(true);
+        obj.set_vexpand(true);
+        obj.set_halign(gtk4::Align::Fill);
+        obj.set_valign(gtk4::Align::Fill);
+        obj
+    }
+}
+
+mod imp_veil {
+    use super::*;
+
+    pub struct EditVeil {
+        pub color: Cell<gtk4::gdk::RGBA>,
+        /// Intra-monitor top-left of the captured slice, in widget-local pixels.
+        pub slice_offset: Cell<(i32, i32)>,
+        /// Slice size in pixels.
+        pub slice_size: Cell<(u32, u32)>,
+    }
+
+    impl Default for EditVeil {
+        fn default() -> Self {
+            Self {
+                color: Cell::new(gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0)),
+                slice_offset: Cell::new((0, 0)),
+                slice_size: Cell::new((0, 0)),
+            }
+        }
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for EditVeil {
+        const NAME: &'static str = "HyprsnapEditVeil";
+        type Type = super::EditVeil;
+        type ParentType = gtk4::Widget;
+    }
+
+    impl ObjectImpl for EditVeil {}
+
+    impl WidgetImpl for EditVeil {
+        fn snapshot(&self, snapshot: &gtk4::Snapshot) {
+            let w = self.obj().width() as f32;
+            let h = self.obj().height() as f32;
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            let color = self.color.get();
+            let (sx, sy) = self.slice_offset.get();
+            let (sw, sh) = self.slice_size.get();
+            let (sx, sy, sw, sh) = (sx as f32, sy as f32, sw as f32, sh as f32);
+            // Four dimmed strips around the slice — same geometry as the selector's Region
+            // veil at src/ui/selector.rs:1357-1366. Clamp each strip's extent so a slice
+            // that touches an edge produces a zero-sized rect rather than a negative one.
+            snapshot.append_color(&color, &graphene::Rect::new(0.0, 0.0, w, sy.max(0.0)));
+            snapshot.append_color(
+                &color,
+                &graphene::Rect::new(0.0, sy + sh, w, (h - (sy + sh)).max(0.0)),
+            );
+            snapshot.append_color(&color, &graphene::Rect::new(0.0, sy, sx.max(0.0), sh));
+            snapshot.append_color(
+                &color,
+                &graphene::Rect::new(sx + sw, sy, (w - (sx + sw)).max(0.0), sh),
+            );
+        }
     }
 }
