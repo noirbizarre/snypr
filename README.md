@@ -149,12 +149,13 @@ hyprsnap screenshot --full --via-daemon
 ### Interactive selector
 
 The selector (used by `screenshot --edit` and the default `screenshot`) shows a floating
-toolbar on the primary monitor with four modes — **Full**, **Screen**, **Window**,
-**Region** — plus a cursor toggle and a **Capture** button. Hold `Shift` while
-clicking Capture (the button's icon swaps live) to *also* open the in-place editor on
-the captured image. Keyboard shortcuts: `1/2/3/4` switch modes, drag with the mouse in
-Region mode, click on a monitor in Screen mode, then press `Enter` (Capture) or
-`Shift+Enter` (Capture + Annotate) to commit. `Esc` cancels.
+toolbar on the focused monitor with four modes — **Full**, **Screen**, **Window**,
+**Region** — plus a cursor toggle and a **Capture** button. The toolbar follows keyboard
+focus: it moves to whichever monitor you focus, while every monitor keeps its dimming
+overlay. Hold `Shift` while clicking Capture (the button's icon swaps live) to *also* open
+the in-place editor on the captured image. Keyboard shortcuts: `1/2/3/4` switch modes, drag
+with the mouse in Region mode, click on a monitor in Screen mode, then press `Enter`
+(Capture) or `Shift+Enter` (Capture + Annotate) to commit. `Esc` cancels.
 
 ### Editor & overlay keybinds
 

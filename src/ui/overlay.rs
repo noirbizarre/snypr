@@ -3,10 +3,12 @@
 //! Capture button, and the tray "Annotate region…" entry).
 //!
 //! Spawns one `gtk4_layer_shell` window per monitor at `Layer::Overlay`. Each hosts an
-//! [`AnnotationCanvas`] sized to its monitor, plus a floating bottom-center
-//! [`crate::ui::Toolbar`]. The keyboard is grabbed exclusively while the overlay is alive so
-//! the user's tool shortcuts always reach us, even when input passthrough lets pointer events
-//! fall through to whatever app is underneath.
+//! [`AnnotationCanvas`] sized to its monitor. A **single** floating bottom-center
+//! [`crate::ui::Toolbar`] is shared across every monitor and reparented onto the focused
+//! monitor's window as Hyprland focus changes (see [`crate::ui::toolbar::ToolbarHost`] and
+//! [`attach_focus`]). The keyboard is grabbed exclusively while the overlay is alive so the
+//! user's tool shortcuts always reach us, even when input passthrough lets pointer events fall
+//! through to whatever app is underneath.
 //!
 //! Two modes are supported via [`OverlayMode`]:
 //!
@@ -42,7 +44,9 @@ use crate::output::Outputs;
 use crate::ui::canvas::AnnotationCanvas;
 use crate::ui::save::{SaveFn, sinks_save_fn};
 use crate::ui::selector;
-use crate::ui::toolbar::{EDITOR_TOOLS, OVERLAY_TOOLS, Toolbar, ToolbarAction, ToolbarSpec};
+use crate::ui::toolbar::{
+    EDITOR_TOOLS, OVERLAY_TOOLS, Toolbar, ToolbarAction, ToolbarHost, ToolbarSpec,
+};
 /// How the overlay should behave on this invocation.
 pub enum OverlayMode {
     /// Live draw on top of the desktop (today's `hyprsnap draw` flow).
@@ -99,9 +103,18 @@ pub async fn run(
     let written: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::sync_channel::<Result<()>>(1);
     let collected = written.clone();
-    tokio::task::spawn_blocking(move || run_gtk(ctx, mode, tx, shutdown, commands, collected))
-        .await
-        .map_err(|e| anyhow!("overlay task panicked: {e}"))??;
+    // Resolve the focused monitor up front (one-shot IPC) so the toolbar can be parented onto it
+    // before the windows are presented; live follow-focus is wired separately inside the GTK
+    // thread. Silent fallback to `None` (→ first monitor) when not under Hyprland.
+    let focused = crate::hypr::focused_monitor().await.ok();
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        run_gtk(
+            ctx, mode, tx, shutdown, commands, collected, focused, handle,
+        )
+    })
+    .await
+    .map_err(|e| anyhow!("overlay task panicked: {e}"))??;
     rx.recv()
         .map_err(|e| anyhow!("overlay channel closed without a result: {e}"))??;
     Ok(std::mem::take(&mut written.lock().unwrap()))
@@ -109,12 +122,18 @@ pub async fn run(
 
 type CanvasRegistry = Rc<RefCell<Vec<MonitorCanvas>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
-type ToolbarRegistry = Rc<RefCell<Vec<Toolbar>>>;
 type ResultSender = Arc<Mutex<Option<mpsc::SyncSender<Result<()>>>>>;
+/// Shared handle to the Hyprland focus-event reader's shutdown channel. Fired by [`tear_down`].
+type FocusShutdown = Rc<RefCell<Option<tokio::sync::oneshot::Sender<()>>>>;
 
 /// Per-monitor canvas paired with the region of the unified Edit-mode buffer it owns. In Draw
 /// mode `slice` is `None` and the canvas is empty + transparent.
 struct MonitorCanvas {
+    /// GDK monitor index (`display.monitors()` position). Lets focus-driven actions (e.g. Undo)
+    /// target the canvas of the monitor currently hosting the toolbar, even in Edit mode where
+    /// non-intersecting monitors are skipped and the registry index no longer matches the GDK
+    /// index.
+    index: usize,
     canvas: AnnotationCanvas,
     /// Top-left + size of this canvas's pixels in the unified `base` coordinate space. Only
     /// set in Edit mode.
@@ -126,6 +145,7 @@ struct MonitorCanvas {
     monitor_rect: Rect,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_gtk(
     ctx: Ctx,
     mode: OverlayMode,
@@ -133,6 +153,8 @@ fn run_gtk(
     shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
     commands: Option<OverlayCommandRx>,
     collected: Arc<Mutex<Vec<PathBuf>>>,
+    focused: Option<String>,
+    handle: tokio::runtime::Handle,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
@@ -145,6 +167,7 @@ fn run_gtk(
         Rc::new(RefCell::new(shutdown));
     let commands_cell: Rc<RefCell<Option<OverlayCommandRx>>> = Rc::new(RefCell::new(commands));
     let mode_cell: Rc<RefCell<Option<OverlayMode>>> = Rc::new(RefCell::new(Some(mode)));
+    let focused_cell: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(focused));
     let collected_cell = collected.clone();
 
     {
@@ -156,7 +179,15 @@ fn run_gtk(
             let Some(mode) = mode_cell.borrow_mut().take() else {
                 return;
             };
-            match build_overlays(app, ctx.clone(), mode, collected_cell.clone()) {
+            let focused = focused_cell.borrow_mut().take();
+            match build_overlays(
+                app,
+                ctx.clone(),
+                mode,
+                collected_cell.clone(),
+                focused.as_deref(),
+                &handle,
+            ) {
                 Ok(shared) => {
                     if let Some(rx) = shutdown_cell.borrow_mut().take() {
                         attach_shutdown(&shared, rx);
@@ -188,12 +219,13 @@ fn run_gtk(
 /// tear the overlay down cleanly without racing the GTK thread.
 fn attach_shutdown(shared: &Shared, rx: tokio::sync::oneshot::Receiver<()>) {
     let windows = shared.windows.clone();
+    let focus_shutdown = shared.focus_shutdown.clone();
     let app_weak = shared.app_weak.clone();
     glib::MainContext::default().spawn_local(async move {
         // If the sender is dropped without firing, await yields Err; either way we tear down so
         // the overlay doesn't outlive the daemon-side state.
         let _ = rx.await;
-        tear_down(&windows, &app_weak);
+        tear_down(&windows, &focus_shutdown, &app_weak);
     });
 }
 
@@ -204,15 +236,29 @@ fn attach_shutdown(shared: &Shared, rx: tokio::sync::oneshot::Receiver<()>) {
 fn attach_commands(shared: &Shared, mut rx: OverlayCommandRx) {
     let passthrough = shared.passthrough.clone();
     let windows = shared.windows.clone();
-    let toolbars = shared.toolbars.clone();
+    let host = shared.host.clone();
     glib::MainContext::default().spawn_local(async move {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 OverlayCommand::TogglePassthrough => {
                     let next = !passthrough.get();
-                    apply_passthrough_state(&passthrough, &windows, &toolbars, next);
+                    apply_passthrough_state(&passthrough, &windows, &host, next);
                 }
             }
+        }
+    });
+}
+
+/// Wire the Hyprland focus subscription into the GTK main context: each focused-monitor change
+/// reparents the single shared toolbar onto the newly focused monitor's window. Runs on the GLib
+/// main thread (the toolbar widget is `!Send`); only connector `String`s cross from the tokio
+/// reader task. Stops when the `watch` sender is dropped (the focus task shuts down on teardown).
+fn attach_focus(shared: &Shared, mut rx: tokio::sync::watch::Receiver<Option<String>>) {
+    let host = shared.host.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while rx.changed().await.is_ok() {
+            let name = rx.borrow_and_update().clone();
+            host.move_to_connector(name.as_deref());
         }
     });
 }
@@ -230,6 +276,8 @@ fn build_overlays(
     ctx: Ctx,
     mode: OverlayMode,
     collected: Arc<Mutex<Vec<PathBuf>>>,
+    focused: Option<&str>,
+    handle: &tokio::runtime::Handle,
 ) -> Result<Shared> {
     crate::ui::style::install();
 
@@ -284,12 +332,44 @@ fn build_overlays(
         ToolKind::Freehand
     };
 
+    // A single toolbar follows focus across monitors. Edit mode shows the full editor toolset
+    // (incl. Blur + Crop) plus a Save button; Draw mode keeps the slimmer overlay set (no Crop)
+    // and adds the passthrough toggle + Clear shortcut.
+    let toolbar = if edit.is_some() {
+        Toolbar::new(ToolbarSpec {
+            tools: EDITOR_TOOLS,
+            show_undo: true,
+            show_save: true,
+            show_color_picker: true,
+            show_style_picker: true,
+            show_font_size_picker: true,
+            initial_tool: Some(initial_tool),
+            ..Default::default()
+        })
+    } else {
+        Toolbar::new(ToolbarSpec {
+            tools: OVERLAY_TOOLS,
+            show_undo: true,
+            show_clear: true,
+            show_save: draw_save.is_some(),
+            show_passthrough_toggle: true,
+            show_color_picker: true,
+            show_style_picker: true,
+            show_font_size_picker: true,
+            initial_tool: Some(initial_tool),
+            initial_passthrough,
+            ..Default::default()
+        })
+    };
+    let host = ToolbarHost::new(toolbar);
+
     let shared = Shared {
         passthrough: Rc::new(Cell::new(initial_passthrough)),
         current_tool: Rc::new(Cell::new(initial_tool)),
         canvases: Rc::new(RefCell::new(Vec::new())),
         windows: Rc::new(RefCell::new(Vec::new())),
-        toolbars: Rc::new(RefCell::new(Vec::new())),
+        host,
+        focus_shutdown: Rc::new(RefCell::new(None)),
         app_weak: app.downgrade(),
         edit: edit.map(Rc::new),
         draw_save,
@@ -301,6 +381,9 @@ fn build_overlays(
         edit_veil_dim: ctx.config.ui.selector.dim_strong.to_rgba(),
     };
 
+    // Wire the single toolbar's actions once (Tool/Color/Style/Clear/Passthrough/Undo/Save).
+    wire_toolbar(&shared);
+
     let mut windows = Vec::with_capacity(n as usize);
     for i in 0..n {
         let Some(obj) = monitors_list.item(i) else {
@@ -309,7 +392,7 @@ fn build_overlays(
         let Ok(monitor) = obj.downcast::<gdk4::Monitor>() else {
             continue;
         };
-        if let Some(w) = spawn_monitor_overlay(app, &monitor, &shared) {
+        if let Some(w) = spawn_monitor_overlay(app, &monitor, i as usize, &shared) {
             windows.push(w);
         }
     }
@@ -317,6 +400,15 @@ fn build_overlays(
     if windows.is_empty() {
         bail!("{}", crate::i18n::fl!("error-overlay-no-monitor"));
     }
+
+    // Seed the picker swatches from a built canvas now that they exist (every canvas shares the
+    // same `apply_color_defaults`, so the first is representative).
+    seed_toolbar_from_canvas(&shared);
+
+    // Parent the single toolbar onto the focused monitor (or the first window) before the
+    // batched present below, so it maps in the right place in the same frame.
+    shared.host.place_initial(focused);
+
     // Two-phase: every per-monitor window is fully built above, so the loop below can
     // commit the initial Wayland surfaces back-to-back without GTK doing any widget /
     // pixel-slice work in between. The compositor then maps every layer surface in the
@@ -324,6 +416,15 @@ fn build_overlays(
     for w in &windows {
         w.present();
     }
+
+    // Live follow-focus: subscribe to Hyprland focus events and reparent the toolbar as the
+    // focused monitor changes. Best-effort — a non-Hyprland host simply leaves the toolbar on
+    // its initial monitor. The `oneshot` lets `tear_down` stop the reader task cleanly.
+    let (focus_tx, focus_rx) = tokio::sync::oneshot::channel();
+    *shared.focus_shutdown.borrow_mut() = Some(focus_tx);
+    let focus_watch = crate::hypr::subscribe_focus(handle, focus_rx);
+    attach_focus(&shared, focus_watch);
+
     Ok(shared)
 }
 
@@ -359,7 +460,12 @@ struct Shared {
     current_tool: Rc<Cell<ToolKind>>,
     canvases: CanvasRegistry,
     windows: WindowRegistry,
-    toolbars: ToolbarRegistry,
+    /// The single shared toolbar plus the per-monitor overlay registry it's reparented between
+    /// as focus changes.
+    host: Rc<ToolbarHost>,
+    /// Fires on `tear_down` to stop the Hyprland focus-event reader task (see [`attach_focus`]).
+    /// `Rc` so the teardown closures (Esc handler, Save, daemon shutdown) can each reach it.
+    focus_shutdown: FocusShutdown,
     app_weak: glib::WeakRef<gtk4::Application>,
     edit: Option<Rc<EditState>>,
     /// Set in Draw mode when the overlay should respond to Save (Ctrl+S / Enter / click).
@@ -388,6 +494,7 @@ struct Shared {
 fn spawn_monitor_overlay(
     app: &gtk4::Application,
     monitor: &gdk4::Monitor,
+    index: usize,
     shared: &Shared,
 ) -> Option<gtk4::ApplicationWindow> {
     let geo = monitor.geometry();
@@ -470,38 +577,6 @@ fn spawn_monitor_overlay(
     }
     canvas.set_tool(shared.current_tool.get());
 
-    // Edit mode shows the full editor toolset (incl. Blur + Crop) plus a Save button. Draw
-    // mode keeps the slimmer overlay set (no Crop) and adds the passthrough toggle + Clear
-    // shortcut. Blur is in the overlay too: it grabs the desktop into a hidden base on first
-    // use so the GSK blur node has real pixels to sample.
-    let toolbar = if shared.edit.is_some() {
-        Toolbar::new(ToolbarSpec {
-            tools: EDITOR_TOOLS,
-            show_undo: true,
-            show_save: true,
-            show_color_picker: true,
-            show_style_picker: true,
-            show_font_size_picker: true,
-            initial_tool: Some(shared.current_tool.get()),
-            ..Default::default()
-        })
-    } else {
-        Toolbar::new(ToolbarSpec {
-            tools: OVERLAY_TOOLS,
-            show_undo: true,
-            show_clear: true,
-            show_save: shared.draw_save.is_some(),
-            show_passthrough_toggle: true,
-            show_color_picker: true,
-            show_style_picker: true,
-            show_font_size_picker: true,
-            initial_tool: Some(shared.current_tool.get()),
-            initial_passthrough: shared.passthrough.get(),
-            ..Default::default()
-        })
-    };
-    wire_toolbar(&toolbar, shared, &canvas);
-
     let overlay = gtk4::Overlay::new();
 
     // For Edit mode, anchor the document to its slice's intra-monitor offset so the captured
@@ -519,8 +594,8 @@ fn spawn_monitor_overlay(
         // Veil: paint `dim_strong` over the four strips around the slice so the annotation
         // editor inherits the visual context the user just saw in the region selector. The
         // veil widget fills the layer-shell surface (full monitor) and sits *below* the
-        // canvas in the overlay z-order; the canvas covers the transparent hole. The
-        // toolbar (added below) stays on top of both.
+        // canvas in the overlay z-order; the canvas covers the transparent hole. The single
+        // toolbar (parented here only while this monitor is focused) stays on top of both.
         let veil = EditVeil::new(
             shared.edit_veil_dim,
             (offset_x, offset_y),
@@ -532,29 +607,39 @@ fn spawn_monitor_overlay(
         overlay.set_child(Some(&canvas));
     }
 
-    toolbar.widget().set_halign(gtk4::Align::Center);
-    toolbar.widget().set_valign(gtk4::Align::End);
-    toolbar.widget().set_margin_bottom(24);
-    overlay.add_overlay(toolbar.widget());
-
     window.set_child(Some(&overlay));
     install_keys(&window, shared);
-    toolbar.install_shortcuts(&window);
 
+    // A single toolbar follows focus. Its shortcut controller is installed on *every* window
+    // (it drives the shared toolbar state regardless of where the widget is parented), so
+    // keyboard shortcuts keep working no matter which monitor the compositor focuses. The host
+    // owns the overlay→toolbar parenting; this window doesn't add the toolbar itself.
+    let toolbar = shared.host.toolbar();
+    toolbar.install_shortcuts(&window);
     let toolbar_widget = toolbar.widget().clone();
+    shared.host.register(
+        index,
+        monitor.connector().map(|s| s.to_string()),
+        &overlay,
+        &window,
+    );
+
     shared.canvases.borrow_mut().push(MonitorCanvas {
+        index,
         canvas: canvas.clone(),
         slice,
         monitor_rect: mon_rect,
     });
-    shared.toolbars.borrow_mut().push(toolbar);
     shared.windows.borrow_mut().push(window.clone());
 
     // GDK4's Wayland backend recomputes wl_surface::set_input_region every frame from the
     // widget allocation, so a one-shot set_input_region call gets clobbered on the next
     // paint. Install a frame-clock::after-paint handler that re-asserts the desired region
-    // on every frame, driven by the shared passthrough cell. The handler covers Draw and
-    // Edit alike — Edit just keeps the full-window region every frame, a no-op.
+    // on every frame, driven by the shared passthrough cell. Every window references the *same*
+    // shared toolbar widget; `compute_bounds(window)` returns `Some` only for the window
+    // currently parenting it, so the region math naturally targets the hosting window and
+    // leaves the others empty (full passthrough) when passthrough is on. The handler covers
+    // Draw and Edit alike — Edit just keeps the full-window region every frame, a no-op.
     install_passthrough_for_surface(&window, toolbar_widget, shared.passthrough.clone());
     Some(window)
 }
@@ -573,7 +658,7 @@ fn spawn_monitor_overlay(
 fn apply_passthrough_state(
     passthrough: &Rc<Cell<bool>>,
     windows: &WindowRegistry,
-    toolbars: &ToolbarRegistry,
+    host: &Rc<ToolbarHost>,
     on: bool,
 ) {
     passthrough.set(on);
@@ -593,9 +678,7 @@ fn apply_passthrough_state(
             s.queue_render();
         }
     }
-    for t in toolbars.borrow().iter() {
-        t.set_passthrough(on);
-    }
+    host.toolbar().set_passthrough(on);
     tracing::info!(passthrough = on, "overlay passthrough toggled");
 }
 
@@ -603,34 +686,30 @@ fn apply_passthrough_state(
 /// propagate across monitors so all toolbars stay in lockstep with the canvases. Save (Edit
 /// mode only) composes every per-monitor canvas, stitches the slices back into a single
 /// buffer at the original base size, fans the result out to sinks, and tears down.
-fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
+/// Wire the single shared toolbar's actions back into the overlay state. Tool / Color / Style /
+/// Clear propagate to every per-monitor canvas so the active tool is consistent regardless of
+/// which monitor currently hosts the toolbar. Undo targets the **focused** monitor's canvas (the
+/// one the user is looking at). Save (Edit mode only) composes every per-monitor canvas, stitches
+/// the slices back into a single buffer at the original base size, fans the result out to sinks,
+/// and tears down.
+///
+/// Called once in [`build_overlays`] *before* the per-monitor canvases exist; the closure reads
+/// the canvas registry lazily, so it sees every canvas by the time the user interacts. The
+/// picker swatches are seeded separately by [`seed_toolbar_from_canvas`] after the canvases are
+/// built.
+fn wire_toolbar(shared: &Shared) {
     let canvases = shared.canvases.clone();
     let windows = shared.windows.clone();
-    let toolbars = shared.toolbars.clone();
+    let host = shared.host.clone();
     let passthrough = shared.passthrough.clone();
     let current_tool = shared.current_tool.clone();
-    let canvas_weak = canvas.downgrade();
     let edit = shared.edit.clone();
     let draw_save = shared.draw_save.clone();
     let app_weak = shared.app_weak.clone();
+    let focus_shutdown = shared.focus_shutdown.clone();
     let blur_in_flight = shared.blur_capture_in_flight.clone();
 
-    // Seed the picker with the initial tool's color + correct sensitivity. Done up front so
-    // the picker doesn't show its built-in default before the user touches a tool button.
-    let initial_kind = current_tool.get();
-    if let Some(color) = canvas.tool_color(initial_kind) {
-        toolbar.set_color(color);
-    }
-    toolbar.set_color_picker_sensitive(kind_is_colorable(initial_kind));
-    if let Some(style) = canvas.tool_style(initial_kind) {
-        toolbar.set_stroke_style(style);
-    }
-    toolbar.set_style_picker_sensitive(kind_is_styleable(initial_kind));
-    if let Some(size) = canvas.tool_font_size(initial_kind) {
-        toolbar.set_font_size(size);
-    }
-    toolbar.set_font_size_picker_sensitive(kind_has_font_size(initial_kind));
-
+    let toolbar = shared.host.toolbar();
     toolbar.connect(move |action| match action {
         ToolbarAction::ToolSelected(kind) => {
             current_tool.set(kind);
@@ -654,14 +733,14 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
                 glib::MainContext::default().spawn_local(ensure_draw_blur_base(
                     canvases.clone(),
                     windows.clone(),
-                    toolbars.clone(),
+                    host.clone(),
                     passthrough.clone(),
                     ds.runtime.clone(),
                     blur_in_flight.clone(),
                 ));
             }
-            // Push the new tool's stored color into every peer toolbar's swatch (silently),
-            // and toggle picker sensitivity for tools with hardcoded appearance.
+            // Push the new tool's stored color into the toolbar swatch (silently), and toggle
+            // picker sensitivity for tools with hardcoded appearance.
             let color = canvases
                 .borrow()
                 .first()
@@ -674,24 +753,20 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
                 .borrow()
                 .first()
                 .and_then(|c| c.canvas.tool_font_size(kind));
-            let colorable = kind_is_colorable(kind);
-            let styleable = kind_is_styleable(kind);
-            let has_font_size = kind_has_font_size(kind);
-            for t in toolbars.borrow().iter() {
-                t.set_tool(kind);
-                if let Some(c) = color {
-                    t.set_color(c);
-                }
-                t.set_color_picker_sensitive(colorable);
-                if let Some(s) = style {
-                    t.set_stroke_style(s);
-                }
-                t.set_style_picker_sensitive(styleable);
-                if let Some(s) = font_size {
-                    t.set_font_size(s);
-                }
-                t.set_font_size_picker_sensitive(has_font_size);
+            let t = host.toolbar();
+            t.set_tool(kind);
+            if let Some(c) = color {
+                t.set_color(c);
             }
+            t.set_color_picker_sensitive(kind_is_colorable(kind));
+            if let Some(s) = style {
+                t.set_stroke_style(s);
+            }
+            t.set_style_picker_sensitive(kind_is_styleable(kind));
+            if let Some(s) = font_size {
+                t.set_font_size(s);
+            }
+            t.set_font_size_picker_sensitive(kind_has_font_size(kind));
         }
         ToolbarAction::ColorChanged(color) => {
             let kind = current_tool.get();
@@ -700,10 +775,6 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             }
             for c in canvases.borrow().iter() {
                 c.canvas.set_tool_color(kind, color);
-            }
-            // Sync peer toolbars on other monitors so their swatches reflect the new color.
-            for t in toolbars.borrow().iter() {
-                t.set_color(color);
             }
         }
         ToolbarAction::StrokeStyleChanged(style) => {
@@ -714,9 +785,6 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             for c in canvases.borrow().iter() {
                 c.canvas.set_tool_style(kind, style);
             }
-            for t in toolbars.borrow().iter() {
-                t.set_stroke_style(style);
-            }
         }
         ToolbarAction::FontSizeChanged(size) => {
             let kind = current_tool.get();
@@ -726,13 +794,17 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             for c in canvases.borrow().iter() {
                 c.canvas.set_tool_font_size(kind, size);
             }
-            for t in toolbars.borrow().iter() {
-                t.set_font_size(size);
-            }
         }
         ToolbarAction::Undo => {
-            if let Some(c) = canvas_weak.upgrade() {
-                c.undo();
+            // Undo on the focused monitor's canvas — the one the user is looking at. Falls back
+            // to the first canvas if the host doesn't know which monitor hosts the toolbar yet.
+            let canvases = canvases.borrow();
+            let target = host
+                .current_index()
+                .and_then(|idx| canvases.iter().find(|c| c.index == idx))
+                .or_else(|| canvases.first());
+            if let Some(c) = target {
+                c.canvas.undo();
             }
         }
         ToolbarAction::Clear => {
@@ -741,7 +813,7 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
             }
         }
         ToolbarAction::PassthroughToggled(on) => {
-            apply_passthrough_state(&passthrough, &windows, &toolbars, on);
+            apply_passthrough_state(&passthrough, &windows, &host, on);
         }
         ToolbarAction::Save => {
             if let Some(edit) = edit.as_ref() {
@@ -751,7 +823,7 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
                             for p in &paths {
                                 println!("{}", p.display());
                             }
-                            tear_down(&windows, &app_weak);
+                            tear_down(&windows, &focus_shutdown, &app_weak);
                         }
                         Err(err) => tracing::error!(error = ?err, "save failed"),
                     },
@@ -764,7 +836,7 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
                 glib::MainContext::default().spawn_local(run_draw_save(
                     app_weak.clone(),
                     windows.clone(),
-                    toolbars.clone(),
+                    host.clone(),
                     passthrough.clone(),
                     draw_save.clone(),
                 ));
@@ -772,6 +844,31 @@ fn wire_toolbar(toolbar: &Toolbar, shared: &Shared, canvas: &AnnotationCanvas) {
         }
         _ => {}
     });
+}
+
+/// Seed the toolbar's color / style / font-size pickers from the initial tool's stored defaults
+/// so they don't flash their built-in values before the user touches a tool button. Reads the
+/// first per-monitor canvas (all share identical `apply_color_defaults`). No-op if no canvas was
+/// built.
+fn seed_toolbar_from_canvas(shared: &Shared) {
+    let canvases = shared.canvases.borrow();
+    let Some(mc) = canvases.first() else {
+        return;
+    };
+    let toolbar = shared.host.toolbar();
+    let kind = shared.current_tool.get();
+    if let Some(color) = mc.canvas.tool_color(kind) {
+        toolbar.set_color(color);
+    }
+    toolbar.set_color_picker_sensitive(kind_is_colorable(kind));
+    if let Some(style) = mc.canvas.tool_style(kind) {
+        toolbar.set_stroke_style(style);
+    }
+    toolbar.set_style_picker_sensitive(kind_is_styleable(kind));
+    if let Some(size) = mc.canvas.tool_font_size(kind) {
+        toolbar.set_font_size(size);
+    }
+    toolbar.set_font_size_picker_sensitive(kind_has_font_size(kind));
 }
 
 /// Tools whose appearance is driven by the picker. Blur, Crop and Redact have hardcoded
@@ -885,7 +982,7 @@ fn compose_edit(canvases: &[MonitorCanvas], edit: &EditState) -> Result<Captured
 async fn ensure_draw_blur_base(
     canvases: CanvasRegistry,
     _windows: WindowRegistry,
-    toolbars: ToolbarRegistry,
+    host: Rc<ToolbarHost>,
     _passthrough: Rc<Cell<bool>>,
     runtime: tokio::runtime::Handle,
     blur_in_flight: Rc<Cell<bool>>,
@@ -893,14 +990,9 @@ async fn ensure_draw_blur_base(
     // Toolbar chrome is opaque; hide it so it doesn't end up in the blur source. Snapshot
     // visibility so we restore exactly what the user had (in case a future feature toggles
     // it externally).
-    let prev_toolbar_visible: Vec<bool> = toolbars
-        .borrow()
-        .iter()
-        .map(|t| t.widget().is_visible())
-        .collect();
-    for t in toolbars.borrow().iter() {
-        t.widget().set_visible(false);
-    }
+    let toolbar_widget = host.toolbar().widget().clone();
+    let prev_toolbar_visible = toolbar_widget.is_visible();
+    toolbar_widget.set_visible(false);
 
     // Yield long enough for the toolbar-hide commit to reach the compositor. One frame at
     // 60 Hz + a small margin matches what `run_draw_save` uses for the same purpose.
@@ -931,9 +1023,7 @@ async fn ensure_draw_blur_base(
 
     // Restore toolbar visibility before we touch the canvases — keeps the visual blip as
     // short as possible (the post-capture set_hidden_base only queues a redraw).
-    for (t, vis) in toolbars.borrow().iter().zip(&prev_toolbar_visible) {
-        t.widget().set_visible(*vis);
-    }
+    toolbar_widget.set_visible(prev_toolbar_visible);
 
     if let Some(stitched) = stitched {
         // Stitched origin is the bounding-box top-left in compositor logical coordinates;
@@ -1004,7 +1094,7 @@ fn stitched_origin(_stitched: &CapturedImage) -> (i32, i32) {
 async fn run_draw_save(
     app_weak: glib::WeakRef<gtk4::Application>,
     windows: WindowRegistry,
-    toolbars: ToolbarRegistry,
+    host: Rc<ToolbarHost>,
     passthrough: Rc<Cell<bool>>,
     draw_save: Rc<DrawSaveState>,
 ) {
@@ -1012,17 +1102,16 @@ async fn run_draw_save(
         return;
     };
 
-    // Snapshot the current passthrough state so we can restore it on the way out. Then hide
-    // every per-monitor draw toolbar and force passthrough ON: with the toolbars unmapped,
-    // `apply_passthrough_state` will fall back to an empty input region (no toolbar bounds
-    // to keep clickable), and `KeyboardMode::None` detaches the keyboard. Net effect: the
-    // draw overlay is fully transparent to input, so the selector that we map next
-    // receives every pointer + keyboard event.
+    // Snapshot the current passthrough state so we can restore it on the way out. Then hide the
+    // draw toolbar and force passthrough ON: with the toolbar unmapped, `apply_passthrough_state`
+    // falls back to an empty input region (no toolbar bounds to keep clickable), and
+    // `KeyboardMode::None` detaches the keyboard. Net effect: the draw overlay is fully
+    // transparent to input, so the selector that we map next receives every pointer + keyboard
+    // event.
+    let toolbar_widget = host.toolbar().widget().clone();
     let prev_passthrough = passthrough.get();
-    for t in toolbars.borrow().iter() {
-        t.widget().set_visible(false);
-    }
-    apply_passthrough_state(&passthrough, &windows, &toolbars, true);
+    toolbar_widget.set_visible(false);
+    apply_passthrough_state(&passthrough, &windows, &host, true);
 
     // Yield once so the parking commit (KeyboardMode swap + toolbar unmap) reaches the
     // compositor before the selector maps. Without this, Hyprland can route the first
@@ -1053,10 +1142,8 @@ async fn run_draw_save(
             } else {
                 tracing::info!(error = ?err, "draw-save: selector cancelled");
             }
-            for t in toolbars.borrow().iter() {
-                t.widget().set_visible(true);
-            }
-            apply_passthrough_state(&passthrough, &windows, &toolbars, prev_passthrough);
+            toolbar_widget.set_visible(true);
+            apply_passthrough_state(&passthrough, &windows, &host, prev_passthrough);
             return;
         }
     };
@@ -1111,20 +1198,19 @@ async fn run_draw_save(
         Err(err) => tracing::error!(error = ?err, "draw-save: capture task panicked"),
     }
 
-    for t in toolbars.borrow().iter() {
-        t.widget().set_visible(true);
-    }
-    apply_passthrough_state(&passthrough, &windows, &toolbars, prev_passthrough);
+    toolbar_widget.set_visible(true);
+    apply_passthrough_state(&passthrough, &windows, &host, prev_passthrough);
 }
 
 /// Window-level keys not owned by the toolbar (Esc to quit).
 fn install_keys(window: &gtk4::ApplicationWindow, shared: &Shared) {
     let key = gtk4::EventControllerKey::new();
     let windows = shared.windows.clone();
+    let focus_shutdown = shared.focus_shutdown.clone();
     let app_weak = shared.app_weak.clone();
     key.connect_key_pressed(move |_, k, _, _| match k {
         gdk4::Key::Escape => {
-            tear_down(&windows, &app_weak);
+            tear_down(&windows, &focus_shutdown, &app_weak);
             glib::Propagation::Stop
         }
         _ => glib::Propagation::Proceed,
@@ -1195,6 +1281,14 @@ fn install_passthrough_for_surface(
 /// pointer events. When it is on, only the toolbar widget's bounding box absorbs events;
 /// everything else (the transparent canvas) falls through to the application underneath.
 ///
+/// There is a **single** shared toolbar that follows focus, so `toolbar` is the same widget for
+/// every per-monitor window's handler. `toolbar_input_region` returns `None` (→ empty region,
+/// full passthrough) for any window that does **not** currently parent the toolbar, because
+/// `compute_bounds` only resolves when both widgets share a window. Net effect under passthrough:
+/// only the focused monitor's window keeps the toolbar bounds clickable; every other monitor
+/// falls through entirely. The region is recomputed every frame, so it self-corrects within one
+/// frame whenever the toolbar reparents to a new monitor.
+///
 /// Keeping the toolbar clickable in passthrough mode is what lets the user — or anyone
 /// without a Hyprland keybind wired to the IPC — recover: a click on the toolbar's
 /// passthrough button flips the cell back, the next frame restores the full input region,
@@ -1238,7 +1332,16 @@ fn toolbar_input_region(
     )))
 }
 
-fn tear_down(windows: &WindowRegistry, app_weak: &glib::WeakRef<gtk4::Application>) {
+fn tear_down(
+    windows: &WindowRegistry,
+    focus_shutdown: &FocusShutdown,
+    app_weak: &glib::WeakRef<gtk4::Application>,
+) {
+    // Stop the Hyprland focus-event reader so its `.socket2.sock` connection closes promptly
+    // (otherwise it lingers until the watch receiver is dropped with the GTK app).
+    if let Some(tx) = focus_shutdown.borrow_mut().take() {
+        let _ = tx.send(());
+    }
     for window in windows.borrow_mut().drain(..) {
         window.set_visible(false);
         window.destroy();

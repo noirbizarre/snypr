@@ -1719,6 +1719,155 @@ fn refit_color_dialog(dlg: &gtk4::Window) {
     }
 }
 
+/// One per-monitor host slot: the overlay (and its window) that can parent the single shared
+/// toolbar, plus the identity needed to target it from a Hyprland focus event.
+struct ToolbarSlot {
+    /// GDK monitor index (`display.monitors()` position). Surface code maps this back to its own
+    /// per-monitor registries (selector `MonitorInfo`, overlay `MonitorCanvas`).
+    index: usize,
+    /// GDK `Monitor::connector()` (e.g. `DP-1`), matched against Hyprland's focused-monitor name.
+    connector: Option<String>,
+    overlay: gtk4::Overlay,
+    window: gtk4::ApplicationWindow,
+}
+
+/// Tracks which per-monitor window currently hosts the **single** shared [`Toolbar`] and moves
+/// it between monitors as Hyprland focus changes.
+///
+/// HyprSnap keeps one fullscreen layer-shell window per monitor (for dimming / canvas / capture),
+/// but only one toolbar — on the focused monitor. Reparenting a GTK widget means
+/// `old_overlay.remove_overlay(w)` then `new_overlay.add_overlay(w)`; this type owns that move and
+/// the slot registry.
+///
+/// `!Send` (holds GTK widgets); lives entirely on the GTK main thread. Wrap in [`Rc`] so focus
+/// event handlers can hold a clone.
+pub struct ToolbarHost {
+    toolbar: Toolbar,
+    slots: RefCell<Vec<ToolbarSlot>>,
+    /// Index into `slots` currently parenting the toolbar widget, if any.
+    current: Cell<Option<usize>>,
+}
+
+impl ToolbarHost {
+    /// Create a host for `toolbar`. The toolbar's alignment is fixed to bottom-center here so it
+    /// renders identically regardless of which monitor's overlay currently parents it.
+    pub fn new(toolbar: Toolbar) -> Rc<Self> {
+        let w = toolbar.widget();
+        w.set_halign(gtk4::Align::Center);
+        w.set_valign(gtk4::Align::End);
+        w.set_margin_bottom(24);
+        Rc::new(Self {
+            toolbar,
+            slots: RefCell::new(Vec::new()),
+            current: Cell::new(None),
+        })
+    }
+
+    /// Register a monitor's overlay + window. Call once per per-monitor window, in build order.
+    pub fn register(
+        &self,
+        index: usize,
+        connector: Option<String>,
+        overlay: &gtk4::Overlay,
+        window: &gtk4::ApplicationWindow,
+    ) {
+        self.slots.borrow_mut().push(ToolbarSlot {
+            index,
+            connector,
+            overlay: overlay.clone(),
+            window: window.clone(),
+        });
+    }
+
+    /// The single shared toolbar.
+    pub fn toolbar(&self) -> &Toolbar {
+        &self.toolbar
+    }
+
+    /// GDK monitor index of the window currently hosting the toolbar, if any. Surfaces use this to
+    /// route actions (selector Screen-mode capture target, overlay Undo) to the focused monitor.
+    pub fn current_index(&self) -> Option<usize> {
+        let pos = self.current.get()?;
+        self.slots.borrow().get(pos).map(|s| s.index)
+    }
+
+    /// Move the toolbar into the slot whose GDK monitor `index` matches. No-op if it's already
+    /// there or no such slot exists.
+    pub fn move_to_index(&self, index: usize) {
+        let slots = self.slots.borrow();
+        let Some(target) = slots.iter().position(|s| s.index == index) else {
+            return;
+        };
+        self.move_to_slot(&slots, target);
+    }
+
+    /// Move the toolbar to the slot matching Hyprland connector `name`.
+    ///
+    /// Live (focus-driven) behavior is best-effort: a name with no matching slot leaves the
+    /// toolbar where it is, rather than yanking it to an arbitrary monitor (e.g. when focus lands
+    /// on a monitor the Edit overlay skipped because it didn't intersect the capture).
+    pub fn move_to_connector(&self, name: Option<&str>) {
+        let Some(name) = name else { return };
+        let slots = self.slots.borrow();
+        let Some(target) = slots
+            .iter()
+            .position(|s| s.connector.as_deref() == Some(name))
+        else {
+            return;
+        };
+        self.move_to_slot(&slots, target);
+    }
+
+    /// Initial placement before the windows are presented: the focused monitor if it has a slot,
+    /// otherwise the first registered slot (the toolbar must start somewhere visible).
+    pub fn place_initial(&self, focused: Option<&str>) {
+        let slots = self.slots.borrow();
+        if slots.is_empty() {
+            return;
+        }
+        let target = focused
+            .and_then(|name| {
+                slots
+                    .iter()
+                    .position(|s| s.connector.as_deref() == Some(name))
+            })
+            .unwrap_or(0);
+        self.move_to_slot(&slots, target);
+    }
+
+    /// Reparent the toolbar widget into `slots[target]`. The `remove_overlay` / `add_overlay`
+    /// pair is kept synchronous and adjacent so the toolbar's children are only momentarily
+    /// unparented (the Capture button's Shift-poll timer self-cancels on `parent().is_none()`,
+    /// but GLib timeouts can't interleave between these two calls within one main-loop turn).
+    fn move_to_slot(&self, slots: &[ToolbarSlot], target: usize) {
+        if self.current.get() == Some(target) {
+            return;
+        }
+        let widget = self.toolbar.widget();
+        if let Some(old) = self.current.get()
+            && let Some(slot) = slots.get(old)
+        {
+            slot.overlay.remove_overlay(widget);
+            // Repaint the window we just left so its per-frame passthrough handler drops the
+            // toolbar-bounds input region (otherwise, under passthrough, the old monitor would
+            // keep a stray clickable rectangle for up to one frame).
+            if let Some(s) = slot.window.surface() {
+                s.queue_render();
+            }
+        }
+        let slot = &slots[target];
+        slot.overlay.add_overlay(widget);
+        self.current.set(Some(target));
+
+        // Nudge the now-hosting surface to repaint so the overlay's per-frame passthrough
+        // input-region handler re-derives that this window hosts the toolbar without waiting for
+        // organic damage. Harmless for the selector (no passthrough handler).
+        if let Some(s) = slot.window.surface() {
+            s.queue_render();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

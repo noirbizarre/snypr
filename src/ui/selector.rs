@@ -5,9 +5,10 @@
 //! starting a new drag on any monitor cancels the previous rectangle, and a mode change in the
 //! floating toolbar is reflected on every screen.
 //!
-//! The first monitor in `display.monitors()` hosts a floating bottom-center
-//! [`crate::ui::Toolbar`] with mode toggles, a cursor toggle, and a `Capture` action button.
-//! Other monitors show only the dimming/HUD layer.
+//! A **single** floating bottom-center [`crate::ui::Toolbar`] (mode toggles, cursor toggle, delay
+//! spinner, `Capture` action) is shared across monitors and reparented onto the focused monitor's
+//! window as Hyprland focus changes (see [`crate::ui::toolbar::ToolbarHost`] and [`attach_focus`]).
+//! Every monitor still shows the dimming / HUD layer; only the toolbar follows focus.
 //!
 //! Workflow per mode:
 //!   - `Screen` (default): hover a monitor to highlight it, click to commit a per-monitor capture.
@@ -35,7 +36,9 @@ use crate::capture::region::Rect;
 use crate::context::Ctx;
 use crate::hypr::{self, HyprWindow};
 use crate::i18n::fl;
-use crate::ui::toolbar::{ModeKind, SELECTOR_MODES, Toolbar, ToolbarAction, ToolbarSpec};
+use crate::ui::toolbar::{
+    ModeKind, SELECTOR_MODES, Toolbar, ToolbarAction, ToolbarHost, ToolbarSpec,
+};
 
 /// Marker error indicating the user dismissed the interactive selector
 /// (e.g. pressing Escape). Detected in `main` to exit 0 without logging
@@ -151,6 +154,10 @@ pub async fn pick_region_in_app(
     // against the caller's app. Windows are still parented to `app` (required by GTK), but
     // they're destroyed by `dismiss_overlays` so they don't keep the app alive on their own.
     let quit_target: glib::WeakRef<gtk4::Application> = glib::WeakRef::new();
+    // Captured here (a tokio context is current — the `fetch_*` IPC calls above prove it) so the
+    // focus subscription can spawn its reader task even though `build_overlays` runs inside the
+    // caller's GLib main context where `Handle::current()` isn't guaranteed.
+    let handle = tokio::runtime::Handle::current();
     if let Err(err) = build_overlays(
         app,
         &tx,
@@ -163,6 +170,7 @@ pub async fn pick_region_in_app(
         allow_annotate,
         style,
         initial_mode,
+        handle,
     ) {
         send_once(&tx, Err(err));
     }
@@ -267,8 +275,9 @@ type Sender = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<SelectorOutco
 type AreaRegistry = Rc<RefCell<Vec<SelectorOverlay>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 type MonitorList = Rc<RefCell<Vec<MonitorInfo>>>;
-type ToolbarRegistry = Rc<RefCell<Vec<Toolbar>>>;
 type ClientList = Rc<RefCell<Vec<HyprWindow>>>;
+/// Shared handle to the Hyprland focus-event reader's shutdown channel. Fired on dismiss.
+type FocusShutdown = Rc<RefCell<Option<tokio::sync::oneshot::Sender<()>>>>;
 
 fn send_once(tx: &Sender, msg: Result<SelectorOutcome>) {
     if let Ok(mut guard) = tx.lock()
@@ -377,6 +386,9 @@ fn run_gtk(
         .application_id(crate::ui::APP_ID)
         .build();
     let tx: Sender = Arc::new(Mutex::new(Some(tx)));
+    // Captured on the `spawn_blocking` worker (where a tokio runtime context is current) so the
+    // focus subscription can spawn its `.socket2.sock` reader task from the GTK thread.
+    let handle = tokio::runtime::Handle::current();
 
     {
         let tx = tx.clone();
@@ -406,6 +418,7 @@ fn run_gtk(
                 allow_annotate,
                 (*style).clone(),
                 initial_mode,
+                handle.clone(),
             ) {
                 send_once(&tx, Err(err));
                 app.quit();
@@ -435,6 +448,7 @@ fn build_overlays(
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
     initial_mode: ModeKind,
+    handle: tokio::runtime::Handle,
 ) -> Result<()> {
     crate::ui::style::install();
 
@@ -480,6 +494,22 @@ fn build_overlays(
         class: aw.class.clone(),
     });
 
+    // A single toolbar follows focus across monitors. Built once here; the per-monitor windows
+    // only host the dim veil / HUD and register their overlay with the host.
+    let initial_delay_secs = initial_delay.as_secs().min(u32::MAX as u64) as u32;
+    let toolbar = Toolbar::new(ToolbarSpec {
+        modes: SELECTOR_MODES,
+        show_cursor_toggle: true,
+        show_delay_spinner: true,
+        show_capture: true,
+        capture_shift_annotates: allow_annotate,
+        initial_mode: Some(initial_mode),
+        initial_cursor,
+        initial_delay_secs,
+        ..Default::default()
+    });
+    let host = ToolbarHost::new(toolbar);
+
     let shared = SharedState {
         selection: Rc::new(RefCell::new(SharedSelection {
             cursor: initial_cursor,
@@ -495,14 +525,15 @@ fn build_overlays(
         monitors: Rc::new(RefCell::new(Vec::new())),
         tx: tx.clone(),
         app_weak: quit_target,
-        toolbars: Rc::new(RefCell::new(Vec::new())),
+        host,
+        focus_shutdown: Rc::new(RefCell::new(None)),
         countdown_source: Rc::new(RefCell::new(None)),
-        initial_cursor,
-        initial_delay,
-        initial_mode,
         allow_annotate,
         clients: Rc::new(RefCell::new(clients)),
     };
+
+    // Wire the single toolbar's actions once (mode / cursor / delay / Capture / Annotate).
+    wire_toolbar(&shared);
 
     let mut windows = Vec::with_capacity(monitor_infos.len());
     let style = Rc::new(style);
@@ -510,12 +541,46 @@ fn build_overlays(
         shared.monitors.borrow_mut().push(info.clone());
         windows.push(spawn_monitor_overlay(app, &monitor, info, &shared, &style));
     }
+
+    // Parent the single toolbar onto the focused monitor (or the first window) before the
+    // batched present below, so it maps in the right place in the same frame. `selected_monitor`
+    // already resolved the focused connector → index; reuse the connector for the host lookup.
+    let focused_connector = selected_monitor.and_then(|idx| {
+        shared
+            .monitors
+            .borrow()
+            .get(idx)
+            .and_then(|m| m.connector.clone())
+    });
+    shared.host.place_initial(focused_connector.as_deref());
+
     // Two-phase: build every per-monitor selector window above, then commit them in a
     // tight loop so the compositor maps them in the same frame (see §23).
     for w in &windows {
         w.present();
     }
+
+    // Live follow-focus: subscribe to Hyprland focus events and reparent the toolbar as the
+    // focused monitor changes. Best-effort — a non-Hyprland host leaves the toolbar in place.
+    let (focus_tx, focus_rx) = tokio::sync::oneshot::channel();
+    *shared.focus_shutdown.borrow_mut() = Some(focus_tx);
+    let focus_watch = crate::hypr::subscribe_focus(&handle, focus_rx);
+    attach_focus(&shared, focus_watch);
+
     Ok(())
+}
+
+/// Wire the Hyprland focus subscription into the GTK main context: reparent the single shared
+/// toolbar onto the newly focused monitor's window on each focus change. Runs on the GLib main
+/// thread (the toolbar is `!Send`); only connector `String`s cross from the tokio reader task.
+fn attach_focus(shared: &SharedState, mut rx: tokio::sync::watch::Receiver<Option<String>>) {
+    let host = shared.host.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while rx.changed().await.is_ok() {
+            let name = rx.borrow_and_update().clone();
+            host.move_to_connector(name.as_deref());
+        }
+    });
 }
 
 fn spawn_monitor_overlay(
@@ -567,23 +632,23 @@ fn spawn_monitor_overlay(
         &shared.monitors,
         &shared.app_weak,
         &shared.areas,
-        &shared.toolbars,
+        &shared.host,
+        &shared.focus_shutdown,
         &shared.countdown_source,
         info.clone(),
         shared.allow_annotate,
     );
 
-    // Every monitor gets its own floating toolbar. Mode/cursor changes on any toolbar
-    // propagate to all others through the wired callbacks so the UI stays consistent.
+    // A single toolbar follows focus. This window only hosts the dim veil / HUD area; the host
+    // owns the overlay→toolbar parenting. The toolbar's shortcut controller is installed on
+    // *every* window (it drives the shared toolbar state regardless of where the widget is
+    // parented), so 1/2/3/4 / Enter / Shift work no matter which monitor the compositor focuses.
     let overlay = gtk4::Overlay::new();
     overlay.set_child(Some(&area));
-    let toolbar = build_toolbar(shared, info.clone());
-    toolbar.widget().set_halign(gtk4::Align::Center);
-    toolbar.widget().set_valign(gtk4::Align::End);
-    toolbar.widget().set_margin_bottom(24);
-    overlay.add_overlay(toolbar.widget());
-    toolbar.install_shortcuts(&window);
-    shared.toolbars.borrow_mut().push(toolbar);
+    shared.host.toolbar().install_shortcuts(&window);
+    shared
+        .host
+        .register(info.index, info.connector.clone(), &overlay, &window);
     window.set_child(Some(&overlay));
 
     shared.areas.borrow_mut().push(area.clone());
@@ -591,26 +656,12 @@ fn spawn_monitor_overlay(
     window
 }
 
-/// Build a per-monitor floating toolbar and wire its actions back into the shared selection
-/// state. Mode/cursor changes are mirrored to every other monitor's toolbar so the UI stays
-/// consistent regardless of which screen the user clicked.
-fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
-    // Round the initial delay to whole seconds for the UI; sub-second precision (e.g. a
-    // CLI `--delay 500ms`) is preserved only if the user never touches the spinner — the
-    // selector's outcome will then carry whatever `shared.initial_delay` was set to.
-    let initial_delay_secs = shared.initial_delay.as_secs().min(u32::MAX as u64) as u32;
-    let toolbar = Toolbar::new(ToolbarSpec {
-        modes: SELECTOR_MODES,
-        show_cursor_toggle: true,
-        show_delay_spinner: true,
-        show_capture: true,
-        capture_shift_annotates: shared.allow_annotate,
-        initial_mode: Some(shared.initial_mode),
-        initial_cursor: shared.initial_cursor,
-        initial_delay_secs,
-        ..Default::default()
-    });
-
+/// Wire the single shared toolbar's actions back into the selection state. With one toolbar
+/// there are no peers to mirror, so mode / cursor / delay changes update only the shared
+/// selection. Capture / Annotate resolve their `local_info` (the monitor used as the Screen-mode
+/// fallback) from the monitor currently hosting the toolbar — i.e. the focused monitor — so an
+/// Enter on the toolbar captures the screen the user is looking at.
+fn wire_toolbar(shared: &SharedState) {
     let selection = shared.selection.clone();
     let areas = shared.areas.clone();
     let tx = shared.tx.clone();
@@ -618,43 +669,35 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
     let windows = shared.windows.clone();
     let monitors = shared.monitors.clone();
     let app_weak = shared.app_weak.clone();
-    let toolbars = shared.toolbars.clone();
+    let host = shared.host.clone();
+    let focus_shutdown = shared.focus_shutdown.clone();
     let countdown_source = shared.countdown_source.clone();
+    let toolbar = shared.host.toolbar();
     toolbar.connect(move |action| match action {
         ToolbarAction::ModeSelected(mode) => {
-            {
-                let mut s = selection.borrow_mut();
-                s.mode = mode;
-                // Reset the dragged rectangle when leaving Region mode so the HUD doesn't
-                // linger over a Full/Screen/Window selection.
-                if mode != ModeKind::Region {
-                    s.owner = None;
-                    s.start = None;
-                    s.current = None;
-                }
-                // Preserve per-mode selections across mode switches so the default
-                // (focused monitor / window) — or whatever the user previously picked in
-                // that mode — is still active when they switch back. Only `hover_window`
-                // is cleared, since it's pointer-driven and would be stale until the next
-                // `motion` event re-resolves it.
-                s.hover_window = None;
+            let mut s = selection.borrow_mut();
+            s.mode = mode;
+            // Reset the dragged rectangle when leaving Region mode so the HUD doesn't
+            // linger over a Full/Screen/Window selection.
+            if mode != ModeKind::Region {
+                s.owner = None;
+                s.start = None;
+                s.current = None;
             }
-            for t in toolbars.borrow().iter() {
-                t.set_mode(mode);
-            }
+            // Preserve per-mode selections across mode switches so the default
+            // (focused monitor / window) — or whatever the user previously picked in
+            // that mode — is still active when they switch back. Only `hover_window`
+            // is cleared, since it's pointer-driven and would be stale until the next
+            // `motion` event re-resolves it.
+            s.hover_window = None;
+            drop(s);
             redraw_all(&areas);
         }
         ToolbarAction::CursorToggled(on) => {
             selection.borrow_mut().cursor = on;
-            for t in toolbars.borrow().iter() {
-                t.set_cursor(on);
-            }
         }
         ToolbarAction::DelayChanged(secs) => {
             selection.borrow_mut().delay = std::time::Duration::from_secs(secs as u64);
-            for t in toolbars.borrow().iter() {
-                t.set_delay(secs);
-            }
         }
         ToolbarAction::Capture => {
             commit(
@@ -665,9 +708,10 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
                 &monitors,
                 &app_weak,
                 &areas,
-                &toolbars,
+                &host,
+                &focus_shutdown,
                 &countdown_source,
-                Some(primary.clone()),
+                current_monitor_info(&host, &monitors),
                 false,
             );
         }
@@ -680,15 +724,22 @@ fn build_toolbar(shared: &SharedState, primary: MonitorInfo) -> Toolbar {
                 &monitors,
                 &app_weak,
                 &areas,
-                &toolbars,
+                &host,
+                &focus_shutdown,
                 &countdown_source,
-                Some(primary.clone()),
+                current_monitor_info(&host, &monitors),
                 true,
             );
         }
         _ => {}
     });
-    toolbar
+}
+
+/// `MonitorInfo` of the monitor currently hosting the toolbar (the focused monitor), used as the
+/// Screen-mode capture fallback when the user hasn't explicitly clicked a monitor.
+fn current_monitor_info(host: &Rc<ToolbarHost>, monitors: &MonitorList) -> Option<MonitorInfo> {
+    let idx = host.current_index()?;
+    monitors.borrow().iter().find(|m| m.index == idx).cloned()
 }
 
 /// Lifetimes-shared bag of per-call state passed down through `spawn_monitor_overlay`.
@@ -703,28 +754,21 @@ struct SharedState {
     /// standalone path (`pick_region`), kept empty by the embeddable path
     /// (`pick_region_in_app`) so the caller's app keeps running after the selector resolves.
     app_weak: glib::WeakRef<gtk4::Application>,
-    toolbars: ToolbarRegistry,
+    /// The single shared toolbar plus the per-monitor overlay registry it's reparented between
+    /// as Hyprland focus changes. Only the focused monitor shows the toolbar; every monitor
+    /// still shows the dim veil / HUD.
+    host: Rc<ToolbarHost>,
+    /// Fires on dismiss to stop the Hyprland focus-event reader task.
+    focus_shutdown: FocusShutdown,
     /// `glib::SourceId` of the in-flight 1-second countdown timer, if any. Held so that
     /// pressing Escape during a pre-capture delay cancels both the timer and the eventual
     /// capture. Lives in a `RefCell<Option<_>>` because `SourceId::remove` consumes the
     /// id by value.
     countdown_source: Rc<RefCell<Option<glib::SourceId>>>,
-    initial_cursor: bool,
-    /// Seed value for the toolbar's delay spinner, propagated to every per-monitor toolbar at
-    /// construction. Sourced from the CLI `--delay` flag or, failing that, the
-    /// `[capture].delay` config entry. Sub-second values are rounded to the nearest second
-    /// for display; the CLI / config value is only used end-to-end when the user does not
-    /// touch the spinner.
-    initial_delay: std::time::Duration,
-    /// Mode button pre-selected when the selector opens. Cloned from
-    /// [`crate::config::CaptureConfig::initial_mode`] (Screen by default).
-    /// Mirrored into the initial `SharedSelection.mode` so keyboard shortcuts
-    /// and the toolbar's mode group agree.
-    initial_mode: ModeKind,
-    /// When `false`, the Capture button on every per-monitor toolbar ignores the Shift
-    /// modifier and the window-level Enter handler always commits with `edit=false`. Set
-    /// by the draw overlay's Save flow so Shift+click / Shift+Enter just save the snapshot
-    /// instead of redundantly opening another annotation editor.
+    /// When `false`, the toolbar's Capture button ignores the Shift modifier and the
+    /// window-level Enter handler always commits with `edit=false`. Set by the draw overlay's
+    /// Save flow so Shift+click / Shift+Enter just save the snapshot instead of redundantly
+    /// opening another annotation editor.
     allow_annotate: bool,
     /// Snapshot of Hyprland's client list at selector start, used by Window mode for
     /// cursor-based hit-testing. Empty when the query failed or the host isn't Hyprland — in
@@ -918,7 +962,8 @@ fn install_keys(
     monitors: &MonitorList,
     app_weak: &glib::WeakRef<gtk4::Application>,
     areas: &AreaRegistry,
-    toolbars: &ToolbarRegistry,
+    host: &Rc<ToolbarHost>,
+    focus_shutdown: &FocusShutdown,
     countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
     info: MonitorInfo,
     allow_annotate: bool,
@@ -931,11 +976,19 @@ fn install_keys(
     let monitors = monitors.clone();
     let app_weak = app_weak.clone();
     let areas = areas.clone();
-    let toolbars = toolbars.clone();
+    let host = host.clone();
+    let focus_shutdown = focus_shutdown.clone();
     let countdown_source = countdown_source.clone();
     key.connect_key_pressed(move |_, k, _, modifiers| match k {
         gdk4::Key::Escape => {
-            cancel(&tx, &finalised, &windows, &app_weak, &countdown_source);
+            cancel(
+                &tx,
+                &finalised,
+                &windows,
+                &focus_shutdown,
+                &app_weak,
+                &countdown_source,
+            );
             glib::Propagation::Stop
         }
         gdk4::Key::Return | gdk4::Key::KP_Enter => {
@@ -953,7 +1006,8 @@ fn install_keys(
                 &monitors,
                 &app_weak,
                 &areas,
-                &toolbars,
+                &host,
+                &focus_shutdown,
                 &countdown_source,
                 Some(info.clone()),
                 edit,
@@ -1007,14 +1061,16 @@ const BLANK_FRAME_MS: u64 = 50;
 fn blank_and_dismiss(
     windows: &WindowRegistry,
     areas: &AreaRegistry,
-    toolbars: &ToolbarRegistry,
+    host: &Rc<ToolbarHost>,
+    focus_shutdown: &FocusShutdown,
     tx: &Sender,
     app_weak: &glib::WeakRef<gtk4::Application>,
     outcome: SelectorOutcome,
 ) {
-    for t in toolbars.borrow().iter() {
-        t.widget().set_visible(false);
-    }
+    // Stop following focus before we blank: a focus event mid-teardown would just reparent a
+    // hidden toolbar (harmless), but closing the socket promptly is tidier.
+    stop_focus(focus_shutdown);
+    host.toolbar().widget().set_visible(false);
     for a in areas.borrow().iter() {
         a.blank();
     }
@@ -1098,7 +1154,8 @@ fn commit(
     monitors: &MonitorList,
     app_weak: &glib::WeakRef<gtk4::Application>,
     areas: &AreaRegistry,
-    toolbars: &ToolbarRegistry,
+    host: &Rc<ToolbarHost>,
+    focus_shutdown: &FocusShutdown,
     countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
     local_info: Option<MonitorInfo>,
     edit: bool,
@@ -1124,25 +1181,24 @@ fn commit(
 
     let total_secs = state.delay.as_secs().min(u32::MAX as u64) as u32;
     if total_secs == 0 {
-        blank_and_dismiss(windows, areas, toolbars, tx, app_weak, outcome);
+        blank_and_dismiss(windows, areas, host, focus_shutdown, tx, app_weak, outcome);
         return;
     }
 
-    // Pre-capture delay path: hide the per-monitor toolbars and switch each overlay area
-    // into countdown mode. A 1-second timer decrements the remaining seconds; at zero we
-    // hand off to `blank_and_dismiss` for the same fadeOut-safe teardown the zero-delay
-    // path uses. Pressing Escape during the countdown is handled by `cancel()`, which
-    // removes our timer source by id and bails before we ever reach the final dispatch.
-    for t in toolbars.borrow().iter() {
-        t.widget().set_visible(false);
-    }
+    // Pre-capture delay path: hide the toolbar and switch each overlay area into countdown
+    // mode. A 1-second timer decrements the remaining seconds; at zero we hand off to
+    // `blank_and_dismiss` for the same fadeOut-safe teardown the zero-delay path uses. Pressing
+    // Escape during the countdown is handled by `cancel()`, which removes our timer source by id
+    // and bails before we ever reach the final dispatch.
+    host.toolbar().widget().set_visible(false);
     for a in areas.borrow().iter() {
         a.set_countdown(Some(total_secs));
     }
 
     let remaining = Rc::new(Cell::new(total_secs));
     let areas_cloned = areas.clone();
-    let toolbars_cloned = toolbars.clone();
+    let host_cloned = host.clone();
+    let focus_shutdown_cloned = focus_shutdown.clone();
     let windows_cloned = windows.clone();
     let tx_cloned = tx.clone();
     let app_weak_cloned = app_weak.clone();
@@ -1162,7 +1218,8 @@ fn commit(
             blank_and_dismiss(
                 &windows_cloned,
                 &areas_cloned,
-                &toolbars_cloned,
+                &host_cloned,
+                &focus_shutdown_cloned,
                 &tx_cloned,
                 &app_weak_cloned,
                 outcome.clone(),
@@ -1181,6 +1238,7 @@ fn cancel(
     tx: &Sender,
     finalised: &Rc<RefCell<bool>>,
     windows: &WindowRegistry,
+    focus_shutdown: &FocusShutdown,
     app_weak: &glib::WeakRef<gtk4::Application>,
     countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
 ) {
@@ -1199,10 +1257,20 @@ fn cancel(
         *f = true;
         drop(f);
     }
+    stop_focus(focus_shutdown);
     dismiss_overlays(windows);
     send_once(tx, Err(anyhow::Error::new(Cancelled)));
     if let Some(app) = app_weak.upgrade() {
         app.quit();
+    }
+}
+
+/// Stop the Hyprland focus-event reader so its `.socket2.sock` connection closes promptly
+/// (important for the embedded `pick_region_in_app` draw→save loop, which would otherwise leak a
+/// connection per cycle). Idempotent: the sender is taken on first call.
+fn stop_focus(focus_shutdown: &FocusShutdown) {
+    if let Some(tx) = focus_shutdown.borrow_mut().take() {
+        let _ = tx.send(());
     }
 }
 

@@ -13,8 +13,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::sync::{oneshot, watch};
 
 use crate::capture::region::Rect;
 
@@ -168,6 +169,90 @@ pub async fn focused_monitor() -> Result<String> {
         .ok_or_else(|| anyhow!("no focused monitor"))
 }
 
+/// Subscribe to Hyprland focused-monitor changes.
+///
+/// Spawns a task on `handle` that connects to the event socket (`.socket2.sock`), reads the
+/// newline-delimited `EVENT>>DATA` stream, and publishes the focused monitor's **connector
+/// name** (e.g. `DP-1`, matching GDK's `Monitor::connector()`) to the returned
+/// [`watch::Receiver`]. The watch channel coalesces rapid focus changes — a consumer only ever
+/// observes the most recent focused monitor.
+///
+/// Best-effort: the task stops when `shutdown` fires, all receivers are dropped, or the socket
+/// closes/errors (e.g. not running under Hyprland). Failures are logged at debug/warn and never
+/// propagated — callers keep working with a static (non-following) toolbar.
+///
+/// The initial value is `None` (focus unknown); consumers should ignore `None` and rely on a
+/// one-shot [`focused_monitor`] for the *initial* placement instead.
+pub fn subscribe_focus(
+    handle: &tokio::runtime::Handle,
+    shutdown: oneshot::Receiver<()>,
+) -> watch::Receiver<Option<String>> {
+    let (tx, rx) = watch::channel(None);
+    handle.spawn(async move {
+        tokio::select! {
+            _ = shutdown => {}
+            _ = pump_focus_events(&tx) => {}
+        }
+        tracing::debug!("Hyprland focus subscription stopped");
+    });
+    rx
+}
+
+/// Connect to the Hyprland event socket and forward focused-monitor names into `tx` until the
+/// stream ends or every receiver is dropped. Returns on any I/O error (logged by the caller's
+/// `select!` arm completion); errors here are non-fatal by design.
+async fn pump_focus_events(tx: &watch::Sender<Option<String>>) {
+    let path = match socket_path_named(".socket2.sock") {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::debug!(error = ?err, "Hyprland event socket unavailable; focus-follow disabled");
+            return;
+        }
+    };
+    let stream = match UnixStream::connect(&path).await {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(error = ?err, path = %path.display(), "connecting to Hyprland event socket failed");
+            return;
+        }
+    };
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF: compositor closed the socket.
+            Ok(_) => {
+                if let Some(name) = parse_focused_monitor_event(line.trim_end()) {
+                    // `send_replace` ignores the "no receivers" case; we detect it explicitly so
+                    // the task can stop once every surface has torn down.
+                    if tx.send(Some(name.to_string())).is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = ?err, "reading Hyprland event stream failed");
+                break;
+            }
+        }
+    }
+}
+
+/// Extract the focused monitor connector name from a Hyprland event line.
+///
+/// Hyprland emits `focusedmon>>MONITORNAME,WORKSPACENAME` and
+/// `focusedmonv2>>MONITORNAME,WORKSPACEID` on every monitor focus change; in both the first
+/// comma-separated field is the monitor name. Returns `None` for any other event or a malformed
+/// line.
+fn parse_focused_monitor_event(line: &str) -> Option<&str> {
+    let data = line
+        .strip_prefix("focusedmonv2>>")
+        .or_else(|| line.strip_prefix("focusedmon>>"))?;
+    let name = data.split(',').next()?.trim();
+    if name.is_empty() { None } else { Some(name) }
+}
+
 /// Send `command` to the Hyprland command socket and return the raw response body.
 async fn query(command: &str) -> Result<String> {
     let path = socket_path().context("locating Hyprland IPC socket")?;
@@ -190,22 +275,29 @@ async fn query(command: &str) -> Result<String> {
     Ok(body)
 }
 
-/// Resolve the Hyprland command-socket path.
+/// Resolve the Hyprland command-socket path (`.socket.sock`).
 ///
 /// Prefers the modern `$XDG_RUNTIME_DIR/hypr/$HIS/.socket.sock` layout (Hyprland ≥ 0.42) and
 /// falls back to the legacy `/tmp/hypr/$HIS/.socket.sock` for older builds.
 pub(crate) fn socket_path() -> Result<PathBuf> {
+    socket_path_named(".socket.sock")
+}
+
+/// Resolve a Hyprland IPC socket by file name.
+///
+/// Hyprland exposes two sockets in the same directory: the request/response command socket
+/// (`.socket.sock`) and the streaming event socket (`.socket2.sock`). Both share the layout
+/// resolution: modern `$XDG_RUNTIME_DIR/hypr/$HIS/<file>` (Hyprland ≥ 0.42) with a fallback to
+/// the legacy `/tmp/hypr/$HIS/<file>` for older builds.
+fn socket_path_named(file: &str) -> Result<PathBuf> {
     let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").map_err(|_| {
         anyhow!("HYPRLAND_INSTANCE_SIGNATURE is not set; not running under Hyprland?")
     })?;
     let candidates = [
-        std::env::var("XDG_RUNTIME_DIR").ok().map(|d| {
-            PathBuf::from(d)
-                .join("hypr")
-                .join(&sig)
-                .join(".socket.sock")
-        }),
-        Some(PathBuf::from(format!("/tmp/hypr/{sig}/.socket.sock"))),
+        std::env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .map(|d| PathBuf::from(d).join("hypr").join(&sig).join(file)),
+        Some(PathBuf::from(format!("/tmp/hypr/{sig}/{file}"))),
     ];
     for c in candidates.into_iter().flatten() {
         if c.exists() {
@@ -213,7 +305,7 @@ pub(crate) fn socket_path() -> Result<PathBuf> {
         }
     }
     bail!(
-        "Hyprland IPC socket not found under $XDG_RUNTIME_DIR/hypr/{sig}/.socket.sock or /tmp/hypr/{sig}/.socket.sock",
+        "Hyprland IPC socket not found under $XDG_RUNTIME_DIR/hypr/{sig}/{file} or /tmp/hypr/{sig}/{file}",
     )
 }
 
@@ -221,6 +313,24 @@ pub(crate) fn socket_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case("focusedmon>>DP-1,1", Some("DP-1"))]
+    #[case("focusedmon>>HDMI-A-1,web", Some("HDMI-A-1"))]
+    #[case("focusedmonv2>>HDMI-A-1,2", Some("HDMI-A-1"))]
+    #[case("focusedmonv2>>eDP-1,3", Some("eDP-1"))]
+    // Unrelated events are ignored.
+    #[case("activewindow>>kitty,bash", None)]
+    #[case("workspace>>2", None)]
+    // A prefix collision must not match (only the exact `focusedmon`/`focusedmonv2` events).
+    #[case("focusedmonfoo>>DP-1,1", None)]
+    // Malformed: empty monitor name.
+    #[case("focusedmon>>,1", None)]
+    #[case("focusedmon>>", None)]
+    fn parses_focused_monitor_events(#[case] line: &str, #[case] expected: Option<&str>) {
+        assert_eq!(parse_focused_monitor_event(line), expected);
+    }
 
     fn win(
         address: &str,
