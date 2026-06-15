@@ -326,11 +326,9 @@ fn build_overlays(
         }
     };
 
-    let initial_tool = if edit.is_some() {
-        ToolKind::Rect
-    } else {
-        ToolKind::Freehand
-    };
+    // Both modes start in Select mode (no drawing tool active); the user picks a tool from the
+    // toolbar or its shortcut. After committing a shape we return here automatically.
+    let initial_tool = ToolKind::Select;
 
     // A single toolbar follows focus across monitors. Edit mode shows the full editor toolset
     // (incl. Blur + Crop) plus a Save button; Draw mode keeps the slimmer overlay set (no Crop)
@@ -577,6 +575,31 @@ fn spawn_monitor_overlay(
     }
     canvas.set_tool(shared.current_tool.get());
 
+    // One-shot tools: after a shape is committed on any monitor's canvas, return to Select
+    // mode across the whole overlay (all canvases + the shared toolbar). Driven from the
+    // overlay because the canvas has no other channel back to the toolbar / sibling canvases.
+    {
+        let canvases = shared.canvases.clone();
+        let host = shared.host.clone();
+        let current_tool = shared.current_tool.clone();
+        canvas.set_on_commit(move || {
+            apply_tool(&canvases, &host, &current_tool, ToolKind::Select);
+        });
+    }
+
+    // When the selection / text-edit state changes, refresh which toolbar pickers are
+    // enabled — e.g. the font-size control becomes usable while a text layer is selected or
+    // being edited, even though the active tool is Select.
+    {
+        let canvases = shared.canvases.clone();
+        let host = shared.host.clone();
+        let current_tool = shared.current_tool.clone();
+        let this = canvas.clone();
+        canvas.set_on_ui_state(move || {
+            refresh_pickers(&canvases, &host, &current_tool, &this);
+        });
+    }
+
     let overlay = gtk4::Overlay::new();
 
     // For Edit mode, anchor the document to its slice's intra-monitor offset so the captured
@@ -712,10 +735,7 @@ fn wire_toolbar(shared: &Shared) {
     let toolbar = shared.host.toolbar();
     toolbar.connect(move |action| match action {
         ToolbarAction::ToolSelected(kind) => {
-            current_tool.set(kind);
-            for c in canvases.borrow().iter() {
-                c.canvas.set_tool(kind);
-            }
+            apply_tool(&canvases, &host, &current_tool, kind);
             // Lazy desktop capture for Draw-mode Blur. The overlay is transparent so the
             // GSK blur node has nothing to sample by default; the first time the user picks
             // the Blur tool we briefly hide the overlay surfaces, grab the desktop via
@@ -739,60 +759,43 @@ fn wire_toolbar(shared: &Shared) {
                     blur_in_flight.clone(),
                 ));
             }
-            // Push the new tool's stored color into the toolbar swatch (silently), and toggle
-            // picker sensitivity for tools with hardcoded appearance.
-            let color = canvases
-                .borrow()
-                .first()
-                .and_then(|c| c.canvas.tool_color(kind));
-            let style = canvases
-                .borrow()
-                .first()
-                .and_then(|c| c.canvas.tool_style(kind));
-            let font_size = canvases
-                .borrow()
-                .first()
-                .and_then(|c| c.canvas.tool_font_size(kind));
-            let t = host.toolbar();
-            t.set_tool(kind);
-            if let Some(c) = color {
-                t.set_color(c);
-            }
-            t.set_color_picker_sensitive(kind_is_colorable(kind));
-            if let Some(s) = style {
-                t.set_stroke_style(s);
-            }
-            t.set_style_picker_sensitive(kind_is_styleable(kind));
-            if let Some(s) = font_size {
-                t.set_font_size(s);
-            }
-            t.set_font_size_picker_sensitive(kind_has_font_size(kind));
         }
         ToolbarAction::ColorChanged(color) => {
-            let kind = current_tool.get();
-            if !kind_is_colorable(kind) {
-                return;
-            }
+            // Prefer the active target (text being edited, or a selected colorable shape) on
+            // any canvas; only fall back to changing the tool default if nothing consumed it.
+            let mut consumed = false;
             for c in canvases.borrow().iter() {
-                c.canvas.set_tool_color(kind, color);
+                consumed |= c.canvas.apply_color_to_target(color);
+            }
+            let kind = current_tool.get();
+            if !consumed && kind_is_colorable(kind) {
+                for c in canvases.borrow().iter() {
+                    c.canvas.set_tool_color(kind, color);
+                }
             }
         }
         ToolbarAction::StrokeStyleChanged(style) => {
-            let kind = current_tool.get();
-            if !kind_is_styleable(kind) {
-                return;
-            }
+            let mut consumed = false;
             for c in canvases.borrow().iter() {
-                c.canvas.set_tool_style(kind, style);
+                consumed |= c.canvas.apply_style_to_target(style);
+            }
+            let kind = current_tool.get();
+            if !consumed && kind_is_styleable(kind) {
+                for c in canvases.borrow().iter() {
+                    c.canvas.set_tool_style(kind, style);
+                }
             }
         }
         ToolbarAction::FontSizeChanged(size) => {
-            let kind = current_tool.get();
-            if !kind_has_font_size(kind) {
-                return;
-            }
+            let mut consumed = false;
             for c in canvases.borrow().iter() {
-                c.canvas.set_tool_font_size(kind, size);
+                consumed |= c.canvas.apply_font_size_to_target(size);
+            }
+            let kind = current_tool.get();
+            if !consumed && kind_has_font_size(kind) {
+                for c in canvases.borrow().iter() {
+                    c.canvas.set_tool_font_size(kind, size);
+                }
             }
         }
         ToolbarAction::Undo => {
@@ -869,6 +872,83 @@ fn seed_toolbar_from_canvas(shared: &Shared) {
         toolbar.set_font_size(size);
     }
     toolbar.set_font_size_picker_sensitive(kind_has_font_size(kind));
+}
+
+/// Apply a tool switch to all overlay state: the shared `current_tool`, every per-monitor
+/// canvas, and the toolbar (active button + picker swatches/sensitivity). Shared by the
+/// toolbar's `ToolSelected` handler and the post-commit auto-return-to-Select hook. Does NOT
+/// handle Draw-mode Blur lazy capture — that stays in the toolbar handler.
+fn apply_tool(
+    canvases: &Rc<RefCell<Vec<MonitorCanvas>>>,
+    host: &Rc<ToolbarHost>,
+    current_tool: &Rc<Cell<ToolKind>>,
+    kind: ToolKind,
+) {
+    current_tool.set(kind);
+    for c in canvases.borrow().iter() {
+        c.canvas.set_tool(kind);
+    }
+    // Push the new tool's stored color/style/size into the toolbar swatches (silently), and
+    // toggle picker sensitivity for tools with hardcoded appearance.
+    let (color, style, font_size) = {
+        let b = canvases.borrow();
+        let first = b.first();
+        (
+            first.and_then(|c| c.canvas.tool_color(kind)),
+            first.and_then(|c| c.canvas.tool_style(kind)),
+            first.and_then(|c| c.canvas.tool_font_size(kind)),
+        )
+    };
+    let t = host.toolbar();
+    t.set_tool(kind);
+    if let Some(c) = color {
+        t.set_color(c);
+    }
+    t.set_color_picker_sensitive(kind_is_colorable(kind));
+    if let Some(s) = style {
+        t.set_stroke_style(s);
+    }
+    t.set_style_picker_sensitive(kind_is_styleable(kind));
+    if let Some(s) = font_size {
+        t.set_font_size(s);
+    }
+    t.set_font_size_picker_sensitive(kind_has_font_size(kind));
+}
+
+/// Refresh toolbar picker sensitivity / swatches from a canvas's current selection or
+/// text-edit state, so the relevant pickers light up even in Select mode. Called from each
+/// canvas's `on_ui_state` callback. `changed` is the canvas that fired the event.
+fn refresh_pickers(
+    _canvases: &Rc<RefCell<Vec<MonitorCanvas>>>,
+    host: &Rc<ToolbarHost>,
+    current_tool: &Rc<Cell<ToolKind>>,
+    changed: &AnnotationCanvas,
+) {
+    // The "effective kind" the pickers should act on:
+    //  - editing text (new or re-edit)   → Text (so font size / color are live)
+    //  - a layer selected in Select mode  → that layer's kind
+    //  - otherwise                        → the active drawing tool
+    let effective = if changed.is_editing_text() {
+        ToolKind::Text
+    } else if current_tool.get() == ToolKind::Select {
+        changed.selected_kind().unwrap_or(ToolKind::Select)
+    } else {
+        current_tool.get()
+    };
+
+    let t = host.toolbar();
+    if let Some(color) = changed.tool_color(effective) {
+        t.set_color(color);
+    }
+    if let Some(style) = changed.tool_style(effective) {
+        t.set_stroke_style(style);
+    }
+    if let Some(size) = changed.tool_font_size(effective) {
+        t.set_font_size(size);
+    }
+    t.set_color_picker_sensitive(kind_is_colorable(effective));
+    t.set_style_picker_sensitive(kind_is_styleable(effective));
+    t.set_font_size_picker_sensitive(kind_has_font_size(effective));
 }
 
 /// Tools whose appearance is driven by the picker. Blur, Crop and Redact have hardcoded

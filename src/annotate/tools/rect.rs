@@ -31,10 +31,42 @@ impl Tool for RectTool {
         let r = self.bounds;
         x >= r.x as f64 && x <= r.right() as f64 && y >= r.y as f64 && y <= r.bottom() as f64
     }
+    fn translate(&mut self, dx: f64, dy: f64) {
+        self.bounds = self.bounds.translate(dx, dy);
+    }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(self.clone())
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn translate_shifts_bounds() {
+        let mut t = RectTool::new(Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        });
+        t.translate(5.0, -7.0);
+        assert_eq!(
+            t.bounds,
+            Rect {
+                x: 15,
+                y: 13,
+                w: 30,
+                h: 40
+            }
+        );
     }
 }

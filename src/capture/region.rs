@@ -23,6 +23,17 @@ impl Rect {
         self.y + self.h as i32
     }
 
+    /// Shift the rectangle by `(dx, dy)` logical pixels, rounding to the nearest integer.
+    /// Used by the Select tool's move gesture for box-based shapes.
+    pub fn translate(&self, dx: f64, dy: f64) -> Rect {
+        Rect {
+            x: self.x + dx.round() as i32,
+            y: self.y + dy.round() as i32,
+            w: self.w,
+            h: self.h,
+        }
+    }
+
     /// Smallest rectangle containing both `self` and `other`.
     pub fn union(&self, other: &Rect) -> Rect {
         let x = self.x.min(other.x);

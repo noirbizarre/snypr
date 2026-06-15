@@ -27,10 +27,16 @@ impl Tool for NumberTool {
         let dy = y - self.center.1;
         (dx * dx + dy * dy).sqrt() <= self.radius
     }
+    fn translate(&mut self, dx: f64, dy: f64) {
+        self.center = (self.center.0 + dx, self.center.1 + dy);
+    }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(self.clone())
     }
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 }

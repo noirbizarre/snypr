@@ -25,6 +25,7 @@ use crate::i18n::fl;
 /// Localized tooltip label for an annotation tool.
 fn tool_label(kind: ToolKind) -> String {
     match kind {
+        ToolKind::Select => fl!("toolbar-tool-select"),
         ToolKind::Rect => fl!("toolbar-tool-rect"),
         ToolKind::Ellipse => fl!("toolbar-tool-ellipse"),
         ToolKind::Arrow => fl!("toolbar-tool-arrow"),
@@ -93,6 +94,7 @@ pub struct ModeEntry {
 }
 
 /// All annotation tools available in the editor (capture + standalone annotate flows).
+/// `Select` mode has no button — it's the implicit "no tool active" state.
 pub const EDITOR_TOOLS: &[ToolEntry] = &[
     ToolEntry {
         kind: ToolKind::Rect,
@@ -451,13 +453,18 @@ struct StylePickerUi {
     toggles: Vec<(StrokeStyle, gtk4::ToggleButton, glib::SignalHandlerId)>,
 }
 
-/// Live state for the font-size picker. A `SpinButton` sized to match the rest of the
-/// toolbar's icon buttons. We keep its `value-changed` handler id so external state
-/// updates ([`Toolbar::set_font_size`]) can `block_signal` while writing the new value
-/// to avoid re-emitting `FontSizeChanged` back to the caller.
+/// Live state for the font-size picker. An inline segmented group of three non-focusable
+/// widgets `[−] [18pt] [+]`, matching [`DelaySpinnerUi`]. A `SpinButton` was avoided here for
+/// the same reason: its internal `GtkText` grabs keyboard focus on a layer-shell surface,
+/// which would break the in-canvas text editor (typing would stop driving the pending text).
+/// The segmented group never takes focus, so the canvas keeps it throughout.
 struct FontSizePickerUi {
-    spin: gtk4::SpinButton,
-    handler: glib::SignalHandlerId,
+    /// Label between the `−` / `+` buttons, displays the current value as "18pt".
+    label: gtk4::Label,
+    /// Current value in whole points. Source of truth for the control.
+    value: Rc<Cell<u32>>,
+    /// The segmented container, toggled by [`Toolbar::set_font_size_picker_sensitive`].
+    container: gtk4::Box,
 }
 
 /// Live state for the capture-delay control. An inline segmented group of three
@@ -580,37 +587,59 @@ impl Toolbar {
             widget.append(&separator());
         }
 
-        // Tool buttons (middle section).
-        let mut tool_group: Option<gtk4::ToggleButton> = None;
-        for entry in spec.tools {
-            let btn = gtk4::ToggleButton::new();
-            btn.set_child(Some(&icon_only(entry.icon)));
-            btn.set_tooltip_text(Some(&tool_label(entry.kind)));
-            make_unfocusable(&btn);
-            if let Some(first) = &tool_group {
-                btn.set_group(Some(first));
-            } else {
-                tool_group = Some(btn.clone());
-            }
-            if Some(entry.kind) == spec.initial_tool {
-                btn.set_active(true);
-            }
+        // Tool buttons (middle section). These are independent (non-grouped) toggle buttons
+        // rather than a radio group: clicking the active tool toggles it *off*, which means
+        // "no drawing tool" — i.e. Select mode. We enforce single-selection manually so at
+        // most one tool button is ever active, and emit `ToolSelected(Select)` when a button
+        // is toggled off (the user clicked the already-active tool).
+        //
+        // Built in two passes: first create every button (so each toggled handler can see all
+        // siblings via a shared list), then connect the handlers and record their ids.
+        let tool_btns: Rc<Vec<(ToolKind, gtk4::ToggleButton)>> = Rc::new(
+            spec.tools
+                .iter()
+                .map(|entry| {
+                    let btn = gtk4::ToggleButton::new();
+                    btn.set_child(Some(&icon_only(entry.icon)));
+                    btn.set_tooltip_text(Some(&tool_label(entry.kind)));
+                    make_unfocusable(&btn);
+                    if Some(entry.kind) == spec.initial_tool {
+                        btn.set_active(true);
+                    }
+                    widget.append(&btn);
+                    (entry.kind, btn)
+                })
+                .collect(),
+        );
+        for (entry, (kind, btn)) in spec.tools.iter().zip(tool_btns.iter()) {
             let cb = callback.clone();
-            let kind = entry.kind;
+            let kind = *kind;
+            let siblings = tool_btns.clone();
             let id = btn.connect_toggled(move |b| {
-                if b.is_active()
-                    && let Some(f) = cb.borrow().as_ref()
-                {
-                    f(ToolbarAction::ToolSelected(kind));
+                if b.is_active() {
+                    // Deactivate every other tool so only this one stays lit. Block each
+                    // sibling's handler so the deactivation doesn't recurse into an emit.
+                    for (k, other) in siblings.iter() {
+                        if *k != kind && other.is_active() {
+                            other.set_active(false);
+                        }
+                    }
+                    if let Some(f) = cb.borrow().as_ref() {
+                        f(ToolbarAction::ToolSelected(kind));
+                    }
+                } else if !any_active(&siblings) {
+                    // Toggled off (clicked the active tool) and nothing else lit → Select mode.
+                    if let Some(f) = cb.borrow().as_ref() {
+                        f(ToolbarAction::ToolSelected(ToolKind::Select));
+                    }
                 }
             });
-            widget.append(&btn);
             shortcuts.push(Shortcut {
                 key: entry.key,
                 action: ShortcutAction::Tool(entry.kind),
                 modifiers: gdk4::ModifierType::empty(),
             });
-            tools.push((entry.kind, btn, id));
+            tools.push((entry.kind, btn.clone(), id));
         }
 
         // Color picker (optional) — sits right after the tool radios so it visually belongs
@@ -763,35 +792,103 @@ impl Toolbar {
             None
         };
 
-        // Font-size spinner (optional) — shown when the active tool renders text.
-        // Width is set wide enough to comfortably fit 3 digits + the +/- arrows. We
-        // also clamp the value with a small min/max so the spinner UI stays focused
-        // on sane sizes for screen annotations (matches what Pango can render
-        // without producing absurd glyph dimensions).
+        // Font-size control (optional) — shown when the active tool renders text. Inline
+        // segmented group `[−] [18pt] [+]`, mirroring the delay control. A `SpinButton` is
+        // deliberately avoided: its internal `GtkText` grabs keyboard focus on a layer-shell
+        // surface, which would stop the in-canvas text editor from receiving keystrokes.
+        // Left-click steps by 1pt, right-click by 5pt, scroll wheel by 1pt; range 6–200pt.
         let font_size = if spec.show_font_size_picker {
+            const FONT_MIN: u32 = 6;
+            const FONT_MAX: u32 = 200;
+            const STEP_PRIMARY: i32 = 1;
+            const STEP_SECONDARY: i32 = 5;
+
             // Only emit a leading separator when neither the color nor the style
             // picker already provided one (they each emit their own when no earlier
             // picker has).
             if color.is_none() && style.is_none() && !spec.tools.is_empty() {
                 widget.append(&separator());
             }
-            let adj = gtk4::Adjustment::new(18.0, 6.0, 200.0, 1.0, 4.0, 0.0);
-            let spin = gtk4::SpinButton::new(Some(&adj), 1.0, 0);
-            spin.set_numeric(true);
-            spin.set_tooltip_text(Some(&fl!("toolbar-font-size-tooltip")));
-            spin.set_width_chars(3);
-            spin.set_max_width_chars(3);
-            // Keep keyboard focus on the parent window's shortcut dispatcher rather
-            // than the spinner itself — typing should still drive the text editor.
-            spin.set_focus_on_click(false);
-            let cb = callback.clone();
-            let handler = spin.connect_value_changed(move |s| {
-                if let Some(f) = cb.borrow().as_ref() {
-                    f(ToolbarAction::FontSizeChanged(s.value() as f32));
+
+            let value = Rc::new(Cell::new(18u32));
+
+            let group = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            group.add_css_class("linked");
+            group.set_tooltip_text(Some(&fl!("toolbar-font-size-tooltip")));
+
+            let minus = gtk4::Button::new();
+            minus.set_child(Some(&icon_only("list-remove-symbolic")));
+            make_unfocusable(&minus);
+
+            let label = gtk4::Label::new(Some(&format_font_size_label(value.get())));
+            // Pin a width so the label doesn't reflow ("6pt" vs "200pt"); 5 chars covers
+            // "200pt" comfortably.
+            label.set_width_chars(5);
+            label.set_xalign(0.5);
+            label.set_can_target(false);
+
+            let plus = gtk4::Button::new();
+            plus.set_child(Some(&icon_only("list-add-symbolic")));
+            make_unfocusable(&plus);
+
+            group.append(&minus);
+            group.append(&label);
+            group.append(&plus);
+
+            let emit = {
+                let value = value.clone();
+                let label = label.clone();
+                let cb = callback.clone();
+                move |delta: i32| {
+                    let current = value.get() as i32;
+                    let next = (current + delta).clamp(FONT_MIN as i32, FONT_MAX as i32) as u32;
+                    if next == value.get() {
+                        return;
+                    }
+                    value.set(next);
+                    label.set_text(&format_font_size_label(next));
+                    if let Some(f) = cb.borrow().as_ref() {
+                        f(ToolbarAction::FontSizeChanged(next as f32));
+                    }
                 }
+            };
+
+            let make_gesture = |delta_primary: i32, delta_secondary: i32| {
+                let gesture = gtk4::GestureClick::new();
+                gesture.set_button(0);
+                let emit_for_gesture = emit.clone();
+                gesture.connect_pressed(move |g, _, _, _| {
+                    let delta = if g.current_button() == gdk4::BUTTON_SECONDARY {
+                        delta_secondary
+                    } else {
+                        delta_primary
+                    };
+                    emit_for_gesture(delta);
+                });
+                gesture
+            };
+            minus.add_controller(make_gesture(-STEP_PRIMARY, -STEP_SECONDARY));
+            plus.add_controller(make_gesture(STEP_PRIMARY, STEP_SECONDARY));
+
+            let scroll =
+                gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+            let emit_for_scroll = emit.clone();
+            scroll.connect_scroll(move |_, _dx, dy| {
+                if dy < 0.0 {
+                    emit_for_scroll(STEP_PRIMARY);
+                } else if dy > 0.0 {
+                    emit_for_scroll(-STEP_PRIMARY);
+                }
+                glib::Propagation::Stop
             });
-            widget.append(&spin);
-            Some(FontSizePickerUi { spin, handler })
+            group.add_controller(scroll);
+
+            widget.append(&group);
+            Some(FontSizePickerUi {
+                label,
+                value,
+                container: group,
+            })
         } else {
             None
         };
@@ -1187,7 +1284,9 @@ impl Toolbar {
         self.state.callback.replace(Some(Box::new(f)));
     }
 
-    /// Update the visible tool radio without firing a `ToolSelected` action.
+    /// Update the visible tool buttons without firing a `ToolSelected` action. Passing
+    /// [`ToolKind::Select`] (which has no button) deactivates every tool — i.e. shows the
+    /// "no drawing tool / Select mode" state.
     pub fn set_tool(&self, kind: ToolKind) {
         for (k, btn, id) in &self.state.tools {
             btn.block_signal(id);
@@ -1291,22 +1390,23 @@ impl Toolbar {
         }
     }
 
-    /// Update the font-size spinner without firing `FontSizeChanged`. Used by external
-    /// state changes (e.g. selecting a different tool) so the spinner always reflects
-    /// the active tool's stored size.
+    /// Update the font-size control without firing `FontSizeChanged`. Used by external state
+    /// changes (e.g. selecting a different tool) so the control always reflects the active
+    /// tool's stored size. The cached value is the source of truth read by the click / scroll
+    /// handlers, so no signal is fired.
     pub fn set_font_size(&self, size: f32) {
         if let Some(ui) = &self.state.font_size {
-            ui.spin.block_signal(&ui.handler);
-            ui.spin.set_value(size as f64);
-            ui.spin.unblock_signal(&ui.handler);
+            let clamped = (size.round() as i64).clamp(6, 200) as u32;
+            ui.value.set(clamped);
+            ui.label.set_text(&format_font_size_label(clamped));
         }
     }
 
-    /// Enable or disable the font-size spinner (mirrors [`Self::set_color_picker_sensitive`]
+    /// Enable or disable the font-size control (mirrors [`Self::set_color_picker_sensitive`]
     /// — only tools that render text expose a meaningful font size).
     pub fn set_font_size_picker_sensitive(&self, sensitive: bool) {
         if let Some(ui) = &self.state.font_size {
-            ui.spin.set_sensitive(sensitive);
+            ui.container.set_sensitive(sensitive);
         }
     }
 
@@ -1369,10 +1469,11 @@ impl Toolbar {
     fn dispatch_shortcut(&self, action: &ShortcutAction) -> bool {
         match action {
             ShortcutAction::Tool(kind) => {
-                // Activate the matching button: GTK will fire `toggled`, which forwards the
-                // `ToolSelected` action through the callback for free.
+                // Toggle the matching button: activating fires `toggled` → emits
+                // `ToolSelected(kind)`; pressing the same key again deactivates it → emits
+                // `ToolSelected(Select)` (the "no tool" / Select mode), matching click behavior.
                 if let Some((_, btn, _)) = self.state.tools.iter().find(|(k, _, _)| k == kind) {
-                    btn.set_active(true);
+                    btn.set_active(!btn.is_active());
                     true
                 } else {
                     false
@@ -1464,6 +1565,18 @@ fn make_unfocusable<W: IsA<gtk4::Widget>>(w: &W) {
 /// the canonical "3 s" with a non-breaking space.
 fn format_delay_label(secs: u32) -> String {
     fl!("toolbar-delay-label", secs = secs)
+}
+
+/// `true` if any tool button in the list is currently active. Used by the toggle handlers to
+/// distinguish "switched to another tool" from "deselected the last tool" (= Select mode).
+fn any_active(buttons: &[(ToolKind, gtk4::ToggleButton)]) -> bool {
+    buttons.iter().any(|(_, b)| b.is_active())
+}
+
+/// Format a whole-point font size for the toolbar's font-size label. Localized via the
+/// `toolbar-font-size-label` Fluent message.
+fn format_font_size_label(pt: u32) -> String {
+    fl!("toolbar-font-size-label", pt = pt)
 }
 
 /// `gdk::RGBA` → packed `[f32; 4]` matching the canvas's tool storage format.
@@ -1890,10 +2003,15 @@ mod tests {
     }
 
     #[test]
-    fn editor_tool_table_covers_every_tool_kind() {
+    fn editor_tool_table_covers_every_drawing_tool_kind() {
         // If a new ToolKind variant is added, this test reminds us to wire it into the editor
-        // toolbar (or explicitly exclude it).
+        // toolbar (or explicitly exclude it). `Select` is intentionally excluded — it's the
+        // implicit "no tool active" mode and has no button.
         let kinds: std::collections::HashSet<_> = EDITOR_TOOLS.iter().map(|e| e.kind).collect();
+        assert!(
+            !kinds.contains(&ToolKind::Select),
+            "Select must not have a toolbar button (it is the no-tool mode)"
+        );
         for kind in [
             ToolKind::Rect,
             ToolKind::Ellipse,

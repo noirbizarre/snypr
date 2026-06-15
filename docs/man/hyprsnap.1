@@ -80,13 +80,20 @@ executing locally.
 .SS draw
 Launch the live draw-on-screen overlay. Tool keys: \fBR\fR rectangle, \fBO\fR ellipse,
 \fBA\fR arrow, \fBL\fR line (no arrowhead), \fBH\fR highlight, \fBF\fR freehand, \fBN\fR
-numbered marker, \fBT\fR text, \fBX\fR redact. Other keys: \fBCtrl+Z\fR undo, \fBCtrl+L\fR
-clear all layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBP\fR toggle
-pointer passthrough, \fBEsc\fR quit. \fBBlur\fR and \fBCrop\fR are editor-only and are
-not available in the live overlay. \fBdraw\fR also accepts \fB\-\-via-daemon\fR to
-toggle a daemon-managed overlay instead of spawning a new process, and
-\fB\-\-toggle-passthrough\fR (requires \fB\-\-via-daemon\fR) to flip pointer passthrough
-on the running overlay from a global keybind.
+numbered marker, \fBT\fR text, \fBX\fR redact (press the active tool's key again, or click
+its button, to deactivate it). Other keys: \fBCtrl+Z\fR undo, \fBCtrl+L\fR clear all
+layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBP\fR toggle pointer
+passthrough, \fBEsc\fR quit. \fBBlur\fR and \fBCrop\fR are editor-only and are not
+available in the live overlay. With no tool active the overlay is in \fBSelect\fR mode:
+click an existing shape to pick it, drag its body to move it, drag a handle to resize it
+(an Arrow/Line endpoint, a numbered marker's radius, or — for text — corner handles scale
+the font while side handles set a wrap width), double-click text to re-edit it, press
+\fBDelete\fR / \fBBackspace\fR to remove it or \fBEsc\fR to deselect, and arrow keys to
+nudge (\fBShift\fR for a larger step). After committing a shape the overlay returns to
+Select mode automatically. \fBdraw\fR also accepts \fB\-\-via-daemon\fR to toggle a
+daemon-managed overlay instead of spawning a new process, and \fB\-\-toggle-passthrough\fR
+(requires \fB\-\-via-daemon\fR) to flip pointer passthrough on the running overlay from a
+global keybind.
 .SS daemon
 Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. Pass \fB\-\-systray\fR to
 also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
@@ -119,12 +126,20 @@ cancels.
 Opened by \fBscreenshot \-\-edit\fR or by a Shift-click / \fBShift+Enter\fR on the
 selector's Capture button. Tool keys: \fBR\fR rectangle, \fBO\fR ellipse, \fBA\fR arrow,
 \fBL\fR line, \fBH\fR highlight, \fBF\fR freehand, \fBN\fR numbered marker, \fBT\fR text,
-\fBB\fR blur, \fBX\fR redact, \fBC\fR crop. Other keys: \fBCtrl+Z\fR undo, \fBCtrl+S\fR
-/ \fBEnter\fR save, \fBEsc\fR quit. A color picker (with alpha) and a stroke-style
-picker (Solid / Dashed / Dotted) sit next to the tool buttons; each tool remembers its
-own color and style. The pickers are disabled for tools with hardcoded appearance
-(\fBBlur\fR, \fBCrop\fR, \fBRedact\fR). The same pickers are available in the live
-\fBdraw\fR overlay.
+\fBB\fR blur, \fBX\fR redact, \fBC\fR crop (press the active tool's key again, or click its
+button, to deactivate it). Other keys: \fBCtrl+Z\fR undo, \fBCtrl+S\fR / \fBEnter\fR save,
+\fBEsc\fR quit. With no tool active the editor is in \fBSelect\fR mode and edits existing
+shapes: click to select, drag the body to move, drag a handle to resize (box shapes get
+eight handles; Arrow/Line expose their endpoints; a numbered marker exposes a radius grip;
+text corner handles scale the font while side handles set a wrap width), double-click text
+to re-edit it in place, \fBDelete\fR / \fBBackspace\fR to remove the selection, \fBEsc\fR
+to deselect, and arrow keys to nudge (\fBShift\fR for a larger step). After committing a
+shape the editor returns to Select mode automatically. A color picker (with alpha) and a
+stroke-style picker (Solid / Dashed / Dotted) sit next to the tool buttons; each tool
+remembers its own color and style, and the pickers also act on the selected shape (or the
+text being edited). The pickers are disabled for tools with hardcoded appearance
+(\fBBlur\fR, \fBCrop\fR, \fBRedact\fR) and when nothing relevant is selected. The same
+pickers are available in the live \fBdraw\fR overlay.
 .SH CONFIGURATION
 .B hyprsnap
 reads \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR. Every field is optional; see the

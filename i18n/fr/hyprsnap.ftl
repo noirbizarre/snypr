@@ -4,6 +4,7 @@
 # et entre une valeur et son unité ("3 s"), conformément aux usages français.
 
 ## Barre d'outils — outils (info-bulles)
+toolbar-tool-select = Sélection
 toolbar-tool-rect = Rectangle
 toolbar-tool-ellipse = Ellipse
 toolbar-tool-arrow = Flèche
@@ -38,6 +39,7 @@ toolbar-delay-tooltip = Délai avant capture, en secondes
 toolbar-passthrough-tooltip = Basculer le passe-clic (P)
 toolbar-save-tooltip = Enregistrer (Ctrl+S ou Entrée)
 toolbar-delay-label = { $secs } s
+toolbar-font-size-label = { $pt } pt
 toolbar-color-dialog-title = Choisir une couleur
 
 ## Aides du sélecteur

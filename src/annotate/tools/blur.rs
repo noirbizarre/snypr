@@ -29,10 +29,16 @@ impl Tool for BlurTool {
         // — should fall through to whatever is underneath.
         if self.invert { !inside } else { inside }
     }
+    fn translate(&mut self, dx: f64, dy: f64) {
+        self.bounds = self.bounds.translate(dx, dy);
+    }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(self.clone())
     }
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 }

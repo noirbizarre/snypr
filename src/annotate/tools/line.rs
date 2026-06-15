@@ -34,13 +34,21 @@ impl Tool for LineTool {
     fn bounds(&self) -> Rect {
         crate::annotate::render::drag_rect(self.from, self.to)
     }
-    fn hit_test(&self, _x: f64, _y: f64) -> bool {
-        false
+    fn hit_test(&self, x: f64, y: f64) -> bool {
+        let tol = (self.stroke_width as f64 / 2.0).max(crate::annotate::select::HANDLE_HALF_HIT);
+        crate::annotate::render::dist_point_segment((x, y), self.from, self.to) <= tol
+    }
+    fn translate(&mut self, dx: f64, dy: f64) {
+        self.from = (self.from.0 + dx, self.from.1 + dy);
+        self.to = (self.to.0 + dx, self.to.1 + dy);
     }
     fn clone_box(&self) -> Box<dyn Tool> {
         Box::new(self.clone())
     }
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 }

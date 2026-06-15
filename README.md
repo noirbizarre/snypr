@@ -7,7 +7,7 @@ A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https:
 HyprSnap pulls together what currently requires three separate tools on a Wayland desktop:
 
 - **Capture** — like [`grim`](https://sr.ht/~emersion/grim/) / [HyprCapture](https://github.com/gfhdhytghd/HyprCapture), but native and integrated.
-- **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, ellipse, highlight, blur, text, freehand, numbered marker, redact, crop.
+- **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, ellipse, highlight, blur, text, freehand, numbered marker, redact, crop. A built-in Select mode (active when no tool is) moves, resizes, and re-edits shapes you've already drawn.
 - **Draw live on the screen** — like [Draw-On-Gnome](https://github.com/daveprowse/Draw-On-Gnome) but on wlroots / Hyprland, ideal for streaming and Google Meet presentations.
 
 Screen capture talks the `zwlr_screencopy_manager_v1` Wayland protocol directly; UI is GTK4 with `gtk4-layer-shell`, and the annotation canvas uses GSK render nodes for GPU-accelerated drawing.
@@ -16,7 +16,8 @@ Screen capture talks the `zwlr_screencopy_manager_v1` Wayland protocol directly;
 
 The four subcommands are wired end-to-end. All ten annotation tools (Rect, Ellipse, Arrow,
 Highlight, Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on
-screen and flatten to PNG through Cairo on save.
+screen and flatten to PNG through Cairo on save. With no tool active, a Select mode picks an
+existing shape to move it, resize it via drag handles, re-edit text, or delete it.
 
 | Subcommand    | Status                                                                            |
 | ------------- | --------------------------------------------------------------------------------- |
@@ -168,7 +169,7 @@ with the mouse in Region mode, click on a monitor in Screen mode, then press `En
 | `H`      | Highlight tool               |
 | `F`      | Freehand tool                |
 | `N`      | Numbered marker              |
-| `T`      | Text (popover entry)         |
+| `T`      | Text                         |
 | `B`      | Blur (editor only)           |
 | `X`      | Redact (solid black)         |
 | `C`      | Crop (editor only)           |
@@ -176,11 +177,27 @@ with the mouse in Region mode, click on a monitor in Screen mode, then press `En
 | `Ctrl+S` / `Enter` | Save (editor and draw overlay) |
 | `P`      | Toggle pointer passthrough (overlay only) |
 | `Ctrl+L` | Clear all layers (overlay only)           |
-| `Esc`    | Quit                         |
+| `Delete` / `Backspace` | Delete the selected shape (Select mode) |
+| Arrow keys | Nudge the selected shape (`Shift` = larger step) |
+| `Esc`    | Deselect (Select mode) / Quit |
 
-A color picker (with alpha) sits next to the tool buttons. Each tool remembers its own
-color across switches within a session; it's disabled for tools whose appearance is
-hardcoded (Blur, Crop, Redact).
+There is no dedicated Select button: **with no tool active, the editor is in Select mode.**
+Click an active tool's button (or press its key again) to deactivate it, and after you
+commit a shape the editor returns to Select mode automatically.
+
+In **Select mode** you edit shapes you've already drawn. Click a shape to select it (handles
+appear), drag its body to move it, or drag a handle to resize it — box shapes get eight
+handles, Arrow/Line expose their two endpoints, and a numbered marker exposes a radius grip.
+For text, the corner handles scale the font size while the side handles set a wrap width
+(so long lines reflow). Double-click a text annotation to re-open its editor in place;
+`Delete` / `Backspace` removes the selection and `Esc` deselects. Freehand strokes can be
+selected and moved but not resized.
+
+A color picker (with alpha) and a stroke-style picker sit next to the tool buttons. Each
+tool remembers its own color/style across switches within a session; the pickers also act on
+the currently selected shape (or the text being edited), and font size is editable while a
+text shape is selected or edited. The pickers are disabled for tools whose appearance is
+hardcoded (Blur, Crop, Redact) and when nothing relevant is selected.
 
 In the **draw overlay**, `Ctrl+S` (or `Enter`, or the toolbar Save button) pops the
 screenshot zone selector so you choose what part of the screen to capture (region,

@@ -4,6 +4,7 @@
 # validates every key against this file at compile time.
 
 ## Toolbar — tool buttons (tooltips)
+toolbar-tool-select = Select
 toolbar-tool-rect = Rectangle
 toolbar-tool-ellipse = Ellipse
 toolbar-tool-arrow = Arrow
@@ -38,6 +39,7 @@ toolbar-delay-tooltip = Delay before capture, in seconds
 toolbar-passthrough-tooltip = Toggle pointer passthrough (P)
 toolbar-save-tooltip = Save (Ctrl+S or Enter)
 toolbar-delay-label = { $secs }s
+toolbar-font-size-label = { $pt }pt
 toolbar-color-dialog-title = Pick a Color
 
 ## Selector hints

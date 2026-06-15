@@ -32,6 +32,26 @@ pub fn drag_rect(a: (f64, f64), b: (f64, f64)) -> Rect {
     Rect { x, y, w, h }
 }
 
+/// Shortest distance from point `p` to the line segment `[a, b]`. Used by Arrow / Line
+/// `hit_test` so the Select tool can pick a thin segment by proximity to the shaft.
+pub fn dist_point_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (px, py) = p;
+    let (ax, ay) = a;
+    let (bx, by) = b;
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq <= f64::EPSILON {
+        // Degenerate segment: distance to the single point.
+        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
+    }
+    // Project p onto the segment, clamped to [0, 1].
+    let t = (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0);
+    let cx = ax + t * dx;
+    let cy = ay + t * dy;
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
 /// Like [`drag_rect`], but forces a square bounding box anchored at `a`.
 ///
 /// The side length is `max(|dx|, |dy|)` and the sign of each axis is preserved
@@ -95,5 +115,26 @@ mod tests {
         #[case] expected: Rect,
     ) {
         assert_eq!(drag_square(a, b), expected);
+    }
+
+    #[test]
+    fn dist_point_on_segment_is_zero() {
+        assert!(dist_point_segment((5.0, 0.0), (0.0, 0.0), (10.0, 0.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dist_point_perpendicular_to_midpoint() {
+        assert!((dist_point_segment((5.0, 3.0), (0.0, 0.0), (10.0, 0.0)) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dist_point_beyond_endpoint_uses_endpoint() {
+        // Past the `b` end: distance is to (10, 0).
+        assert!((dist_point_segment((13.0, 4.0), (0.0, 0.0), (10.0, 0.0)) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dist_point_to_degenerate_segment() {
+        assert!((dist_point_segment((3.0, 4.0), (0.0, 0.0), (0.0, 0.0)) - 5.0).abs() < 1e-9);
     }
 }
