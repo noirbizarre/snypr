@@ -31,6 +31,7 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
+use crate::annotate::select;
 use crate::capture::Selection;
 use crate::capture::region::Rect;
 use crate::context::Ctx;
@@ -229,6 +230,34 @@ impl From<&HyprWindow> for PickedWindow {
     }
 }
 
+/// Grab-time state of an in-progress Region interaction, captured at `drag-begin`. Live
+/// `drag-update`s recompute the rectangle from this snapshot plus the *total* cursor delta so
+/// there is no cumulative rounding drift across frames (mirrors `canvas::Manipulation`).
+#[derive(Clone, Copy, Debug)]
+enum RegionDrag {
+    /// Empty-space press: draw a brand-new rectangle. The live rect is derived from
+    /// `start`/`current` exactly as before; `settled` is ignored while this is active.
+    New,
+    /// Press landed on a resize handle of the settled rect. Resize anchors the opposite
+    /// edge(s) via [`select::resize_box`].
+    Resize {
+        handle: select::BoxHandle,
+        origin: Rect,
+    },
+    /// Press landed inside the settled rect's body: translate the whole rect.
+    Move { origin: Rect },
+}
+
+/// Classification of a Region-mode press against the current settled rect. Kept separate from
+/// [`RegionDrag`] (which carries grab-time geometry) so the dispatch logic is a pure,
+/// unit-testable function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegionPress {
+    New,
+    Resize(select::BoxHandle),
+    Move,
+}
+
 /// Shared selection state visible to every monitor overlay.
 #[derive(Clone, Debug, Default)]
 struct SharedSelection {
@@ -236,6 +265,14 @@ struct SharedSelection {
     owner: Option<usize>,
     start: Option<(f64, f64)>,
     current: Option<(f64, f64)>,
+    /// The committed Region rectangle in *widget-local* coords on `owner`'s monitor, once a
+    /// drag-out has produced a non-degenerate rect. `None` until the first rectangle is drawn
+    /// (or after a mode switch away from Region). This is the source of truth that resize /
+    /// move mutate and that [`resolve_selection`] reads.
+    settled: Option<Rect>,
+    /// Active Region interaction between `drag-begin` and `drag-end`. `None` when idle (the
+    /// settled rect's handles are then hit-testable on the next press).
+    drag: Option<RegionDrag>,
     /// Active mode picker (driven by the floating toolbar).
     mode: ModeKind,
     /// Cursor toggle from the floating toolbar; final value reported in `SelectorOutcome`.
@@ -255,7 +292,10 @@ struct SharedSelection {
 }
 
 impl SharedSelection {
-    fn rect_local(&self) -> Option<(f64, f64, f64, f64)> {
+    /// The live rectangle being *drawn* from `start`/`current` (the New-drag preview),
+    /// normalized and gated to a non-degenerate size. Drives the drag-out preview and the
+    /// `WxH` legend.
+    fn draft_rect_local(&self) -> Option<(f64, f64, f64, f64)> {
         let (sx, sy) = self.start?;
         let (cx, cy) = self.current?;
         let x = sx.min(cx);
@@ -267,6 +307,40 @@ impl SharedSelection {
         } else {
             Some((x, y, w, h))
         }
+    }
+
+    /// The rectangle to *display and report* for this monitor: the settled rect if present,
+    /// otherwise the live draft (so the very first drag-out still renders while dragging).
+    /// Returned in widget-local f64 `(x, y, w, h)`.
+    fn display_rect_local(&self) -> Option<(f64, f64, f64, f64)> {
+        if let Some(r) = self.settled {
+            Some((r.x as f64, r.y as f64, r.w as f64, r.h as f64))
+        } else {
+            self.draft_rect_local()
+        }
+    }
+
+    /// Promote the current draft into `settled` (called at the end of a New drag). No-op if the
+    /// draft is degenerate, leaving `settled` as-is.
+    fn settle_draft(&mut self) {
+        if let Some((x, y, w, h)) = self.draft_rect_local() {
+            self.settled = Some(Rect {
+                x: x.round() as i32,
+                y: y.round() as i32,
+                w: w.round() as u32,
+                h: h.round() as u32,
+            });
+        }
+    }
+
+    /// Clear every Region-interaction field. Used on mode-switch-away from Region and at
+    /// drag-begin before a fresh New drag.
+    fn clear_region(&mut self) {
+        self.owner = None;
+        self.start = None;
+        self.current = None;
+        self.settled = None;
+        self.drag = None;
     }
 }
 
@@ -677,12 +751,11 @@ fn wire_toolbar(shared: &SharedState) {
         ToolbarAction::ModeSelected(mode) => {
             let mut s = selection.borrow_mut();
             s.mode = mode;
-            // Reset the dragged rectangle when leaving Region mode so the HUD doesn't
-            // linger over a Full/Screen/Window selection.
+            // Reset the dragged rectangle (and any settled rect / in-flight resize) when
+            // leaving Region mode so the HUD doesn't linger over a Full/Screen/Window
+            // selection, and so a later switch back to Region starts clean.
             if mode != ModeKind::Region {
-                s.owner = None;
-                s.start = None;
-                s.current = None;
+                s.clear_region();
             }
             // Preserve per-mode selections across mode switches so the default
             // (focused monitor / window) — or whatever the user previously picked in
@@ -776,6 +849,58 @@ struct SharedState {
     clients: ClientList,
 }
 
+/// Classify a Region press at widget-local `(x, y)` given the settled rect for the monitor
+/// under the pointer (`None` if that monitor has no settled rect). Handles take priority over
+/// the body (corner-before-edge ordering inherited from [`select::box_handle_at`]); a press
+/// outside both starts a new rectangle.
+fn classify_region_press(settled: Option<Rect>, x: f64, y: f64) -> RegionPress {
+    let Some(r) = settled else {
+        return RegionPress::New;
+    };
+    if let Some(h) = select::box_handle_at(r, x, y) {
+        return RegionPress::Resize(h);
+    }
+    if r.contains(x.round() as i32, y.round() as i32) {
+        return RegionPress::Move;
+    }
+    RegionPress::New
+}
+
+/// Cursor name for a hover at widget-local `(x, y)` over settled rect `r`: a directional resize
+/// cursor over a handle, `move` inside the body, else `None` (default cursor). Pure given `r`.
+fn region_cursor_at(r: Rect, x: f64, y: f64) -> Option<&'static str> {
+    if let Some(h) = select::box_handle_at(r, x, y) {
+        return Some(box_handle_cursor(h));
+    }
+    r.contains(x.round() as i32, y.round() as i32)
+        .then_some("move")
+}
+
+/// Map a resize handle to its CSS resize cursor name. Local copy of the equivalent mapper in
+/// `canvas.rs` so the selector doesn't depend on the annotation canvas internals.
+fn box_handle_cursor(h: select::BoxHandle) -> &'static str {
+    use select::BoxHandle::*;
+    match h {
+        NW | SE => "nwse-resize",
+        NE | SW => "nesw-resize",
+        N | S => "ns-resize",
+        E | W => "ew-resize",
+    }
+}
+
+/// Set the overlay's cursor by name, only when it changes (avoids per-motion churn; mirrors
+/// `canvas::set_canvas_cursor`). `None` clears to the default cursor.
+fn set_overlay_cursor(area: &SelectorOverlay, name: Option<&'static str>) {
+    if area.imp().hover_cursor.get() == name {
+        return;
+    }
+    area.imp().hover_cursor.set(name);
+    match name {
+        Some(n) => area.set_cursor_from_name(Some(n)),
+        None => area.set_cursor(None),
+    }
+}
+
 fn install_drag(
     area: &SelectorOverlay,
     selection: &SelectionCell,
@@ -788,15 +913,36 @@ fn install_drag(
         let selection = selection.clone();
         let areas = areas.clone();
         drag.connect_drag_begin(move |g, x, y| {
-            let mode = selection.borrow().mode;
-            if mode != ModeKind::Region {
+            let mut s = selection.borrow_mut();
+            if s.mode != ModeKind::Region {
+                drop(s);
                 g.reset();
                 return;
             }
-            let mut s = selection.borrow_mut();
-            s.owner = Some(monitor_index);
-            s.start = Some((x, y));
-            s.current = Some((x, y));
+            // Classify the press against this monitor's settled rect (only owned rects are
+            // resizable/movable; a press elsewhere starts a fresh rectangle here).
+            let settled = (s.owner == Some(monitor_index))
+                .then_some(s.settled)
+                .flatten();
+            match classify_region_press(settled, x, y) {
+                RegionPress::New => {
+                    s.clear_region();
+                    s.owner = Some(monitor_index);
+                    s.start = Some((x, y));
+                    s.current = Some((x, y));
+                    s.drag = Some(RegionDrag::New);
+                }
+                RegionPress::Resize(handle) => {
+                    if let Some(origin) = s.settled {
+                        s.drag = Some(RegionDrag::Resize { handle, origin });
+                    }
+                }
+                RegionPress::Move => {
+                    if let Some(origin) = s.settled {
+                        s.drag = Some(RegionDrag::Move { origin });
+                    }
+                }
+            }
             drop(s);
             redraw_all(&areas);
         });
@@ -805,34 +951,56 @@ fn install_drag(
         let selection = selection.clone();
         let areas = areas.clone();
         drag.connect_drag_update(move |g, dx, dy| {
-            if selection.borrow().mode != ModeKind::Region {
+            let mut s = selection.borrow_mut();
+            if s.mode != ModeKind::Region || s.owner != Some(monitor_index) {
                 return;
             }
-            if let Some((sx, sy)) = g.start_point() {
-                let mut s = selection.borrow_mut();
-                if s.owner == Some(monitor_index) {
-                    s.current = Some((sx + dx, sy + dy));
-                    drop(s);
-                    redraw_all(&areas);
+            let Some((sx, sy)) = g.start_point() else {
+                return;
+            };
+            let (cx, cy) = (sx + dx, sy + dy);
+            match s.drag {
+                Some(RegionDrag::New) => s.current = Some((cx, cy)),
+                Some(RegionDrag::Resize { handle, origin }) => {
+                    s.settled = Some(select::resize_box(origin, handle, cx, cy));
                 }
+                Some(RegionDrag::Move { origin }) => {
+                    s.settled = Some(origin.translate(cx - sx, cy - sy));
+                }
+                None => return,
             }
+            drop(s);
+            redraw_all(&areas);
         });
     }
     {
         let selection = selection.clone();
         let areas = areas.clone();
         drag.connect_drag_end(move |g, dx, dy| {
-            if selection.borrow().mode != ModeKind::Region {
+            let mut s = selection.borrow_mut();
+            if s.mode != ModeKind::Region || s.owner != Some(monitor_index) {
                 return;
             }
             if let Some((sx, sy)) = g.start_point() {
-                let mut s = selection.borrow_mut();
-                if s.owner == Some(monitor_index) {
-                    s.current = Some((sx + dx, sy + dy));
-                    drop(s);
-                    redraw_all(&areas);
+                let (cx, cy) = (sx + dx, sy + dy);
+                match s.drag {
+                    Some(RegionDrag::New) => {
+                        s.current = Some((cx, cy));
+                        s.settle_draft();
+                    }
+                    Some(RegionDrag::Resize { handle, origin }) => {
+                        s.settled = Some(select::resize_box(origin, handle, cx, cy));
+                    }
+                    Some(RegionDrag::Move { origin }) => {
+                        s.settled = Some(origin.translate(cx - sx, cy - sy));
+                    }
+                    None => {}
                 }
             }
+            // Gesture over: back to idle so the settled rect's handles are interactive again.
+            s.drag = None;
+            drop(s);
+            redraw_all(&areas);
         });
     }
     area.add_controller(drag);
@@ -867,7 +1035,10 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
     {
         let selection = shared.selection.clone();
         let areas = shared.areas.clone();
+        let area = area.clone();
         motion.connect_leave(move |_| {
+            // Reset any resize/move cursor when the pointer leaves this monitor's overlay.
+            set_overlay_cursor(&area, None);
             let mut s = selection.borrow_mut();
             let mut changed = false;
             if s.hover_monitor == Some(monitor_index) {
@@ -888,24 +1059,40 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
         let selection = shared.selection.clone();
         let areas = shared.areas.clone();
         let clients = shared.clients.clone();
+        let area = area.clone();
         motion.connect_motion(move |_, x, y| {
-            if selection.borrow().mode != ModeKind::Window {
-                return;
-            }
-            let Some((lx, ly)) = local_to_logical(monitor_index, x, y) else {
-                return;
-            };
-            let next = hypr::window_at(&clients.borrow(), lx, ly).map(PickedWindow::from);
-            let mut s = selection.borrow_mut();
-            let changed = match (&s.hover_window, &next) {
-                (Some(a), Some(b)) => a.rect != b.rect,
-                (None, None) => false,
-                _ => true,
-            };
-            if changed {
-                s.hover_window = next;
-                drop(s);
-                redraw_all(&areas);
+            let mode = selection.borrow().mode;
+            match mode {
+                ModeKind::Region => {
+                    // Resize/move cursor feedback over this monitor's settled rect. During an
+                    // active drag GTK holds the begin-time cursor, so only update when idle.
+                    let s = selection.borrow();
+                    let name = if s.owner == Some(monitor_index) && s.drag.is_none() {
+                        s.settled.and_then(|r| region_cursor_at(r, x, y))
+                    } else {
+                        None
+                    };
+                    drop(s);
+                    set_overlay_cursor(&area, name);
+                }
+                ModeKind::Window => {
+                    let Some((lx, ly)) = local_to_logical(monitor_index, x, y) else {
+                        return;
+                    };
+                    let next = hypr::window_at(&clients.borrow(), lx, ly).map(PickedWindow::from);
+                    let mut s = selection.borrow_mut();
+                    let changed = match (&s.hover_window, &next) {
+                        (Some(a), Some(b)) => a.rect != b.rect,
+                        (None, None) => false,
+                        _ => true,
+                    };
+                    if changed {
+                        s.hover_window = next;
+                        drop(s);
+                        redraw_all(&areas);
+                    }
+                }
+                _ => {}
             }
         });
     }
@@ -1116,7 +1303,7 @@ fn resolve_selection(
     match state.mode {
         ModeKind::Region => {
             let owner = state.owner?;
-            let (x, y, w, h) = state.rect_local()?;
+            let (x, y, w, h) = state.display_rect_local()?;
             let display = gdk4::Display::default()?;
             let monitors = display.monitors();
             let obj = monitors.item(owner as u32)?;
@@ -1345,6 +1532,10 @@ mod imp {
         /// frame is fully transparent — defeats Hyprland's layer `fadeOut` animation
         /// leaking the selection chrome into the captured screenshot.
         pub blanked: Cell<bool>,
+        /// Last cursor name set via `set_cursor_from_name`, to avoid per-motion churn (mirrors
+        /// `canvas::imp.hover_cursor`). `None` means the default cursor. Used by the Region
+        /// resize/move cursor feedback in [`super::install_hover_and_click`].
+        pub hover_cursor: Cell<Option<&'static str>>,
     }
 
     impl Default for SelectorOverlay {
@@ -1355,6 +1546,7 @@ mod imp {
                 style: RefCell::new(crate::config::SelectorStyleConfig::default()),
                 countdown: Cell::new(None),
                 blanked: Cell::new(false),
+                hover_cursor: Cell::new(None),
             }
         }
     }
@@ -1406,7 +1598,7 @@ mod imp {
             match state.mode {
                 ModeKind::Region => {
                     let rect_here = match state.owner {
-                        Some(idx) if idx == monitor_index => state.rect_local(),
+                        Some(idx) if idx == monitor_index => state.display_rect_local(),
                         _ => None,
                     };
                     let Some((rx, ry, rw, rh)) = rect_here else {
@@ -1437,6 +1629,32 @@ mod imp {
                     pb.add_rect(&graphene::Rect::new(rx + 0.5, ry + 0.5, rw - 1.0, rh - 1.0));
                     let stroke = gtk4::gsk::Stroke::new(1.5);
                     snapshot.append_stroke(&pb.to_path(), &stroke, &outline);
+
+                    // Resize handles: white-filled squares bordered with the configured
+                    // selector outline color, drawn after the outline so they sit on top. Built
+                    // from the same widget-local rect via `select::box_handle_points` so the
+                    // drawn centers are pixel-identical to the hit-test in `install_drag`.
+                    let handle_rect = Rect {
+                        x: rx as i32,
+                        y: ry as i32,
+                        w: rw as u32,
+                        h: rh as u32,
+                    };
+                    let half = (select::HANDLE_DRAW / 2.0) as f32;
+                    let side = select::HANDLE_DRAW as f32;
+                    let white = gtk4::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0);
+                    for (_, (hx, hy)) in select::box_handle_points(handle_rect) {
+                        let hr =
+                            graphene::Rect::new(hx as f32 - half, hy as f32 - half, side, side);
+                        snapshot.append_color(&white, &hr);
+                        let hb = gtk4::gsk::PathBuilder::new();
+                        hb.add_rect(&hr);
+                        snapshot.append_stroke(
+                            &hb.to_path(),
+                            &gtk4::gsk::Stroke::new(1.0),
+                            &outline,
+                        );
+                    }
 
                     let hint = fl!(
                         "selector-hint-region-size",
@@ -1593,5 +1811,175 @@ mod imp {
             snapshot.append_layout(&layout, color);
             snapshot.restore();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+    use select::BoxHandle;
+
+    fn rect() -> Rect {
+        Rect {
+            x: 10,
+            y: 20,
+            w: 100,
+            h: 80,
+        }
+    }
+
+    #[test]
+    fn classify_press_without_settled_is_always_new() {
+        assert_eq!(classify_region_press(None, 0.0, 0.0), RegionPress::New);
+        assert_eq!(classify_region_press(None, 55.0, 55.0), RegionPress::New);
+    }
+
+    #[rstest]
+    #[case(BoxHandle::NW)]
+    #[case(BoxHandle::N)]
+    #[case(BoxHandle::NE)]
+    #[case(BoxHandle::E)]
+    #[case(BoxHandle::SE)]
+    #[case(BoxHandle::S)]
+    #[case(BoxHandle::SW)]
+    #[case(BoxHandle::W)]
+    fn classify_press_on_a_handle_resolves_to_resize(#[case] handle: BoxHandle) {
+        let r = rect();
+        let (hx, hy) = select::box_handle_point(r, handle);
+        assert_eq!(
+            classify_region_press(Some(r), hx, hy),
+            RegionPress::Resize(handle)
+        );
+    }
+
+    #[test]
+    fn classify_press_inside_body_resolves_to_move() {
+        // Centre of the rect, far from any handle hit-zone.
+        assert_eq!(
+            classify_region_press(Some(rect()), 60.0, 60.0),
+            RegionPress::Move
+        );
+    }
+
+    #[test]
+    fn classify_press_outside_starts_a_new_rect() {
+        // Well clear of the rect and every handle's catch zone.
+        assert_eq!(
+            classify_region_press(Some(rect()), 500.0, 500.0),
+            RegionPress::New
+        );
+    }
+
+    #[test]
+    fn classify_prefers_handle_over_body_on_overlap() {
+        // A point on the SE corner is both inside the body and within the corner hit-zone;
+        // the handle must win so the user resizes rather than moves.
+        let r = rect();
+        let (hx, hy) = select::box_handle_point(r, BoxHandle::SE);
+        assert_eq!(
+            classify_region_press(Some(r), hx, hy),
+            RegionPress::Resize(BoxHandle::SE)
+        );
+    }
+
+    #[test]
+    fn settle_draft_promotes_a_real_draft() {
+        let mut s = SharedSelection {
+            start: Some((30.0, 40.0)),
+            current: Some((130.0, 120.0)),
+            ..SharedSelection::default()
+        };
+        s.settle_draft();
+        assert_eq!(
+            s.settled,
+            Some(Rect {
+                x: 30,
+                y: 40,
+                w: 100,
+                h: 80,
+            })
+        );
+    }
+
+    #[test]
+    fn settle_draft_ignores_a_degenerate_draft() {
+        let mut s = SharedSelection {
+            start: Some((30.0, 40.0)),
+            current: Some((30.5, 40.5)),
+            ..SharedSelection::default()
+        };
+        s.settle_draft();
+        assert_eq!(s.settled, None);
+    }
+
+    #[test]
+    fn display_rect_prefers_settled_over_draft() {
+        let s = SharedSelection {
+            start: Some((0.0, 0.0)),
+            current: Some((10.0, 10.0)),
+            settled: Some(rect()),
+            ..SharedSelection::default()
+        };
+        assert_eq!(s.display_rect_local(), Some((10.0, 20.0, 100.0, 80.0)));
+    }
+
+    #[test]
+    fn display_rect_falls_back_to_draft_then_none() {
+        let drafting = SharedSelection {
+            start: Some((0.0, 0.0)),
+            current: Some((10.0, 10.0)),
+            ..SharedSelection::default()
+        };
+        assert_eq!(drafting.display_rect_local(), Some((0.0, 0.0, 10.0, 10.0)));
+        assert_eq!(SharedSelection::default().display_rect_local(), None);
+    }
+
+    #[test]
+    fn clear_region_zeroes_every_interaction_field() {
+        let mut s = SharedSelection {
+            owner: Some(1),
+            start: Some((1.0, 2.0)),
+            current: Some((3.0, 4.0)),
+            settled: Some(rect()),
+            drag: Some(RegionDrag::Move { origin: rect() }),
+            ..SharedSelection::default()
+        };
+        s.clear_region();
+        assert_eq!(s.owner, None);
+        assert_eq!(s.start, None);
+        assert_eq!(s.current, None);
+        assert_eq!(s.settled, None);
+        assert!(s.drag.is_none());
+    }
+
+    #[rstest]
+    #[case(BoxHandle::NW, "nwse-resize")]
+    #[case(BoxHandle::SE, "nwse-resize")]
+    #[case(BoxHandle::NE, "nesw-resize")]
+    #[case(BoxHandle::SW, "nesw-resize")]
+    #[case(BoxHandle::N, "ns-resize")]
+    #[case(BoxHandle::S, "ns-resize")]
+    #[case(BoxHandle::E, "ew-resize")]
+    #[case(BoxHandle::W, "ew-resize")]
+    fn box_handle_cursor_maps_each_handle(#[case] handle: BoxHandle, #[case] expected: &str) {
+        assert_eq!(box_handle_cursor(handle), expected);
+    }
+
+    #[test]
+    fn region_cursor_over_handle_is_a_resize_cursor() {
+        let r = rect();
+        let (nw_x, nw_y) = select::box_handle_point(r, BoxHandle::NW);
+        assert_eq!(region_cursor_at(r, nw_x, nw_y), Some("nwse-resize"));
+        let (e_x, e_y) = select::box_handle_point(r, BoxHandle::E);
+        assert_eq!(region_cursor_at(r, e_x, e_y), Some("ew-resize"));
+    }
+
+    #[test]
+    fn region_cursor_inside_body_is_move_and_outside_is_default() {
+        let r = rect();
+        assert_eq!(region_cursor_at(r, 60.0, 60.0), Some("move"));
+        assert_eq!(region_cursor_at(r, 500.0, 500.0), None);
     }
 }
