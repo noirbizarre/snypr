@@ -15,8 +15,10 @@ git-cliff = "latest"
 typos = "latest"
 actionlint = "latest"
 # actionlint silently skips its shellcheck integration when the binary is
-# absent, so without this a local run is NOT the CI run. Runners ship it.
-shellcheck = "latest"
+# absent, so without this a local run is NOT the CI run. Pinned to the aqua
+# backend explicitly: the default resolution is an asdf plugin, which carries
+# no lockfile URL and so cannot be installed in locked mode.
+"aqua:koalaman/shellcheck" = "latest"
 
 [tasks.default]
 description = "Run fmt, lint, build and test"
