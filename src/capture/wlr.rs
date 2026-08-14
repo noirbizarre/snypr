@@ -16,13 +16,14 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
 use smithay_client_toolkit::{
+    dispatch2::Dispatch2,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
-    Connection, Dispatch, QueueHandle,
+    Connection, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_buffer, wl_output, wl_registry, wl_shm},
 };
@@ -72,7 +73,7 @@ fn enumerate_outputs() -> Result<Vec<Output>> {
     let output_state = OutputState::new(&globals, &qh);
     let shm = Shm::bind(&globals, &qh).context("binding wl_shm")?;
     let manager: ZwlrScreencopyManagerV1 = globals
-        .bind(&qh, 1..=3, ())
+        .bind(&qh, 1..=3, ManagerData)
         .map_err(|_| CaptureError::UnsupportedCompositor)?;
 
     let mut data = AppData {
@@ -121,7 +122,7 @@ fn capture_blocking(selection: Selection, cursor: bool) -> Result<Vec<CapturedIm
     let output_state = OutputState::new(&globals, &qh);
     let shm = Shm::bind(&globals, &qh).context("binding wl_shm")?;
     let manager: ZwlrScreencopyManagerV1 = globals
-        .bind(&qh, 1..=3, ())
+        .bind(&qh, 1..=3, ManagerData)
         .map_err(|_| CaptureError::UnsupportedCompositor)?;
 
     let mut data = AppData {
@@ -275,6 +276,10 @@ struct AppData {
     pool: Option<SlotPool>,
 }
 
+/// User data attached to the bound `zwlr_screencopy_manager_v1` global.
+#[derive(Default)]
+struct ManagerData;
+
 #[derive(Default)]
 struct FrameUserData;
 
@@ -328,26 +333,26 @@ impl ShmHandler for AppData {
     }
 }
 
-impl Dispatch<ZwlrScreencopyManagerV1, ()> for AppData {
+impl Dispatch2<ZwlrScreencopyManagerV1, AppData> for ManagerData {
     fn event(
-        _: &mut Self,
+        &self,
+        _: &mut AppData,
         _: &ZwlrScreencopyManagerV1,
         _: <ZwlrScreencopyManagerV1 as wayland_client::Proxy>::Event,
-        _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        _: &QueueHandle<AppData>,
     ) {
     }
 }
 
-impl Dispatch<ZwlrScreencopyFrameV1, FrameUserData> for AppData {
+impl Dispatch2<ZwlrScreencopyFrameV1, AppData> for FrameUserData {
     fn event(
-        state: &mut Self,
+        &self,
+        state: &mut AppData,
         frame: &ZwlrScreencopyFrameV1,
         event: <ZwlrScreencopyFrameV1 as wayland_client::Proxy>::Event,
-        _: &FrameUserData,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        _: &QueueHandle<AppData>,
     ) {
         let Some(slot) = state.frames.iter_mut().find(|s| &s.frame == frame) else {
             return;
@@ -376,9 +381,8 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameUserData> for AppData {
     }
 }
 
-smithay_client_toolkit::delegate_output!(AppData);
-smithay_client_toolkit::delegate_shm!(AppData);
 smithay_client_toolkit::delegate_registry!(AppData);
+smithay_client_toolkit::delegate_dispatch2!(AppData);
 
 // Quiet unused-imports warnings when this module is only stubbed.
 #[allow(dead_code)]
