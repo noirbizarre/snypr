@@ -1,4 +1,4 @@
-# Contributing to hyprsnap
+# Contributing to snypr
 
 ## Commits
 
@@ -14,7 +14,7 @@ docs(man): document --clipboard-type
 
 ## Adding a bundled icon
 
-Hyprsnap ships a small set of [icon-development-kit](https://gitlab.gnome.org/Teams/Design/icon-development-kit)
+Snypr ships a small set of [icon-development-kit](https://gitlab.gnome.org/Teams/Design/icon-development-kit)
 SVGs via a gresource so that toolbar buttons render reliably regardless of the
 user's icon theme. To add one more:
 
@@ -61,7 +61,7 @@ variable and `APP_PRIVATE_KEY` secret live in the `release` environment. The
 default `GITHUB_TOKEN` is not enough: a Release PR it authored would show no CI
 results, because pushes made with it do not trigger workflows.
 
-Releases carry **no prebuilt binaries**: hyprsnap links GTK4 and
+Releases carry **no prebuilt binaries**: snypr links GTK4 and
 gtk4-layer-shell dynamically and installs desktop entries, icons and a manpage,
 so a single binary would only work on distributions matching the CI runner.
 The release asset is a source tarball, which is what packagers consume.

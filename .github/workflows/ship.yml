@@ -1,6 +1,6 @@
 name: 🚢 Ship
 
-# gh-ship releases HyprSnap. This workflow does none of the release work
+# gh-ship releases Snypr. This workflow does none of the release work
 # itself; it drives the two halves of the lifecycle:
 #
 #   push to main          -> `gh ship prepare` -> opens or updates the Release PR

@@ -1,19 +1,19 @@
-//! Shared CSS / styling for HyprSnap windows.
+//! Shared CSS / styling for Snypr windows.
 
 pub const CSS: &str = r#"
-.hyprsnap-toolbar {
+.snypr-toolbar {
     background: alpha(@theme_bg_color, 0.85);
     border-radius: 12px;
     padding: 6px;
     margin: 12px;
 }
 
-.hyprsnap-toolbar separator {
+.snypr-toolbar separator {
     margin: 2px 4px;
     background-color: alpha(@theme_fg_color, 0.18);
 }
 
-.hyprsnap-toolbar button.suggested-action {
+.snypr-toolbar button.suggested-action {
     background-color: @theme_selected_bg_color;
     color: @theme_selected_fg_color;
 }
@@ -21,12 +21,12 @@ pub const CSS: &str = r#"
 /* The selector overlay window must be fully transparent so the snapshot path
  * (which paints a translucent dim + selection outline) composites directly
  * over the live desktop, not over GTK's default opaque window background. */
-window.hyprsnap-selector,
-window.hyprsnap-selector decoration,
-window.hyprsnap-selector > *,
-window.hyprsnap-overlay,
-window.hyprsnap-overlay decoration,
-window.hyprsnap-overlay > * {
+window.snypr-selector,
+window.snypr-selector decoration,
+window.snypr-selector > *,
+window.snypr-overlay,
+window.snypr-overlay decoration,
+window.snypr-overlay > * {
     background: transparent;
     background-color: transparent;
     box-shadow: none;
@@ -38,7 +38,7 @@ window.hyprsnap-overlay > * {
  * selector to host the countdown. Colors are injected per-invocation by
  * `crate::ui::countdown::install_countdown_css` from `[ui.selector]` config
  * (`countdown_bg`, `countdown_fg`); only the structural rules live here. */
-window.hyprsnap-countdown label.hyprsnap-countdown-number {
+window.snypr-countdown label.snypr-countdown-number {
     font-weight: bold;
 }
 "#;

@@ -134,11 +134,7 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
             std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok(),
             true,
         ),
-        (
-            "HYPRSNAP_CONFIG",
-            std::env::var("HYPRSNAP_CONFIG").ok(),
-            false,
-        ),
+        ("SNYPR_CONFIG", std::env::var("SNYPR_CONFIG").ok(), false),
     ];
 
     // ---- Configuration -------------------------------------------------------
@@ -288,7 +284,7 @@ async fn daemon_ping(socket: &Path) -> Result<(), String> {
 
 /// Cheap writability probe — try to create (then remove) a temp file in `dir`.
 fn is_writable(dir: &Path) -> bool {
-    let probe = dir.join(".hyprsnap-doctor-write-check");
+    let probe = dir.join(".snypr-doctor-write-check");
     match std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -316,7 +312,7 @@ fn render(state: &DoctorState) -> String {
     // ---- Version -------------------------------------------------------------
     let _ = writeln!(out, "### Version");
     let git = state.git_hash.unwrap_or("n/a");
-    let _ = writeln!(out, "- hyprsnap: {} (git: {git})", state.version);
+    let _ = writeln!(out, "- snypr: {} (git: {git})", state.version);
     let features = if state.features.is_empty() {
         "(none)".to_owned()
     } else {
@@ -360,7 +356,7 @@ fn render(state: &DoctorState) -> String {
     let _ = writeln!(out, "- Default path: {default_path_display}");
     let _ = writeln!(
         out,
-        "- Override (--config / HYPRSNAP_CONFIG): {override_display}"
+        "- Override (--config / SNYPR_CONFIG): {override_display}"
     );
     let (src_str, src_status, src_note) = match (&state.config_source, state.config_source_exists) {
         (Some(p), true) => (tilde(p), Status::Ok, ""),
@@ -518,9 +514,9 @@ mod tests {
                 ("WAYLAND_DISPLAY", Some("wayland-1".to_owned()), false),
                 ("HYPRLAND_INSTANCE_SIGNATURE", None, true),
             ],
-            config_source: Some(PathBuf::from("/home/u/.config/hyprsnap/config.toml")),
+            config_source: Some(PathBuf::from("/home/u/.config/snypr/config.toml")),
             config_source_exists: false,
-            default_path: Some(PathBuf::from("/home/u/.config/hyprsnap/config.toml")),
+            default_path: Some(PathBuf::from("/home/u/.config/snypr/config.toml")),
             config_override: None,
             parse_status: Status::Warn,
             parse_error: None,
@@ -534,7 +530,7 @@ mod tests {
             hypr_ping: Err("no compositor".to_owned()),
             wlr_init: Ok(()),
             wlr_outputs: Ok(vec![("DP-1".to_owned(), 2560, 1440)]),
-            daemon_socket: PathBuf::from("/run/user/1000/hyprsnap.sock"),
+            daemon_socket: PathBuf::from("/run/user/1000/snypr.sock"),
             daemon_ping: Err("socket does not exist".to_owned()),
         }
     }

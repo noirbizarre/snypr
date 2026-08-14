@@ -2,7 +2,7 @@
 //!
 //! There are two execution strategies, chosen at sink construction:
 //!
-//! * **In-process** — used inside the long-lived `hyprsnap daemon` server. The Wayland
+//! * **In-process** — used inside the long-lived `snypr daemon` server. The Wayland
 //!   data source is created in this very process and `wl-clipboard-rs` keeps an internal
 //!   serving thread alive that responds to paste requests. Because the daemon process
 //!   keeps running, the selection survives naturally until another client overtakes it.

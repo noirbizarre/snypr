@@ -38,12 +38,12 @@ struct DaemonState {
     overlay: Mutex<Option<OverlayHandle>>,
 }
 
-/// Default IPC socket path: `$XDG_RUNTIME_DIR/hyprsnap.sock`.
+/// Default IPC socket path: `$XDG_RUNTIME_DIR/snypr.sock`.
 pub fn default_socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    dir.join("hyprsnap.sock")
+    dir.join("snypr.sock")
 }
 
 pub async fn serve(ctx: Ctx, socket: PathBuf, systray: bool) -> Result<()> {
@@ -53,7 +53,7 @@ pub async fn serve(ctx: Ctx, socket: PathBuf, systray: bool) -> Result<()> {
     }
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("binding socket {}", socket.display()))?;
-    tracing::info!(path = %socket.display(), "hyprsnap daemon listening");
+    tracing::info!(path = %socket.display(), "snypr daemon listening");
 
     let state = Arc::new(DaemonState::default());
 
@@ -120,7 +120,7 @@ async fn setup_tray(
     enabled: bool,
 ) -> Result<(
     Option<tokio::sync::mpsc::UnboundedReceiver<crate::ui::tray::TrayAction>>,
-    Option<ksni::Handle<crate::ui::tray::HyprSnapTray>>,
+    Option<ksni::Handle<crate::ui::tray::SnyprTray>>,
 )> {
     if !enabled {
         return Ok((None, None));
@@ -252,7 +252,7 @@ async fn toggle_overlay_passthrough(state: &Arc<DaemonState>) -> Result<()> {
 /// Acquire `state.editor` with `try_lock` (only when `edit` is true) so a second editor request
 /// gets an immediate "busy" error rather than queuing behind a GTK editor window that may sit
 /// open for minutes. Headless screenshots bypass the lock entirely so multiple concurrent
-/// `hyprsnap screenshot` calls keep working.
+/// `snypr screenshot` calls keep working.
 async fn run_screenshot_with_optional_lock(
     ctx: &Ctx,
     state: &Arc<DaemonState>,

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
-  <gresource prefix="/re/noirbizar/HyprSnap/icons/scalable/actions">
+  <gresource prefix="/re/noirbizar/Snypr/icons/scalable/actions">
     <file alias="arrow1-top-right-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/arrow1-top-right-symbolic.svg</file>
     <file alias="blend-tool-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/blend-tool-symbolic.svg</file>
     <file alias="draw-line-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/draw-line-symbolic.svg</file>

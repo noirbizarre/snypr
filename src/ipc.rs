@@ -1,4 +1,4 @@
-//! IPC protocol between `hyprsnap` clients and a running `hyprsnap daemon`.
+//! IPC protocol between `snypr` clients and a running `snypr daemon`.
 
 use std::path::PathBuf;
 

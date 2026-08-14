@@ -9,7 +9,7 @@ use crate::config::Config;
 /// Long-lived application state shared across commands.
 pub struct Context {
     pub config: Config,
-    /// True when this process is the long-lived `hyprsnap daemon` server.
+    /// True when this process is the long-lived `snypr daemon` server.
     ///
     /// Sinks that would otherwise need to fork-and-detach to outlive a
     /// one-shot CLI invocation (currently only [`crate::output::clipboard::ClipboardSink`])
@@ -31,7 +31,7 @@ impl Context {
         }))
     }
 
-    /// Build a context owned by the long-lived `hyprsnap daemon` process.
+    /// Build a context owned by the long-lived `snypr daemon` process.
     ///
     /// The only behavioural difference today is that sinks know they are
     /// running inside a persistent process and can skip lifetime workarounds

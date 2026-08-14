@@ -1,4 +1,4 @@
-//! TOML configuration loaded from `$XDG_CONFIG_HOME/hyprsnap/config.toml`.
+//! TOML configuration loaded from `$XDG_CONFIG_HOME/snypr/config.toml`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use crate::cli::{ClipboardKind, SinkSpec};
 #[serde(default)]
 pub struct Config {
     /// Active UI language as a BCP-47 tag (e.g. `"fr"`, `"en-US"`). `None`
-    /// (the default) lets HyprSnap auto-detect from `LC_ALL`/`LC_MESSAGES`/
+    /// (the default) lets Snypr auto-detect from `LC_ALL`/`LC_MESSAGES`/
     /// `LANG`. The `--lang` CLI flag overrides this field.
     pub language: Option<String>,
     pub output: OutputConfig,
@@ -85,7 +85,7 @@ impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             directory: None,
-            filename_template: "hyprsnap_{ts}.png".to_owned(),
+            filename_template: "snypr_{ts}.png".to_owned(),
             default_sinks: vec!["file".to_owned()],
             use_utc: false,
             compression: PngCompression::default(),
@@ -440,9 +440,11 @@ impl Default for AnnotateColors {
 }
 
 impl Config {
-    /// Default config file path: `$XDG_CONFIG_HOME/hyprsnap/config.toml`.
+    /// Default config file path: `$XDG_CONFIG_HOME/snypr/config.toml`.
     pub fn default_path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("ai", "hyprtools", "hyprsnap")
+        // Matches `crate::ui::APP_ID` (`noirbizar.re.Snypr`) so the config, cache and
+        // data directories all live under the same reverse-DNS identity.
+        directories::ProjectDirs::from("re", "noirbizar", "snypr")
             .map(|d| d.config_dir().join("config.toml"))
     }
 
@@ -551,7 +553,7 @@ mod tests {
     #[test]
     fn defaults_are_valid() {
         let cfg = Config::default();
-        assert_eq!(cfg.output.filename_template, "hyprsnap_{ts}.png");
+        assert_eq!(cfg.output.filename_template, "snypr_{ts}.png");
         assert_eq!(cfg.default_sinks(), vec![SinkSpec::File(None)]);
     }
 
@@ -593,7 +595,7 @@ mod tests {
     fn template_expansion_uses_defaults_when_missing() {
         let cfg = Config::default();
         let out = cfg.expand_filename(&FilenameContext::default());
-        assert!(out.starts_with("hyprsnap_"));
+        assert!(out.starts_with("snypr_"));
         assert!(out.ends_with(".png"));
     }
 

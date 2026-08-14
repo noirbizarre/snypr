@@ -59,7 +59,7 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -Dclippy::all
 
-  # gh-ship releases HyprSnap. Its configuration and workflows must satisfy the
+  # gh-ship releases Snypr. Its configuration and workflows must satisfy the
   # contract gh-ship enforces, or the release breaks at the worst moment.
   ship:
     name: 🚢 Ship setup

@@ -12,12 +12,12 @@ pub mod doctor;
 pub mod draw;
 pub mod screenshot;
 
-/// HyprSnap — capture, annotate, and draw on the screen for Hyprland.
+/// Snypr — capture, annotate, and draw on the screen for Hyprland.
 #[derive(Debug, Parser)]
-#[command(name = "hyprsnap", version, about, long_about = None)]
+#[command(name = "snypr", version, about, long_about = None)]
 pub struct Cli {
     /// Path to an alternative configuration file.
-    #[arg(long, global = true, value_name = "FILE", env = "HYPRSNAP_CONFIG")]
+    #[arg(long, global = true, value_name = "FILE", env = "SNYPR_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// Increase verbosity (-v = debug, -vv = trace). Overrides RUST_LOG when present.
@@ -27,7 +27,7 @@ pub struct Cli {
     /// Override the active language as a BCP-47 tag (e.g. `fr`, `en-US`).
     /// Falls back to the `language` config field, then `LC_ALL`/`LC_MESSAGES`/`LANG`,
     /// then English.
-    #[arg(long, global = true, value_name = "BCP47", env = "HYPRSNAP_LANG")]
+    #[arg(long, global = true, value_name = "BCP47", env = "SNYPR_LANG")]
     pub lang: Option<String>,
 
     #[command(subcommand)]
@@ -61,7 +61,7 @@ pub enum SinkKind {
 ///
 /// Wayland exposes two independent selections: the *regular* clipboard
 /// (Ctrl+C / Ctrl+V) and the *primary* selection (middle-click paste). By
-/// default hyprsnap publishes the screenshot to the regular clipboard
+/// default snypr publishes the screenshot to the regular clipboard
 /// only — matching how most graphical apps treat copy/paste.
 #[derive(Debug, Default, Copy, Clone, ValueEnum, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -151,7 +151,7 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-/// Forward a `Command` to a running `hyprsnap daemon` over the IPC socket instead of executing
+/// Forward a `Command` to a running `snypr daemon` over the IPC socket instead of executing
 /// locally. Only `screenshot` (with or without `--edit`) and `draw` accept `--via-daemon`;
 /// `daemon` rejects the flag at parse time.
 async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
@@ -305,32 +305,26 @@ mod tests {
 
     #[test]
     fn cli_parses_screenshot_full() {
-        let cli = Cli::try_parse_from([
-            "hyprsnap",
-            "screenshot",
-            "--full",
-            "--to",
-            "file=/tmp/a.png",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["snypr", "screenshot", "--full", "--to", "file=/tmp/a.png"])
+            .unwrap();
         assert!(matches!(cli.command, Some(Command::Screenshot(_))));
     }
 
     #[test]
     fn cli_allows_no_subcommand() {
-        let cli = Cli::try_parse_from(["hyprsnap"]).unwrap();
+        let cli = Cli::try_parse_from(["snypr"]).unwrap();
         assert!(cli.command.is_none());
     }
 
     #[test]
     fn cli_parses_all_subcommands() {
         for args in [
-            vec!["hyprsnap", "screenshot", "--full"],
-            vec!["hyprsnap", "screenshot", "--edit"],
-            vec!["hyprsnap", "draw"],
-            vec!["hyprsnap", "daemon"],
-            vec!["hyprsnap", "daemon", "--systray"],
-            vec!["hyprsnap", "doctor"],
+            vec!["snypr", "screenshot", "--full"],
+            vec!["snypr", "screenshot", "--edit"],
+            vec!["snypr", "draw"],
+            vec!["snypr", "daemon"],
+            vec!["snypr", "daemon", "--systray"],
+            vec!["snypr", "doctor"],
         ] {
             Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} -> {e}"));
         }
@@ -338,7 +332,7 @@ mod tests {
 
     #[test]
     fn doctor_honors_global_config_flag() {
-        let cli = Cli::try_parse_from(["hyprsnap", "--config", "/tmp/alt.toml", "doctor"]).unwrap();
+        let cli = Cli::try_parse_from(["snypr", "--config", "/tmp/alt.toml", "doctor"]).unwrap();
         assert_eq!(
             cli.config.as_deref(),
             Some(std::path::Path::new("/tmp/alt.toml"))
@@ -349,9 +343,9 @@ mod tests {
     #[test]
     fn via_daemon_accepted_on_screenshot_and_draw() {
         for args in [
-            vec!["hyprsnap", "screenshot", "--via-daemon"],
-            vec!["hyprsnap", "screenshot", "--full", "--via-daemon"],
-            vec!["hyprsnap", "draw", "--via-daemon"],
+            vec!["snypr", "screenshot", "--via-daemon"],
+            vec!["snypr", "screenshot", "--full", "--via-daemon"],
+            vec!["snypr", "draw", "--via-daemon"],
         ] {
             Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} -> {e}"));
         }
@@ -359,12 +353,12 @@ mod tests {
 
     #[test]
     fn via_daemon_rejected_on_daemon() {
-        assert!(Cli::try_parse_from(["hyprsnap", "daemon", "--via-daemon"]).is_err());
+        assert!(Cli::try_parse_from(["snypr", "daemon", "--via-daemon"]).is_err());
     }
 
     #[test]
     fn via_daemon_is_not_global() {
         // Placing `--via-daemon` before the subcommand must fail now that it's no longer global.
-        assert!(Cli::try_parse_from(["hyprsnap", "--via-daemon", "screenshot"]).is_err());
+        assert!(Cli::try_parse_from(["snypr", "--via-daemon", "screenshot"]).is_err());
     }
 }

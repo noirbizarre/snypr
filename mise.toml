@@ -41,10 +41,10 @@ run = "cargo build"
 description = "Install the binaries"
 run = "cargo install --path . --force"
 
-[tasks.hyprsnap]
+[tasks.snypr]
 description = "Run the application"
 raw_args = true
-run = 'cargo run --bin hyprsnap --'
+run = 'cargo run --bin snypr --'
 
 [tasks.fmt]
 description = "Format the code"

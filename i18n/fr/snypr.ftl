@@ -1,4 +1,4 @@
-# HyprSnap — Français (fr).
+# Snypr — Français (fr).
 #
 # Convention typographique : espace insécable U+00A0 devant `:`, `?`, `!`, `;`
 # et entre une valeur et son unité ("3 s"), conformément aux usages français.
@@ -73,7 +73,7 @@ notify-saved-multi-body = { $first } ({ $count ->
 error-edit-incompatible-per-output = `--edit` est incompatible avec `--per-output` (l'éditeur d'annotation ne traite qu'une seule image)
 error-edit-requires-ui-feature = `--edit` requiert la fonctionnalité `ui` de Cargo ; recompilez avec ou retirez l'option
 error-interactive-requires-ui-feature = le sélecteur interactif requiert la fonctionnalité `ui` de Cargo ; passez --region, --full ou une autre option concrète
-error-draw-requires-ui-feature = hyprsnap a été compilé sans la fonctionnalité `ui` ; `draw` n'est pas disponible
+error-draw-requires-ui-feature = snypr a été compilé sans la fonctionnalité `ui` ; `draw` n'est pas disponible
 error-invalid-region = région invalide : { $spec } (attendu X,Y,LxH)
 error-invalid-region-size = taille de région invalide : { $size } (attendu LxH)
 error-overlay-no-monitor = aucun moniteur n'intersecte la zone d'édition demandée ; rien à annoter

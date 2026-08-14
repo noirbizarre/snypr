@@ -1,6 +1,6 @@
 //! Internationalization (i18n) — Fluent-backed message catalogs.
 //!
-//! Translations live as `.ftl` files under `i18n/<lang>/hyprsnap.ftl` and are
+//! Translations live as `.ftl` files under `i18n/<lang>/snypr.ftl` and are
 //! embedded into the binary by [`rust_embed`]. The active language is selected
 //! once at process start via [`init`]; thereafter every call to [`fl!`] resolves
 //! through the global [`LANGUAGE_LOADER`].
@@ -30,7 +30,7 @@ use once_cell::sync::Lazy;
 use rust_embed::RustEmbed;
 use unic_langid::LanguageIdentifier;
 
-/// Embedded message catalogs. Every `i18n/<lang>/hyprsnap.ftl` is baked into
+/// Embedded message catalogs. Every `i18n/<lang>/snypr.ftl` is baked into
 /// the binary at compile time.
 #[derive(RustEmbed)]
 #[folder = "i18n/"]

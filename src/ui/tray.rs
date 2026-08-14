@@ -1,6 +1,6 @@
 //! System tray icon (StatusNotifierItem) via `ksni`.
 //!
-//! The tray is hosted by `hyprsnap daemon --systray`. Menu
+//! The tray is hosted by `snypr daemon --systray`. Menu
 //! activations are translated into [`TrayAction`]s and forwarded over a tokio MPSC channel to
 //! the daemon's main select-loop, which dispatches the actual screenshot / overlay work on its
 //! own runtime. Keeping ksni at arm's length like this avoids tangling its sync `activate`
@@ -13,13 +13,13 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::i18n::fl;
 
-/// Embedded HyprSnap logo, shipped alongside the source so the tray works out-of-the-box even
+/// Embedded Snypr logo, shipped alongside the source so the tray works out-of-the-box even
 /// on systems where the icon theme hasn't been installed system-wide. 64×64 is sized for SNI
 /// panels (typical render size 16–32 px, doubled for HiDPI), keeping the ARGB pixmap that
 /// crosses D-Bus small. The full theme — 16/32/64/128/256/512 sizes under
 /// `…/icons/hicolor/<size>/apps/` — is installed by the packaging rules.
 const LOGO_PNG: &[u8] =
-    include_bytes!("../../data/icons/hicolor/64x64/apps/noirbizar.re.HyprSnap.png");
+    include_bytes!("../../data/icons/hicolor/64x64/apps/noirbizar.re.Snypr.png");
 
 /// Side-effect requested by the user via the tray menu.
 #[derive(Debug, Clone, Copy)]
@@ -35,28 +35,28 @@ pub enum TrayAction {
 
 /// Spawn the tray in the background. Returns a handle that keeps the tray alive — drop it to
 /// remove the tray icon. Errors only if registering the StatusNotifierItem on the bus fails.
-pub async fn spawn(tx: UnboundedSender<TrayAction>) -> Result<ksni::Handle<HyprSnapTray>> {
+pub async fn spawn(tx: UnboundedSender<TrayAction>) -> Result<ksni::Handle<SnyprTray>> {
     use ksni::TrayMethods;
-    let tray = HyprSnapTray { tx };
+    let tray = SnyprTray { tx };
     let handle = tray
         .spawn()
         .await
         .context("registering tray StatusNotifierItem")?;
-    tracing::info!("hyprsnap tray registered");
+    tracing::info!("snypr tray registered");
     Ok(handle)
 }
 
-pub struct HyprSnapTray {
+pub struct SnyprTray {
     tx: UnboundedSender<TrayAction>,
 }
 
-impl ksni::Tray for HyprSnapTray {
+impl ksni::Tray for SnyprTray {
     fn id(&self) -> String {
         env!("CARGO_PKG_NAME").into()
     }
 
     fn title(&self) -> String {
-        "HyprSnap".into()
+        "Snypr".into()
     }
 
     fn icon_name(&self) -> String {
@@ -120,7 +120,7 @@ impl ksni::Tray for HyprSnapTray {
     }
 }
 
-impl HyprSnapTray {
+impl SnyprTray {
     fn send(&self, action: TrayAction) {
         // The channel is unbounded so this is non-blocking; failure means the daemon side has
         // dropped the receiver, which only happens during shutdown.

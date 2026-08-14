@@ -65,7 +65,7 @@ jobs:
           # it authors would show no CI results.
           token: ${{ steps.app-token.outputs.token }}
 
-      # This job never builds HyprSnap, so it needs none of the GTK4 or
+      # This job never builds Snypr, so it needs none of the GTK4 or
       # gtk4-layer-shell system dependencies: `cargo update --workspace` only
       # resolves the dependency graph and rewrites Cargo.lock.
       - uses: dtolnay/rust-toolchain@stable

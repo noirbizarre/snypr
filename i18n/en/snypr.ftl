@@ -1,4 +1,4 @@
-# HyprSnap — English (en) — source-of-truth catalog.
+# Snypr — English (en) — source-of-truth catalog.
 #
 # Keys are referenced via the `fl!` macro; the i18n-embed-fl proc-macro
 # validates every key against this file at compile time.
@@ -73,7 +73,7 @@ notify-saved-multi-body = { $first } ({ $count ->
 error-edit-incompatible-per-output = `--edit` is incompatible with `--per-output` (the annotation editor operates on a single image)
 error-edit-requires-ui-feature = `--edit` requires the `ui` cargo feature; rebuild with it or drop the flag
 error-interactive-requires-ui-feature = interactive selector requires the `ui` cargo feature; pass a concrete --region, --full, or other flag
-error-draw-requires-ui-feature = hyprsnap was built without the `ui` feature; `draw` is unavailable
+error-draw-requires-ui-feature = snypr was built without the `ui` feature; `draw` is unavailable
 error-invalid-region = invalid region: { $spec } (expected X,Y,WxH)
 error-invalid-region-size = invalid region size: { $size } (expected WxH)
 error-overlay-no-monitor = no monitor intersected the requested edit region; nothing to annotate

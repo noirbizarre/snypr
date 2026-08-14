@@ -8,7 +8,7 @@
 
 [remote.github]
 owner = "noirbizarre"
-repo = "hyprsnap"
+repo = "snypr"
 
 [changelog]
 header = """
@@ -77,7 +77,7 @@ postprocessors = [
   # is what prek's end-of-file-fixer wants.
   { pattern = '\n+\z', replace = "\n" },
   # Resolve the placeholder left by the issue-linking preprocessor below.
-  { pattern = "<REPO>", replace = "https://github.com/noirbizarre/hyprsnap" },
+  { pattern = "<REPO>", replace = "https://github.com/noirbizarre/snypr" },
 ]
 
 

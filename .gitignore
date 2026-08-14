@@ -3,7 +3,7 @@
 debug/
 target/
 
-# Cargo.lock is deliberately tracked: hyprsnap is a binary, and the release
+# Cargo.lock is deliberately tracked: snypr is a binary, and the release
 # tarball must pin the exact dependency graph that was built and tested.
 # https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
 

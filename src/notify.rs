@@ -22,15 +22,15 @@ use crate::path::tilde;
 // (`appname`, surfaced in some notification UIs as a group label) and the desktop-file
 // / theme application id (used to resolve the icon). We deliberately use a lowercase
 // bare name as the appname so the grouping label reads cleanly, and reuse
-// `crate::ui::APP_ID` for the icon so the bundled `noirbizar.re.HyprSnap` icon resolves.
-const APP_NAME: &str = "hyprsnap";
+// `crate::ui::APP_ID` for the icon so the bundled `noirbizar.re.Snypr` icon resolves.
+const APP_NAME: &str = "snypr";
 #[cfg(feature = "ui")]
 const APP_ICON: &str = crate::ui::APP_ID;
 #[cfg(not(feature = "ui"))]
-const APP_ICON: &str = "noirbizar.re.HyprSnap";
-const SUMMARY: &str = "HyprSnap";
+const APP_ICON: &str = "noirbizar.re.Snypr";
+const SUMMARY: &str = "Snypr";
 
-/// Emit a desktop notification for a fatal error so the user sees something when hyprsnap
+/// Emit a desktop notification for a fatal error so the user sees something when snypr
 /// was launched from a Hyprland keybind (where stderr is detached).
 pub fn notify_error(cfg: &NotifyConfig, err: &anyhow::Error) {
     if !cfg.error {
@@ -122,7 +122,7 @@ fn display_path(path: &Path, default_dir: &Path) -> String {
 /// `notify-rust` never blocks a tokio runtime worker.
 fn dispatch(builder: Notification) {
     let spawned = std::thread::Builder::new()
-        .name("hyprsnap-notify".to_owned())
+        .name("snypr-notify".to_owned())
         .spawn(move || {
             if let Err(e) = builder.show() {
                 tracing::debug!(error = ?e, "failed to emit desktop notification");
@@ -139,7 +139,7 @@ fn scratch_thumbnail_path() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("hyprsnap").join("last-thumbnail.png")
+    base.join("snypr").join("last-thumbnail.png")
 }
 
 fn write_scratch_thumbnail(png_bytes: &[u8]) -> std::io::Result<PathBuf> {
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn scratch_path_ends_with_expected_filename() {
         let p = scratch_thumbnail_path();
-        assert!(p.ends_with("hyprsnap/last-thumbnail.png"));
+        assert!(p.ends_with("snypr/last-thumbnail.png"));
     }
 
     #[test]

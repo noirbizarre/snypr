@@ -104,11 +104,11 @@ fn build_overlays(app: &gtk4::Application, duration: Duration) -> Result<()> {
             .resizable(false)
             .icon_name(crate::ui::APP_ID)
             .build();
-        window.add_css_class("hyprsnap-countdown");
+        window.add_css_class("snypr-countdown");
 
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some("hyprsnap-countdown"));
+        window.set_namespace(Some("snypr-countdown"));
         window.set_monitor(Some(&monitor));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
@@ -124,7 +124,7 @@ fn build_overlays(app: &gtk4::Application, duration: Duration) -> Result<()> {
         // tiny window report.
         let pt = (mon_h.min(mon_w) / 4).max(96);
         let label = gtk4::Label::new(None);
-        label.add_css_class("hyprsnap-countdown-number");
+        label.add_css_class("snypr-countdown-number");
         label.set_halign(gtk4::Align::Center);
         label.set_valign(gtk4::Align::Center);
         label.set_hexpand(true);
@@ -184,11 +184,11 @@ fn set_label_value(label: &gtk4::Label, secs: u32, pt: i32) {
 fn install_countdown_css(style: &SelectorStyleConfig) {
     let css = format!(
         r"
-window.hyprsnap-countdown,
-window.hyprsnap-countdown decoration {{
+window.snypr-countdown,
+window.snypr-countdown decoration {{
     background: {bg};
 }}
-window.hyprsnap-countdown label.hyprsnap-countdown-number {{
+window.snypr-countdown label.snypr-countdown-number {{
     color: {fg};
     font-weight: bold;
 }}

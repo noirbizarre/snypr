@@ -17,7 +17,7 @@ pub use toolbar::{ModeKind, Toolbar, ToolbarAction, ToolbarSpec};
 use std::sync::OnceLock;
 
 /// Application id used across the GTK windows and the StatusNotifierItem.
-pub const APP_ID: &str = "noirbizar.re.HyprSnap";
+pub const APP_ID: &str = "noirbizar.re.Snypr";
 
 static ICON_RESOURCES: OnceLock<()> = OnceLock::new();
 
@@ -27,11 +27,11 @@ static ICON_RESOURCES: OnceLock<()> = OnceLock::new();
 /// itself happens at most once per process.
 pub(crate) fn install_icon_resources() {
     ICON_RESOURCES.get_or_init(|| {
-        gtk4::gio::resources_register_include!("hyprsnap.gresource")
-            .expect("bundled hyprsnap.gresource should always be registerable");
+        gtk4::gio::resources_register_include!("snypr.gresource")
+            .expect("bundled snypr.gresource should always be registerable");
     });
 
     if let Some(display) = gdk4::Display::default() {
-        gtk4::IconTheme::for_display(&display).add_resource_path("/re/noirbizar/HyprSnap/icons");
+        gtk4::IconTheme::for_display(&display).add_resource_path("/re/noirbizar/Snypr/icons");
     }
 }

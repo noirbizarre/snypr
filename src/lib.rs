@@ -1,4 +1,4 @@
-//! HyprSnap — a GTK-based screenshot and annotation tool for Hyprland.
+//! Snypr — a GTK-based screenshot and annotation tool for Hyprland.
 //!
 //! This crate exposes the non-UI building blocks (capture, annotate model, output sinks, config,
 //! IPC types) so they can be exercised from integration tests without spinning up GTK.

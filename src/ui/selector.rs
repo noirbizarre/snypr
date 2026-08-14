@@ -83,7 +83,7 @@ pub struct SelectorOutcome {
 /// action), call [`pick_region_in_app`] instead so we don't try to spin up a second GTK app.
 ///
 /// `allow_annotate` controls whether the Capture button honors the Shift modifier as a
-/// "route through the annotation editor" shortcut. The standalone `hyprsnap screenshot`
+/// "route through the annotation editor" shortcut. The standalone `snypr screenshot`
 /// flow passes `true` (preserving Shift+click / Shift+Enter → Annotate); callers that
 /// already provide an annotation surface (the draw overlay) pass `false` so Shift behaves
 /// as a no-op modifier.
@@ -190,13 +190,13 @@ pub async fn pick_region_in_app(
 }
 
 /// Post-dismiss grace window. Defaults to 30 ms but can be overridden at runtime via the
-/// `HYPRSNAP_CAPTURE_GRACE_MS` env var. The two-phase `blank_and_dismiss` teardown should
+/// `SNYPR_CAPTURE_GRACE_MS` env var. The two-phase `blank_and_dismiss` teardown should
 /// already make this grace mostly redundant — the surface is fully transparent before
 /// destroy, so Hyprland's `fadeOut` has nothing to leak — but a tiny safety margin doesn't
 /// hurt and gives users on unusually slow compositors a way to dial it up further.
 fn post_dismiss_grace() -> std::time::Duration {
     std::time::Duration::from_millis(
-        std::env::var("HYPRSNAP_CAPTURE_GRACE_MS")
+        std::env::var("SNYPR_CAPTURE_GRACE_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30),
@@ -674,11 +674,11 @@ fn spawn_monitor_overlay(
         .resizable(false)
         .icon_name(crate::ui::APP_ID)
         .build();
-    window.add_css_class("hyprsnap-selector");
+    window.add_css_class("snypr-selector");
 
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
-    window.set_namespace(Some("hyprsnap-selector"));
+    window.set_namespace(Some("snypr-selector"));
     window.set_monitor(Some(monitor));
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         window.set_anchor(edge, true);
@@ -1553,7 +1553,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for SelectorOverlay {
-        const NAME: &'static str = "HyprsnapSelectorOverlay";
+        const NAME: &'static str = "SnyprSelectorOverlay";
         type Type = super::SelectorOverlay;
         type ParentType = gtk4::Widget;
     }

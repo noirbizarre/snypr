@@ -1233,54 +1233,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hyprsnap"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-channel",
- "async-trait",
- "bytemuck",
- "cairo-rs",
- "chrono",
- "clap",
- "directories",
- "fluent",
- "gdk4",
- "gdk4-wayland",
- "glib",
- "glib-build-tools",
- "gsk4",
- "gtk4",
- "gtk4-layer-shell",
- "i18n-embed",
- "i18n-embed-fl",
- "image",
- "ksni",
- "libc",
- "memmap2",
- "notify-rust",
- "once_cell",
- "os_pipe",
- "pango",
- "pretty_assertions",
- "rstest",
- "rust-embed",
- "serde",
- "serde_json",
- "smithay-client-toolkit",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "unic-langid",
- "wayland-client",
- "wayland-protocols-wlr",
- "wl-clipboard-rs",
-]
-
-[[package]]
 name = "i18n-config"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2278,6 +2230,54 @@ dependencies = [
  "wayland-scanner",
  "xkbcommon",
  "xkeysym",
+]
+
+[[package]]
+name = "snypr"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "async-trait",
+ "bytemuck",
+ "cairo-rs",
+ "chrono",
+ "clap",
+ "directories",
+ "fluent",
+ "gdk4",
+ "gdk4-wayland",
+ "glib",
+ "glib-build-tools",
+ "gsk4",
+ "gtk4",
+ "gtk4-layer-shell",
+ "i18n-embed",
+ "i18n-embed-fl",
+ "image",
+ "ksni",
+ "libc",
+ "memmap2",
+ "notify-rust",
+ "once_cell",
+ "os_pipe",
+ "pango",
+ "pretty_assertions",
+ "rstest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "smithay-client-toolkit",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "unic-langid",
+ "wayland-client",
+ "wayland-protocols-wlr",
+ "wl-clipboard-rs",
 ]
 
 [[package]]

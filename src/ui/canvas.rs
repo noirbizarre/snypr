@@ -1212,7 +1212,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for AnnotationCanvas {
-        const NAME: &'static str = "HyprSnapAnnotationCanvas";
+        const NAME: &'static str = "SnyprAnnotationCanvas";
         type Type = super::AnnotationCanvas;
         type ParentType = gtk4::Widget;
     }

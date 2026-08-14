@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/logo-text.png" alt="HyprSnap" />
+  <img src="docs/logo-text.png" alt="Snypr" />
 </p>
 
 A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https://hyprland.org/).
 
-HyprSnap pulls together what currently requires three separate tools on a Wayland desktop:
+Snypr pulls together what currently requires three separate tools on a Wayland desktop:
 
 - **Capture** — like [`grim`](https://sr.ht/~emersion/grim/) / [HyprCapture](https://github.com/gfhdhytghd/HyprCapture), but native and integrated.
 - **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, ellipse, highlight, blur, text, freehand, numbered marker, redact, crop. A built-in Select mode (active when no tool is) moves, resizes, and re-edits shapes you've already drawn.
@@ -64,7 +64,7 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
     ```sh
     sudo apt install libgtk-4-1 libgtk4-layer-shell0 libwayland-client0
     ```
-- Optional, only when running `hyprsnap daemon --systray` (the `tray`
+- Optional, only when running `snypr daemon --systray` (the `tray`
   feature): a StatusNotifierItem host such as `waybar` (with the tray
   module), `swaync`, or `ironbar`.
 - Optional, only when the `notify` feature surfaces errors as desktop
@@ -85,10 +85,10 @@ Nix, …) once published — that's the supported path. In the meantime you can
 `cargo install --path .` (or `mise run setup`) to drop the binary in
 `~/.cargo/bin`; the launcher integration below assumes a proper package.
 
-Each [release](https://github.com/noirbizarre/hyprsnap/releases) publishes a
-source tarball (`hyprsnap-<version>.tar.gz`) and a `SHA256SUMS` file — that is
+Each [release](https://github.com/noirbizarre/snypr/releases) publishes a
+source tarball (`snypr-<version>.tar.gz`) and a `SHA256SUMS` file — that is
 what packagers should consume. There are deliberately no prebuilt binaries:
-hyprsnap links GTK4 and gtk4-layer-shell dynamically, so a single binary would
+snypr links GTK4 and gtk4-layer-shell dynamically, so a single binary would
 only run on distributions matching the build machine.
 
 For packagers, the source tree ships these artifacts ready to install under
@@ -96,11 +96,11 @@ For packagers, the source tree ships these artifacts ready to install under
 
 | Path                                                                | Provenance                                       |
 | ------------------------------------------------------------------- | ------------------------------------------------ |
-| `$PREFIX/bin/hyprsnap`                                              | `cargo build --release` → `target/release/hyprsnap` |
-| `$PREFIX/share/icons/hicolor/<size>/apps/noirbizar.re.HyprSnap.png` | `data/icons/hicolor/<size>/apps/…` — sizes 16, 32, 64, 128, 256, 512 |
-| `$PREFIX/share/applications/noirbizar.re.HyprSnap.desktop`          | Standalone launcher with Screenshot/Draw actions |
-| `$PREFIX/share/applications/noirbizar.re.HyprSnap.Daemon.desktop`   | Visible launcher for `hyprsnap daemon --systray` |
-| `$PREFIX/share/man/man1/hyprsnap.1`                                 | `docs/man/hyprsnap.1`                            |
+| `$PREFIX/bin/snypr`                                              | `cargo build --release` → `target/release/snypr` |
+| `$PREFIX/share/icons/hicolor/<size>/apps/noirbizar.re.Snypr.png` | `data/icons/hicolor/<size>/apps/…` — sizes 16, 32, 64, 128, 256, 512 |
+| `$PREFIX/share/applications/noirbizar.re.Snypr.desktop`          | Standalone launcher with Screenshot/Draw actions |
+| `$PREFIX/share/applications/noirbizar.re.Snypr.Daemon.desktop`   | Visible launcher for `snypr daemon --systray` |
+| `$PREFIX/share/man/man1/snypr.1`                                 | `docs/man/snypr.1`                            |
 
 After installation, package post-install hooks should run
 `update-desktop-database` against `$PREFIX/share/applications` and
@@ -109,7 +109,7 @@ After installation, package post-install hooks should run
 The standalone `.desktop` exposes three launcher actions (visible via
 right-click in most launchers): **Take Screenshot (region)**, **Take
 Full-Screen Screenshot**, and **Draw on Screen**. The daemon entry
-(`noirbizar.re.HyprSnap.Daemon.desktop`) carries
+(`noirbizar.re.Snypr.Daemon.desktop`) carries
 `X-GNOME-Autostart-Enabled=true`, so users who prefer XDG autostart over
 the Hyprland snippet below can symlink it into `~/.config/autostart/`.
 
@@ -117,40 +117,40 @@ the Hyprland snippet below can symlink it into `~/.config/autostart/`.
 
 ```sh
 # Full-screen capture, stitched across all outputs, saved as PNG.
-hyprsnap screenshot --full --to file=/tmp/shot.png
+snypr screenshot --full --to file=/tmp/shot.png
 
-# Default sinks come from ~/.config/hyprsnap/config.toml; without --to,
+# Default sinks come from ~/.config/snypr/config.toml; without --to,
 # the screenshot is written to $XDG_PICTURES_DIR/Screenshots/.
-hyprsnap screenshot --full
+snypr screenshot --full
 
 # One file per output (uses {output} in the filename template).
-hyprsnap screenshot --full --per-output
+snypr screenshot --full --per-output
 
 # Specific output by name, copied to the clipboard.
-hyprsnap screenshot --output DP-1 --to clipboard
+snypr screenshot --output DP-1 --to clipboard
 
 # Send the screenshot to both the regular clipboard and the X11-style primary
 # selection (middle-click paste). Per-sink form: --to clipboard=primary.
-hyprsnap screenshot --full --to clipboard --clipboard-type both
+snypr screenshot --full --to clipboard --clipboard-type both
 
 # Focused window, queried over Hyprland IPC.
-hyprsnap screenshot --focused
+snypr screenshot --focused
 
 # Explicit region (logical pixels): X,Y,WxH.
-hyprsnap screenshot --region 100,200,800x600 --to file
+snypr screenshot --region 100,200,800x600 --to file
 
 # Interactive region selector → in-place annotation overlay → sinks.
-hyprsnap screenshot --edit --to clipboard --to file
+snypr screenshot --edit --to clipboard --to file
 
 # Live draw-on-screen overlay (see the keybind table below for the full tool list,
 # Ctrl+Z undo, P passthrough, Esc quit).
-hyprsnap draw --to file --to clipboard --cursor
+snypr draw --to file --to clipboard --cursor
 
 # Run the daemon (IPC server; add `--systray` for a StatusNotifierItem icon).
-hyprsnap daemon
+snypr daemon
 
 # Take a screenshot via the running daemon instead of spawning a fresh process.
-hyprsnap screenshot --full --via-daemon
+snypr screenshot --full --via-daemon
 ```
 
 ### Interactive selector
@@ -238,34 +238,34 @@ Drop the following into your Hyprland Lua config (e.g.
 `~/.config/hypr/hyprland.lua`) — adjust paths/mods to taste:
 
 ```lua
--- Default screenshot (uses the configured defaults from ~/.config/hyprsnap/config.toml).
-hl.bind("SUPER + Print", hl.dsp.exec_cmd("hyprsnap screenshot"))
+-- Default screenshot (uses the configured defaults from ~/.config/snypr/config.toml).
+hl.bind("SUPER + Print", hl.dsp.exec_cmd("snypr screenshot"))
 
 -- Full desktop, stitched across every output, written to the configured directory.
 hl.bind("SUPER + SHIFT + Print",
-    hl.dsp.exec_cmd("hyprsnap screenshot --full --to file"))
+    hl.dsp.exec_cmd("snypr screenshot --full --to file"))
 
 -- One PNG per monitor (uses {output} in the filename template).
 hl.bind("SUPER + SHIFT + ALT + Print",
-    hl.dsp.exec_cmd("hyprsnap screenshot --full --per-output --to file"))
+    hl.dsp.exec_cmd("snypr screenshot --full --per-output --to file"))
 
 -- Currently focused window (queried over Hyprland IPC), copied to the clipboard.
 hl.bind("SUPER + CTRL + Print",
-    hl.dsp.exec_cmd("hyprsnap screenshot --focused --to clipboard"))
+    hl.dsp.exec_cmd("snypr screenshot --focused --to clipboard"))
 
 -- Live draw-on-screen overlay — ideal for presentations / Google Meet.
 -- See the README keybind table for the full tool/action list; Esc quits.
-hl.bind("SUPER + ALT + Print", hl.dsp.exec_cmd("hyprsnap draw"))
+hl.bind("SUPER + ALT + Print", hl.dsp.exec_cmd("snypr draw"))
 
 -- Toggle pointer passthrough on a running draw overlay. Useful because
 -- passthrough mode detaches the surface from the keyboard, so the overlay's
 -- own `P` shortcut can't turn passthrough back off — a global keybind can.
 hl.bind("SUPER + ALT + P",
-    hl.dsp.exec_cmd("hyprsnap draw --via-daemon --toggle-passthrough"))
+    hl.dsp.exec_cmd("snypr draw --via-daemon --toggle-passthrough"))
 
 -- Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
 hl.on("hyprland.start", function()
-    hl.exec_cmd("hyprsnap daemon --systray")
+    hl.exec_cmd("snypr daemon --systray")
 end)
 ```
 
@@ -282,24 +282,24 @@ end)
    a `bind`, Hyprland silently drops it.
 2. Confirm the binary resolves on Hyprland's `PATH`:
    ```sh
-   hyprctl dispatch exec "which hyprsnap"
+   hyprctl dispatch exec "which snypr"
    tail -n5 ~/.local/share/hyprland/hyprland.log
    ```
-3. Check Hyprland's log for stderr from the spawned hyprsnap process — that's
+3. Check Hyprland's log for stderr from the spawned snypr process — that's
    where errors land when launched from a keybind. The optional `notify`
    feature (enabled by default) also surfaces fatal errors as a desktop
    notification.
-4. Add `-vv` to your bind (e.g. `hyprsnap -vv screenshot`) to upgrade the
-   `hyprsnap` log level to trace without needing `RUST_LOG`.
+4. Add `-vv` to your bind (e.g. `snypr -vv screenshot`) to upgrade the
+   `snypr` log level to trace without needing `RUST_LOG`.
 
 ## Configuration
 
-`~/.config/hyprsnap/config.toml` (every field is optional):
+`~/.config/snypr/config.toml` (every field is optional):
 
 ```toml
 [output]
 directory          = "/home/me/Pictures/Screenshots"
-filename_template  = "hyprsnap_{date}_{time}_{output}.png"
+filename_template  = "snypr_{date}_{time}_{output}.png"
 default_sinks      = ["file", "clipboard"]
 use_utc            = false
 # PNG compression preset: "fast" (largest, fastest), "balanced" (default), or "best"

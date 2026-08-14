@@ -54,7 +54,7 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
 
-      # HyprSnap links GTK4 and gtk4-layer-shell dynamically, so a prebuilt
+      # Snypr links GTK4 and gtk4-layer-shell dynamically, so a prebuilt
       # binary only runs on distributions matching the runner — which is a
       # promise we cannot keep. Ship the source instead: that is what
       # `cargo install --git`, the AUR, and distribution packagers consume.
@@ -65,8 +65,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           git archive --format=tar.gz \
-            --prefix="hyprsnap-${TAG}/" \
-            -o "dist/hyprsnap-${TAG}.tar.gz" "$TAG"
+            --prefix="snypr-${TAG}/" \
+            -o "dist/snypr-${TAG}.tar.gz" "$TAG"
 
       - name: Checksums
         working-directory: dist

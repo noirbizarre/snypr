@@ -1,6 +1,6 @@
 //! Unified toolbar widget shared by the selector, editor, and draw overlay.
 //!
-//! A single `gtk4::Box` styled with `.hyprsnap-toolbar` hosts whichever combination of buttons
+//! A single `gtk4::Box` styled with `.snypr-toolbar` hosts whichever combination of buttons
 //! the caller asks for via [`ToolbarSpec`]. Actions are emitted as [`ToolbarAction`] values
 //! through a callback registered with [`Toolbar::connect`]. Keyboard shortcuts mirror the
 //! on-screen buttons so external key handlers don't need their own dispatch tables — see
@@ -539,7 +539,7 @@ pub struct Toolbar {
 impl Toolbar {
     pub fn new(spec: ToolbarSpec) -> Self {
         let widget = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        widget.add_css_class("hyprsnap-toolbar");
+        widget.add_css_class("snypr-toolbar");
 
         let callback: Callback = Rc::new(RefCell::new(None));
         let mut tools = Vec::new();
@@ -1847,7 +1847,7 @@ struct ToolbarSlot {
 /// Tracks which per-monitor window currently hosts the **single** shared [`Toolbar`] and moves
 /// it between monitors as Hyprland focus changes.
 ///
-/// HyprSnap keeps one fullscreen layer-shell window per monitor (for dimming / canvas / capture),
+/// Snypr keeps one fullscreen layer-shell window per monitor (for dimming / canvas / capture),
 /// but only one toolbar — on the focused monitor. Reparenting a GTK widget means
 /// `old_overlay.remove_overlay(w)` then `new_overlay.add_overlay(w)`; this type owns that move and
 /// the slot registry.

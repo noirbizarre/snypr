@@ -1,11 +1,11 @@
-.TH HYPRSNAP 1 "2026" "hyprsnap" "User Commands"
+.TH SNYPR 1 "2026" "snypr" "User Commands"
 .SH NAME
-hyprsnap \- screenshot, annotation, and live-drawing tool for Hyprland
+snypr \- screenshot, annotation, and live-drawing tool for Hyprland
 .SH SYNOPSIS
-.B hyprsnap
+.B snypr
 [\fIGLOBAL OPTIONS\fR] \fICOMMAND\fR [\fICOMMAND OPTIONS\fR]
 .SH DESCRIPTION
-.B hyprsnap
+.B snypr
 is a GTK4-based screenshot, annotation, and live-drawing tool targeting
 .BR Hyprland (1)
 and other wlroots-based compositors. It captures pixels via the
@@ -14,7 +14,7 @@ and other wlroots-based compositors. It captures pixels via the
 .SH GLOBAL OPTIONS
 .TP
 .BR \-\-config " " \fIPATH\fR
-Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR.
+Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/snypr/config.toml\fR.
 .TP
 .BR \-v ", " \-\-verbose
 Increase log verbosity (repeatable).
@@ -58,7 +58,7 @@ Add an output sink. May be passed multiple times. Recognised forms:
 \fBclipboard=\fIKIND\fR where \fIKIND\fR is \fBregular\fR, \fBprimary\fR, or \fBboth\fR
 (per-sink override of \fB\-\-clipboard\-type\fR).
 When running outside the daemon, the clipboard sink forks a short detached child
-process that keeps serving the selection after \fBhyprsnap\fR exits so paste
+process that keeps serving the selection after \fBsnypr\fR exits so paste
 keeps working until another client overtakes the selection.
 .TP
 .BR \-\-clipboard\-type " " \fIKIND\fR
@@ -75,7 +75,7 @@ flag. The UI countdown only operates on integer seconds, so the CLI, config, and
 representations all match.
 .TP
 .BR \-\-via-daemon
-Forward the request to a running \fBhyprsnap daemon\fR over its Unix socket instead of
+Forward the request to a running \fBsnypr daemon\fR over its Unix socket instead of
 executing locally.
 .SS draw
 Launch the live draw-on-screen overlay. Tool keys: \fBR\fR rectangle, \fBO\fR ellipse,
@@ -95,7 +95,7 @@ daemon-managed overlay instead of spawning a new process, and \fB\-\-toggle-pass
 (requires \fB\-\-via-daemon\fR) to flip pointer passthrough on the running overlay from a
 global keybind.
 .SS daemon
-Run the IPC server on \fI$XDG_RUNTIME_DIR/hyprsnap.sock\fR. Pass \fB\-\-systray\fR to
+Run the IPC server on \fI$XDG_RUNTIME_DIR/snypr.sock\fR. Pass \fB\-\-systray\fR to
 also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
 .SS doctor
 Print a copy-pasteable Markdown diagnostic report covering version, runtime
@@ -141,8 +141,8 @@ text being edited). The pickers are disabled for tools with hardcoded appearance
 (\fBBlur\fR, \fBCrop\fR, \fBRedact\fR) and when nothing relevant is selected. The same
 pickers are available in the live \fBdraw\fR overlay.
 .SH CONFIGURATION
-.B hyprsnap
-reads \fI$XDG_CONFIG_HOME/hyprsnap/config.toml\fR. Every field is optional; see the
+.B snypr
+reads \fI$XDG_CONFIG_HOME/snypr/config.toml\fR. Every field is optional; see the
 sample in the project README. Filename template tokens: \fB{ts}\fR, \fB{date}\fR,
 \fB{time}\fR, \fB{output}\fR, \fB{selection}\fR. The \fB[ui.selector]\fR table
 overrides the selector chrome colors (\fIoutline\fR, \fIoutline_hover\fR,
@@ -157,22 +157,22 @@ overrides the selector chrome colors (\fIoutline\fR, \fIoutline_hover\fR,
 toolbar color picker still lets the user change colors at runtime.
 .SH FILES
 .TP
-.I $XDG_CONFIG_HOME/hyprsnap/config.toml
+.I $XDG_CONFIG_HOME/snypr/config.toml
 User configuration.
 .TP
 .I $XDG_PICTURES_DIR/Screenshots/
 Default save directory.
 .TP
-.I $XDG_RUNTIME_DIR/hyprsnap.sock
+.I $XDG_RUNTIME_DIR/snypr.sock
 Daemon control socket.
 .TP
-.I $PREFIX/share/applications/noirbizar.re.HyprSnap.desktop
+.I $PREFIX/share/applications/noirbizar.re.Snypr.desktop
 Standalone launcher (Screenshot/Draw actions).
 .TP
-.I $PREFIX/share/applications/noirbizar.re.HyprSnap.Daemon.desktop
-Launcher for the daemon + systray (\fBhyprsnap daemon \-\-systray\fR).
+.I $PREFIX/share/applications/noirbizar.re.Snypr.Daemon.desktop
+Launcher for the daemon + systray (\fBsnypr daemon \-\-systray\fR).
 .TP
-.I $PREFIX/share/icons/hicolor/<size>/apps/noirbizar.re.HyprSnap.png
+.I $PREFIX/share/icons/hicolor/<size>/apps/noirbizar.re.Snypr.png
 Application icon, resolved through the hicolor theme. Shipped sizes:
 16, 32, 64, 128, 256, 512.
 .SH SEE ALSO
@@ -180,4 +180,4 @@ Application icon, resolved through the hicolor theme. Shipped sizes:
 .BR slurp (1),
 .BR Hyprland (1)
 .SH AUTHORS
-HyprSnap contributors. Source: https://github.com/noirbizarre/hyprsnap
+Snypr contributors. Source: https://github.com/noirbizarre/snypr

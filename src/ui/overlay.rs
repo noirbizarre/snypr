@@ -49,7 +49,7 @@ use crate::ui::toolbar::{
 };
 /// How the overlay should behave on this invocation.
 pub enum OverlayMode {
-    /// Live draw on top of the desktop (today's `hyprsnap draw` flow).
+    /// Live draw on top of the desktop (today's `snypr draw` flow).
     Draw {
         /// Open the overlay with pointer passthrough enabled (clicks fall through).
         passthrough: bool,
@@ -528,11 +528,11 @@ fn spawn_monitor_overlay(
         .resizable(false)
         .icon_name(crate::ui::APP_ID)
         .build();
-    window.add_css_class("hyprsnap-overlay");
+    window.add_css_class("snypr-overlay");
 
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
-    window.set_namespace(Some("hyprsnap-overlay"));
+    window.set_namespace(Some("snypr-overlay"));
     window.set_monitor(Some(monitor));
     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
         window.set_anchor(edge, true);
@@ -1491,7 +1491,7 @@ mod imp_veil {
 
     #[glib::object_subclass]
     impl ObjectSubclass for EditVeil {
-        const NAME: &'static str = "HyprsnapEditVeil";
+        const NAME: &'static str = "SnyprEditVeil";
         type Type = super::EditVeil;
         type ParentType = gtk4::Widget;
     }

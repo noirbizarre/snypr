@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use hyprsnap::cli::{Cli, dispatch};
+use snypr::cli::{Cli, dispatch};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -17,11 +17,11 @@ fn main() -> ExitCode {
     // Precedence: `--lang` flag > `[language]` in config > env > English fallback.
     // Config load is best-effort: failures here just fall through to env detection.
     let lang_override = cli.lang.clone().or_else(|| {
-        hyprsnap::config::Config::load_default()
+        snypr::config::Config::load_default()
             .ok()
             .and_then(|c| c.language)
     });
-    hyprsnap::i18n::init(lang_override.as_deref());
+    snypr::i18n::init(lang_override.as_deref());
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -41,17 +41,17 @@ fn main() -> ExitCode {
                 tracing::info!("cancelled by user");
                 ExitCode::SUCCESS
             } else {
-                tracing::error!(error = ?err, "hyprsnap failed");
+                tracing::error!(error = ?err, "snypr failed");
                 eprintln!("error: {err:#}");
                 #[cfg(feature = "notify")]
                 {
                     // Load the config best-effort so users can disable error notifications
                     // via `[notify] error = false`. If the config can't be loaded we fall
                     // back to defaults (notifications enabled) — matches prior behaviour.
-                    let cfg = hyprsnap::config::Config::load_default()
+                    let cfg = snypr::config::Config::load_default()
                         .unwrap_or_default()
                         .notify;
-                    hyprsnap::notify::notify_error(&cfg, &err);
+                    snypr::notify::notify_error(&cfg, &err);
                 }
                 ExitCode::FAILURE
             }
@@ -66,7 +66,7 @@ fn is_user_cancelled(err: &anyhow::Error) -> bool {
     #[cfg(feature = "ui")]
     {
         err.chain()
-            .any(|e| e.is::<hyprsnap::ui::selector::Cancelled>())
+            .any(|e| e.is::<snypr::ui::selector::Cancelled>())
     }
     #[cfg(not(feature = "ui"))]
     {
@@ -79,7 +79,7 @@ fn is_user_cancelled(err: &anyhow::Error) -> bool {
 ///
 /// Precedence (highest first):
 /// 1. `RUST_LOG` env var — full directive syntax.
-/// 2. `-v` / `-vv` CLI count — `1 → debug`, `≥2 → trace`. Applies to the `hyprsnap` crate only
+/// 2. `-v` / `-vv` CLI count — `1 → debug`, `≥2 → trace`. Applies to the `snypr` crate only
 ///    so we don't drown in GTK/wayland chatter; bump RUST_LOG for that.
 /// 3. Default `info`.
 ///
@@ -91,8 +91,8 @@ fn init_tracing(verbose: u8) -> anyhow::Result<()> {
     } else {
         let level = match verbose {
             0 => "info",
-            1 => "hyprsnap=debug,info",
-            _ => "hyprsnap=trace,debug",
+            1 => "snypr=debug,info",
+            _ => "snypr=trace,debug",
         };
         EnvFilter::new(level)
     };

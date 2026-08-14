@@ -1,13 +1,13 @@
 [package]
-name = "hyprsnap"
+name = "snypr"
 edition = "2024"
 version = "0.0.1"
 description = "A GTK4-based screenshot, annotation, and live-drawing tool for Hyprland"
 readme = "README.md"
-repository = "https://github.com/noirbizarre/hyprsnap"
+repository = "https://github.com/noirbizarre/snypr"
 license = "MIT"
 
-# HyprSnap is a Wayland desktop application, distributed as source: it links
+# Snypr is a Wayland desktop application, distributed as source: it links
 # GTK4 and gtk4-layer-shell dynamically and installs desktop entries, icons and
 # a manpage that `cargo install` would not place. Publishing to crates.io would
 # advertise an install path that produces a half-installed application. Setting
@@ -16,7 +16,7 @@ license = "MIT"
 publish = false
 
 [[bin]]
-name = "hyprsnap"
+name = "snypr"
 path = "src/main.rs"
 
 [features]
@@ -32,7 +32,7 @@ ui = [
   "dep:pango",
 ]
 tray = ["ui", "dep:ksni"]
-# Emit a desktop notification when hyprsnap exits with an error. Useful when launched from a
+# Emit a desktop notification when snypr exits with an error. Useful when launched from a
 # Hyprland keybind where stderr is detached.
 notify = ["dep:notify-rust"]
 # Reserved for tests that require a live Wayland compositor.
