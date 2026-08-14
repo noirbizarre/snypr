@@ -90,13 +90,18 @@ jobs:
 
       # Proves the PKGBUILD actually builds before it reaches users. Skipped for
       # snypr-git, whose source is the branch tip rather than the release.
+      #
+      # `--nocheck` because check() is `cargo test --release --locked`, which
+      # recompiles the whole harness in release mode to re-run the suite that
+      # 👮 CI already ran on this very commit — 3m30 of pure duplication. The
+      # PKGBUILD keeps its check(), so users and packagers still run it.
       - name: Build the package
         if: matrix.pkg != 'snypr-git'
         working-directory: build
         run: |
           set -euo pipefail
           chown -R builder .
-          sudo -u builder makepkg --syncdeps --noconfirm --clean
+          sudo -u builder makepkg --syncdeps --noconfirm --clean --nocheck
 
       - name: Generate .SRCINFO
         working-directory: build
@@ -114,11 +119,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p ~/.ssh
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
-          export GIT_SSH_COMMAND='ssh -i ~/.ssh/aur -o IdentitiesOnly=yes'
+          # Absolute paths on purpose. The container sets HOME=/github/home, but
+          # OpenSSH expands `~` from the passwd database (/root for this step),
+          # not from $HOME — so anything written to `~/.ssh` here is invisible to
+          # ssh, which fails with "Host key verification failed".
+          ssh_dir="$(mktemp -d)"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$ssh_dir/key"
+          chmod 600 "$ssh_dir/key"
+          ssh-keyscan -H aur.archlinux.org > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
 
           git clone "ssh://aur@aur.archlinux.org/${PKG}.git" aur
           cp build/PKGBUILD build/.SRCINFO aur/
@@ -127,12 +136,15 @@ jobs:
           git config user.name 'snypr release bot'
           git config user.email 'noirbizarre@gmail.com'
 
-          # A re-run on an unchanged package must not create an empty commit.
-          if git diff --quiet; then
+          git add PKGBUILD .SRCINFO
+
+          # Compare the index, not the worktree: `git diff` alone ignores
+          # untracked files, so a re-run on an unchanged package would be
+          # indistinguishable from a pkgbase whose files are not tracked yet.
+          if git diff --cached --quiet; then
             echo "::notice::${PKG} is already up to date on the AUR"
             exit 0
           fi
 
-          git add PKGBUILD .SRCINFO
           git commit -m "Update to ${TAG}"
           git push origin master
