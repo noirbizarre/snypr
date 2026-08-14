@@ -95,3 +95,40 @@ run = "git cliff --bumped-version"
 [tasks.dogfood]
 description = "Validate this repository's own gh-ship release setup"
 run = "gh ship validate"
+
+# --- Artwork ----------------------------------------------------------------
+#
+# Neither task joins `default`: they rewrite committed binaries, so a routine
+# run would dirty the working tree every time. Run them when the artwork
+# changes — `social` too after editing logo.svg, since the preview embeds it.
+#
+# resvg is declared per-task rather than in `[tools]`: CI runs `mise install`,
+# which installs `[tools]` only, and resvg has no prebuilt binstall artifact, so
+# a global entry would make every CI job compile it from source. It is pure
+# Rust, needs no system libraries, and renders identically on every platform.
+
+[tasks.icons]
+description = "Rasterize docs/images/icon.svg into the hicolor icon theme"
+tools = { "cargo:resvg" = "latest" }
+# These are the exact paths the .desktop files, the packager table in README.md
+# and all three PKGBUILDs install — and src/ui/tray.rs `include_bytes!`s the
+# 64x64 one, so the tray icon follows along.
+run = """
+for size in 16 32 64 128 256 512; do
+  out="data/icons/hicolor/${size}x${size}/apps/noirbizar.re.Snypr.png"
+  mkdir -p "$(dirname "$out")"
+  resvg --width "$size" --height "$size" docs/images/icon.svg "$out"
+  echo "$out"
+done
+"""
+
+[tasks.social]
+description = "Render the GitHub social preview image"
+tools = { "cargo:resvg" = "latest" }
+# GitHub has no API for the social preview, so this is generated here and
+# uploaded by hand, once, under: Settings -> General -> Social preview.
+run = """
+resvg docs/images/social-preview.svg docs/images/social-preview.png
+echo "docs/images/social-preview.png — upload under Settings > General > Social preview"
+"""
+
