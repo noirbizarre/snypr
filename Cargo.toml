@@ -7,6 +7,14 @@ readme = "README.md"
 repository = "https://github.com/noirbizarre/hyprsnap"
 license = "MIT"
 
+# HyprSnap is a Wayland desktop application, distributed as source: it links
+# GTK4 and gtk4-layer-shell dynamically and installs desktop entries, icons and
+# a manpage that `cargo install` would not place. Publishing to crates.io would
+# advertise an install path that produces a half-installed application. Setting
+# this makes `cargo publish` refuse outright, rather than leaving the decision
+# to depend on a registry token happening to be absent.
+publish = false
+
 [[bin]]
 name = "hyprsnap"
 path = "src/main.rs"

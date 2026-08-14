@@ -1,0 +1,84 @@
+name: 📦 Publish Release
+
+# Dispatched by `gh ship release` on the tag it just created, which is also how
+# gh-ship correlates the run it started.
+# See https://noirbizarre.github.io/gh-ship/workflows/
+run-name: 📦 Publish Release ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag being released
+        required: true
+        type: string
+
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: 🚀 Publish
+    runs-on: ubuntu-latest
+
+    # This is the deployment. Declaring a `url:` registers it in the
+    # repository's deployment list and links straight to what shipped.
+    # The environment is `release` because that is where APP_CLIENT_ID and
+    # APP_PRIVATE_KEY live.
+    environment:
+      name: release
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ inputs.tag }}
+
+    steps:
+      # An installation token, revoked when this job ends. It cannot live in
+      # the job's `env:` — a step output is not resolvable there — so the one
+      # `gh` step below sets it itself.
+      # See https://noirbizarre.github.io/gh-ship/workflows/#using-a-github-app
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          # Build exactly what is being released, not a branch tip that
+          # may have moved since. `git archive` needs the tag object, which a
+          # shallow clone does not carry.
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      # HyprSnap links GTK4 and gtk4-layer-shell dynamically, so a prebuilt
+      # binary only runs on distributions matching the runner — which is a
+      # promise we cannot keep. Ship the source instead: that is what
+      # `cargo install --git`, the AUR, and distribution packagers consume.
+      - name: Build the source tarball
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          git archive --format=tar.gz \
+            --prefix="hyprsnap-${TAG}/" \
+            -o "dist/hyprsnap-${TAG}.tar.gz" "$TAG"
+
+      - name: Checksums
+        working-directory: dist
+        # `--` so an asset whose name begins with a dash is treated as a
+        # file rather than an option (shellcheck SC2035).
+        run: sha256sum -- * > SHA256SUMS
+
+      # The release already exists as a DRAFT: gh-ship created it before
+      # dispatching this workflow, and will undraft it once we succeed.
+      # That ordering is what lets assets land before anyone is notified.
+      - name: Upload assets to the draft release
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh release upload "$TAG" dist/* --clobber

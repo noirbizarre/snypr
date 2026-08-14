@@ -1,12 +1,26 @@
+[settings]
+# Resolve tools through mise.lock and keep it updated. Without this, the
+# lockfile is ignored and `latest` really means latest — including for
+# git-cliff, whose version decides how the changelog reads.
+lockfile = true
+
 [tools]
 prek = "latest"
 cargo-binstall = "latest"
 "cargo:cargo-nextest" = "latest"
 "cargo:cargo-llvm-cov" = "latest"
+# Release tooling: git-cliff derives the next version and writes CHANGELOG.md,
+# and its commit preprocessor shells out to typos.
+git-cliff = "latest"
+typos = "latest"
+actionlint = "latest"
+# actionlint silently skips its shellcheck integration when the binary is
+# absent, so without this a local run is NOT the CI run. Runners ship it.
+shellcheck = "latest"
 
 [tasks.default]
 description = "Run fmt, lint, build and test"
-depends = ["fmt", "lint", "build", "test"]
+depends = ["fmt", "lint", "lint:actions", "build", "test"]
 
 [tasks.test]
 description = "Run tests with selectors"
@@ -37,3 +51,45 @@ run = "cargo fmt --all"
 [tasks.lint]
 description = "Lint the code"
 run = "cargo clippy --all-targets --all-features -- -Dclippy::all"
+
+[tasks."lint:actions"]
+description = "Lint the GitHub Actions workflows"
+# Two suppressions, both for tools lagging behind documented behaviour:
+#
+# 1. actionlint does not yet know `environment.deployment`, a documented,
+#    supported key:
+#    https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments
+# 2. actionlint's bundled metadata for actions/create-github-app-token@v3 is
+#    stale: upstream `client-id` is the current input and `app-id` is
+#    deprecated, which is the opposite of what actionlint asserts.
+#
+# Every other unexpected key or unknown input is still caught. Drop each
+# -ignore once actionlint refreshes.
+run = """
+actionlint \
+  -ignore 'unexpected key "deployment" for "environment" section' \
+  -ignore 'missing input "app-id" which is required by action "actions/create-github-app-token@v3"' \
+  -ignore 'input "client-id" is not defined in action "actions/create-github-app-token@v3"' \
+  .github/workflows/*.yml
+"""
+
+[tasks.spell]
+description = "Check spelling"
+run = "typos"
+
+# --- Release ----------------------------------------------------------------
+# Releases are orchestrated by gh-ship: push to main opens the Release PR,
+# merging it tags and publishes. These tasks are for previewing that locally;
+# maintainers never tag by hand.
+
+[tasks.changelog]
+description = "Preview the changelog for the next release"
+run = "git cliff --bump -o CHANGELOG.md"
+
+[tasks.version]
+description = "Show the version the next release would carry"
+run = "git cliff --bumped-version"
+
+[tasks.dogfood]
+description = "Validate this repository's own gh-ship release setup"
+run = "gh ship validate"

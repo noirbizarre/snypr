@@ -11,6 +11,12 @@ Build/Test:
 - Single test: `cargo nextest run --test <file> -- <name::path>` or fallback `cargo test <name>`
 - Coverage: `cargo llvm-cov nextest` (or `mise run cover`)
 
+Releases: orchestrated by gh-ship; `cliff.toml` and `.github/ship.yml` are the
+contract, `git-cliff` derives both the version and `CHANGELOG.md` from the
+commit messages. Never bump the version or tag by hand — the
+`prepare-release` workflow owns `[package] version` in `Cargo.toml`. Check the
+setup with `mise run dogfood` (`gh ship validate`); see CONTRIBUTING.md.
+
 Code Style:
 - Edition 2024; use `anyhow::Result` for fallible public fns; prefer `?` and propagate errors; avoid `.unwrap()` outside tests unless guaranteed.
 - Imports: group std / external / crate; avoid wildcard; keep ordering lexical; re-export only intentional items (see `lib.rs`).

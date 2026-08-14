@@ -58,3 +58,19 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -Dclippy::all
+
+  # gh-ship releases HyprSnap. Its configuration and workflows must satisfy the
+  # contract gh-ship enforces, or the release breaks at the worst moment.
+  ship:
+    name: 🚢 Ship setup
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gh-ship
+        run: gh extension install noirbizarre/gh-ship
+
+      - name: Validate the release setup
+        run: gh ship validate

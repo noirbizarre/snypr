@@ -85,6 +85,12 @@ Nix, …) once published — that's the supported path. In the meantime you can
 `cargo install --path .` (or `mise run setup`) to drop the binary in
 `~/.cargo/bin`; the launcher integration below assumes a proper package.
 
+Each [release](https://github.com/noirbizarre/hyprsnap/releases) publishes a
+source tarball (`hyprsnap-<version>.tar.gz`) and a `SHA256SUMS` file — that is
+what packagers should consume. There are deliberately no prebuilt binaries:
+hyprsnap links GTK4 and gtk4-layer-shell dynamically, so a single binary would
+only run on distributions matching the build machine.
+
 For packagers, the source tree ships these artifacts ready to install under
 `$PREFIX` (typically `/usr`):
 

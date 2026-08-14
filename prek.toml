@@ -29,6 +29,17 @@ hooks = [
 [[repos]]
 repo = "local"
 
+# A malformed release workflow is only discovered mid-release, when it is most
+# expensive. The linting itself lives in `mise run lint:actions`, together with
+# the suppressions it needs, so the hook and the task cannot drift.
+[[repos.hooks]]
+id = "actionlint"
+name = "actionlint"
+language = "system"
+entry = "mise run lint:actions"
+files = "^\\.github/workflows/.*\\.yml$"
+pass_filenames = false
+
 [[repos.hooks]]
 id = "cargo-fmt"
 name = "cargo fmt"

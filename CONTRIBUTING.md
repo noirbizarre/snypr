@@ -1,5 +1,17 @@
 # Contributing to hyprsnap
 
+## Commits
+
+[Conventional Commits](https://www.conventionalcommits.org/), enforced by
+commitizen through the prek hooks. The changelog and the next version number
+are derived from them, so the type and scope matter:
+
+```
+feat(selector): pre-select the focused monitor
+fix(overlay): keep the veil visible while annotating
+docs(man): document --clipboard-type
+```
+
 ## Adding a bundled icon
 
 Hyprsnap ships a small set of [icon-development-kit](https://gitlab.gnome.org/Teams/Design/icon-development-kit)
@@ -25,3 +37,40 @@ user's icon theme. To add one more:
 
 The vendored icons are CC0; attribution lives in `data/icons/LICENSE.md` and
 the README `Acknowledgements` section.
+
+## Releases
+
+Orchestrated by [gh-ship](https://github.com/noirbizarre/gh-ship), which is why
+commit messages matter: `git cliff` derives both the changelog and the next
+version number from them.
+
+The lifecycle is:
+
+1. push to `main` → `gh ship prepare` opens or updates the **Release PR**,
+   carrying the version bump and the changelog;
+2. review the changelog and merge it;
+3. `gh ship release` tags the merge commit, drafts the release, attaches the
+   source tarball and its checksums, and only then makes it public.
+
+Maintainers do not tag by hand. `gh ship validate` runs in CI, so a workflow
+that stops satisfying the contract fails on a pull request rather than
+mid-release.
+
+The release workflows authenticate as a GitHub App, whose `APP_CLIENT_ID`
+variable and `APP_PRIVATE_KEY` secret live in the `release` environment. The
+default `GITHUB_TOKEN` is not enough: a Release PR it authored would show no CI
+results, because pushes made with it do not trigger workflows.
+
+Releases carry **no prebuilt binaries**: hyprsnap links GTK4 and
+gtk4-layer-shell dynamically and installs desktop entries, icons and a manpage,
+so a single binary would only work on distributions matching the CI runner.
+The release asset is a source tarball, which is what packagers consume.
+
+Useful locally:
+
+| Command | Description |
+|---|---|
+| `mise run version` | show the version the next release would carry |
+| `mise run changelog` | preview `CHANGELOG.md` for the next release |
+| `mise run dogfood` | `gh ship validate` — check the release setup |
+| `mise run lint:actions` | lint the workflow files with actionlint |
