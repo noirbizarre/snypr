@@ -121,7 +121,7 @@ i18n-embed = { version = "0.15", features = [
 ] }
 i18n-embed-fl = "0.9"
 rust-embed = "8"
-fluent = "0.16"
+fluent = "0.17"
 unic-langid = "0.9"
 once_cell = "1"
 
