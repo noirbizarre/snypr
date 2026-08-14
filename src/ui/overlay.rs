@@ -515,10 +515,9 @@ fn spawn_monitor_overlay(
             w: edit.base.width,
             h: edit.base.height,
         };
-        match mon_rect.intersect(&base_rect) {
-            Some(s) => Some(s),
-            None => return None,
-        }
+        // `?` returns `None` from this function, which is the bail-out
+        // described above: no intersection means no window on this monitor.
+        Some(mon_rect.intersect(&base_rect)?)
     } else {
         None
     };
