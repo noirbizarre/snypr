@@ -103,6 +103,19 @@ jobs:
           chown -R builder .
           sudo -u builder makepkg --syncdeps --noconfirm --clean --nocheck
 
+      # `makepkg --printsrcinfo` does NOT run pkgver(): it only reads the
+      # PKGBUILD. For a VCS package that means .SRCINFO would carry the
+      # placeholder `pkgver=0.0.0.r0.g0000000`, which the AUR would show as a
+      # downgrade from whatever is already published. `--nobuild` fetches the
+      # source and runs pkgver(), rewriting the PKGBUILD with the real version.
+      - name: Resolve the VCS version
+        if: matrix.pkg == 'snypr-git'
+        working-directory: build
+        run: |
+          set -euo pipefail
+          chown -R builder .
+          sudo -u builder makepkg --nobuild --nodeps --noconfirm
+
       - name: Generate .SRCINFO
         working-directory: build
         run: |
