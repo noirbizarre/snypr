@@ -56,10 +56,25 @@ body = """
     {% endfor -%}
 {% endfor -%}
 {%- if github -%}
-{% if github.contributors | filter(attribute="is_first_time", value=true) | length != 0 %}
+{#- `github.contributors` comes from the GitHub API, not from the filtered
+    commit list: skipping a commit with a `commit_parsers` rule does NOT remove
+    its author from here. Without this, every bot that ever opened a merged PR
+    — dependabot, and the release bot once `chore(release):` lands on main —
+    gets credited as a first-time contributor.
+
+    Tera's `filter` only does attribute equality, so collect in two passes.
+    Note `ending_with` takes a positional argument; the keyword form is a
+    template parse error. -#}
+{% set_global newcomers = [] -%}
+{% for contributor in github.contributors | filter(attribute="is_first_time", value=true) -%}
+{% if not contributor.username is ending_with("[bot]") -%}
+{% set_global newcomers = newcomers | concat(with=contributor) -%}
+{% endif -%}
+{% endfor -%}
+{% if newcomers | length != 0 %}
   ## ❤️ New Contributors
 {% endif %}\
-{% for contributor in github.contributors | filter(attribute="is_first_time", value=true) %}
+{% for contributor in newcomers %}
   * @{{ contributor.username }} made their first contribution
     {%- if contributor.pr_number %} in \
       [#{{ contributor.pr_number }}]({{ self::remote_url() }}/pull/{{ contributor.pr_number }}) \
