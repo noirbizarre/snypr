@@ -122,7 +122,8 @@ The source tree ships these artifacts ready to install under `$PREFIX`
 | Path                                                                | Provenance                                       |
 | ------------------------------------------------------------------- | ------------------------------------------------ |
 | `$PREFIX/bin/snypr`                                              | `cargo build --release` → `target/release/snypr` |
-| `$PREFIX/share/icons/hicolor/<size>/apps/noirbizar.re.Snypr.png` | `data/icons/hicolor/<size>/apps/…` — sizes 16, 32, 64, 128, 256, 512 |
+| `$PREFIX/share/icons/hicolor/<size>/apps/noirbizar.re.Snypr.png` | `data/icons/hicolor/<size>/apps/…` — sizes 16, 32, 48, 64, 128, 256, 512 |
+| `$PREFIX/share/icons/hicolor/scalable/apps/noirbizar.re.Snypr.svg` | `data/icons/hicolor/scalable/apps/…` — preferred by consumers that scale |
 | `$PREFIX/share/applications/noirbizar.re.Snypr.desktop`          | Standalone launcher with Screenshot/Draw actions |
 | `$PREFIX/share/applications/noirbizar.re.Snypr.Daemon.desktop`   | Visible launcher for `snypr daemon --systray` |
 | `$PREFIX/share/man/man1/snypr.1`                                 | `docs/man/snypr.1`                            |

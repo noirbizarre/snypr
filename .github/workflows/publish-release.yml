@@ -59,11 +59,14 @@ jobs:
           install -Dm755 target/release/snypr "$stage/bin/snypr"
           strip "$stage/bin/snypr"
           install -Dm644 -t "$stage/share/applications" data/applications/*.desktop
-          for size in 16x16 32x32 64x64 128x128 256x256 512x512; do
+          for size in 16x16 32x32 48x48 64x64 128x128 256x256 512x512; do
             install -Dm644 \
               "data/icons/hicolor/$size/apps/noirbizar.re.Snypr.png" \
               "$stage/share/icons/hicolor/$size/apps/noirbizar.re.Snypr.png"
           done
+          install -Dm644 \
+            data/icons/hicolor/scalable/apps/noirbizar.re.Snypr.svg \
+            "$stage/share/icons/hicolor/scalable/apps/noirbizar.re.Snypr.svg"
           install -Dm644 docs/man/snypr.1 "$stage/share/man/man1/snypr.1"
           install -Dm644 LICENSE "$stage/LICENSE"
           install -Dm644 README.md "$stage/README.md"

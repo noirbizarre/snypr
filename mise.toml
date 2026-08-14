@@ -113,13 +113,26 @@ tools = { "cargo:resvg" = "latest" }
 # These are the exact paths the .desktop files, the packager table in README.md
 # and all three PKGBUILDs install — and src/ui/tray.rs `include_bytes!`s the
 # 64x64 one, so the tray icon follows along.
+#
+# 48 is in the list because it is the canonical application icon size in the
+# freedesktop icon theme specification, and consumers that look for one fixed
+# size overwhelmingly look for that one.
+#
+# The scalable SVG is a copy rather than an install straight from docs/images/,
+# so `data/icons/hicolor/` stays the single tree every installer reads. It is a
+# generated artifact like the PNGs, so the two cannot drift.
 run = """
-for size in 16 32 64 128 256 512; do
+for size in 16 32 48 64 128 256 512; do
   out="data/icons/hicolor/${size}x${size}/apps/noirbizar.re.Snypr.png"
   mkdir -p "$(dirname "$out")"
   resvg --width "$size" --height "$size" docs/images/icon.svg "$out"
   echo "$out"
 done
+
+svg="data/icons/hicolor/scalable/apps/noirbizar.re.Snypr.svg"
+mkdir -p "$(dirname "$svg")"
+cp docs/images/icon.svg "$svg"
+echo "$svg"
 """
 
 [tasks.social]

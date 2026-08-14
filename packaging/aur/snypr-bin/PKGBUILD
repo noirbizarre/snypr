@@ -31,11 +31,14 @@ package() {
   install -Dm644 share/man/man1/snypr.1 "$pkgdir/usr/share/man/man1/snypr.1"
 
   local size
-  for size in 16x16 32x32 64x64 128x128 256x256 512x512; do
+  for size in 16x16 32x32 48x48 64x64 128x128 256x256 512x512; do
     install -Dm644 \
       "share/icons/hicolor/$size/apps/noirbizar.re.Snypr.png" \
       "$pkgdir/usr/share/icons/hicolor/$size/apps/noirbizar.re.Snypr.png"
   done
+  install -Dm644 \
+    share/icons/hicolor/scalable/apps/noirbizar.re.Snypr.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/noirbizar.re.Snypr.svg"
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
