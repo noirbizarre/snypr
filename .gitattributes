@@ -1,1 +1,11 @@
 *.lock -diff
+
+# Keep the release source tarball (`git archive`) free of repository plumbing
+# that packagers have no use for.
+.github export-ignore
+.gitattributes export-ignore
+.gitignore export-ignore
+.opencode export-ignore
+codecov.yml export-ignore
+packaging export-ignore
+prek.toml export-ignore

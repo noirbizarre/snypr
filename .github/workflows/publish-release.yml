@@ -23,9 +23,63 @@ permissions:
   contents: read
 
 jobs:
+  # Snypr links GTK4 and gtk4-layer-shell dynamically, so a prebuilt binary is
+  # only valid on a distribution whose GTK4 stack matches the build machine.
+  # We therefore build inside Arch and support that binary on Arch only — it is
+  # what `snypr-bin` consumes so AUR users never compile. Everyone else gets the
+  # source tarball built by `publish`.
+  binary:
+    name: 📦 Binary (x86_64)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+
+    steps:
+      # `base-devel` gives us the toolchain; the rest is what the -sys crates
+      # resolve through pkg-config, mirroring the `snypr-bin` runtime deps.
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git rust gtk4 gtk4-layer-shell wayland pkgconf
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      # `--locked` so the binary is built from the exact dependency graph that
+      # CI tested, matching the tracked Cargo.lock.
+      - name: Build
+        run: cargo build --release --locked
+
+      # The layout mirrors the packager table in the README, rooted at the
+      # tarball prefix, so `snypr-bin` only has to `cp -a` it into `$pkgdir/usr`.
+      - name: Stage the tarball
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          stage="snypr-${TAG}-x86_64-unknown-linux-gnu"
+          install -Dm755 target/release/snypr "$stage/bin/snypr"
+          strip "$stage/bin/snypr"
+          install -Dm644 -t "$stage/share/applications" data/applications/*.desktop
+          for size in 16x16 32x32 64x64 128x128 256x256 512x512; do
+            install -Dm644 \
+              "data/icons/hicolor/$size/apps/noirbizar.re.Snypr.png" \
+              "$stage/share/icons/hicolor/$size/apps/noirbizar.re.Snypr.png"
+          done
+          install -Dm644 docs/man/snypr.1 "$stage/share/man/man1/snypr.1"
+          install -Dm644 LICENSE "$stage/LICENSE"
+          install -Dm644 README.md "$stage/README.md"
+          mkdir -p dist
+          tar -czf "dist/$stage.tar.gz" "$stage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
   publish:
     name: 🚀 Publish
     runs-on: ubuntu-latest
+    needs: [binary]
 
     # This is the deployment. Declaring a `url:` registers it in the
     # repository's deployment list and links straight to what shipped.
@@ -54,10 +108,9 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
 
-      # Snypr links GTK4 and gtk4-layer-shell dynamically, so a prebuilt
-      # binary only runs on distributions matching the runner — which is a
-      # promise we cannot keep. Ship the source instead: that is what
-      # `cargo install --git`, the AUR, and distribution packagers consume.
+      # The source tarball stays the canonical artifact: it is what
+      # `cargo install --git`, the `snypr`/`snypr-git` AUR packages and other
+      # distribution packagers consume.
       - name: Build the source tarball
         env:
           TAG: ${{ inputs.tag }}
@@ -67,6 +120,12 @@ jobs:
           git archive --format=tar.gz \
             --prefix="snypr-${TAG}/" \
             -o "dist/snypr-${TAG}.tar.gz" "$TAG"
+
+      - name: Collect the prebuilt binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-x86_64
+          path: dist
 
       - name: Checksums
         working-directory: dist

@@ -50,7 +50,9 @@ The lifecycle is:
    carrying the version bump and the changelog;
 2. review the changelog and merge it;
 3. `gh ship release` tags the merge commit, drafts the release, attaches the
-   source tarball and its checksums, and only then makes it public.
+   assets, and only then makes it public;
+4. publishing the release triggers `aur.yml`, which pushes the three AUR
+   packages.
 
 Maintainers do not tag by hand. `gh ship validate` runs in CI, so a workflow
 that stops satisfying the contract fails on a pull request rather than
@@ -61,10 +63,47 @@ variable and `APP_PRIVATE_KEY` secret live in the `release` environment. The
 default `GITHUB_TOKEN` is not enough: a Release PR it authored would show no CI
 results, because pushes made with it do not trigger workflows.
 
-Releases carry **no prebuilt binaries**: snypr links GTK4 and
-gtk4-layer-shell dynamically and installs desktop entries, icons and a manpage,
-so a single binary would only work on distributions matching the CI runner.
-The release asset is a source tarball, which is what packagers consume.
+### Assets
+
+`publish-release.yml` produces two tarballs:
+
+- a **prebuilt binary** tarball, built inside an `archlinux:base-devel`
+  container. Snypr links GTK4 and gtk4-layer-shell dynamically, so this binary
+  is only supported on Arch — it exists so `snypr-bin` users never compile;
+- a **source tarball** from `git archive`, which is what `snypr`, `snypr-git`
+  and other distribution packagers consume.
+
+### AUR
+
+The PKGBUILD templates live in `packaging/aur/`. `snypr` and `snypr-bin` carry
+`@VERSION@` and `@SHA256@` placeholders that `aur.yml` substitutes from the
+published release assets; `snypr-git` derives both itself.
+
+`aur.yml` runs on `release: published` rather than from `publish-release`,
+because gh-ship only undrafts the release once that workflow succeeds — waiting
+means the URLs baked into the PKGBUILDs already resolve. It builds each package
+with `makepkg` before pushing, so a broken PKGBUILD fails in CI rather than on a
+user's machine.
+
+Pushing requires an `AUR_SSH_PRIVATE_KEY` secret in the `release` environment,
+whose public half is registered on the maintainer's aur.archlinux.org account.
+
+The AUR creates a repository on its **first** push, so each pkgbase has to be
+bootstrapped manually once:
+
+```sh
+git clone ssh://aur@aur.archlinux.org/snypr-bin.git
+cd snypr-bin
+sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256@/$SHA256/" \
+  ../packaging/aur/snypr-bin/PKGBUILD > PKGBUILD
+makepkg --printsrcinfo > .SRCINFO
+git add PKGBUILD .SRCINFO && git commit -m "Initial import" && git push
+```
+
+CI owns every subsequent update.
+
+Before touching a PKGBUILD, lint it locally with `namcap PKGBUILD` and build it
+with `makepkg -s`.
 
 Useful locally:
 

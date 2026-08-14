@@ -17,6 +17,12 @@ commit messages. Never bump the version or tag by hand — the
 `prepare-release` workflow owns `[package] version` in `Cargo.toml`. Check the
 setup with `mise run dogfood` (`gh ship validate`); see CONTRIBUTING.md.
 
+Packaging: PKGBUILD templates for the three AUR packages (`snypr-bin`, `snypr`,
+`snypr-git`) live in `packaging/aur/`, pushed by `.github/workflows/aur.yml` on
+`release: published`. `publish-release` ships a prebuilt Arch binary tarball
+alongside the source tarball. Keep the `packaging/aur/*/PKGBUILD` install lists
+in sync with the packager table in README.md.
+
 Code Style:
 - Edition 2024; use `anyhow::Result` for fallible public fns; prefer `?` and propagate errors; avoid `.unwrap()` outside tests unless guaranteed.
 - Imports: group std / external / crate; avoid wildcard; keep ordering lexical; re-export only intentional items (see `lib.rs`).

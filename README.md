@@ -80,19 +80,44 @@ daemon publishes in-process and skips that fork.
 
 ## Install
 
-End-user installs will arrive via distribution packages (AUR, Debian/Ubuntu,
-Nix, …) once published — that's the supported path. In the meantime you can
-`cargo install --path .` (or `mise run setup`) to drop the binary in
-`~/.cargo/bin`; the launcher integration below assumes a proper package.
+### Arch Linux
 
-Each [release](https://github.com/noirbizarre/snypr/releases) publishes a
-source tarball (`snypr-<version>.tar.gz`) and a `SHA256SUMS` file — that is
-what packagers should consume. There are deliberately no prebuilt binaries:
-snypr links GTK4 and gtk4-layer-shell dynamically, so a single binary would
-only run on distributions matching the build machine.
+```sh
+paru -S snypr-bin   # prebuilt binary, no compilation
+paru -S snypr       # built from the release tarball
+paru -S snypr-git   # built from the main branch
+```
 
-For packagers, the source tree ships these artifacts ready to install under
-`$PREFIX` (typically `/usr`):
+`snypr-bin` is the recommended path: it installs the binary published with each
+release, along with the desktop entries, icons and manpage.
+
+### Other distributions
+
+Ubuntu packaging is planned through
+[hyprland-ppa](https://github.com/cpiber/hyprland-ppa). Until then, build from
+source with `cargo install --path .` (or `mise run setup`), which drops the
+binary in `~/.cargo/bin` — note the launcher integration below assumes a proper
+package, so you will need to install the desktop files and icons yourself.
+
+### Release assets
+
+Each [release](https://github.com/noirbizarre/snypr/releases) publishes:
+
+| Asset | Contents |
+| --- | --- |
+| `snypr-<version>-x86_64-unknown-linux-gnu.tar.gz` | Prebuilt binary plus the desktop entries, icons and manpage, laid out as a `$PREFIX` tree |
+| `snypr-<version>.tar.gz` | Source tarball — what packagers should consume |
+| `SHA256SUMS` | Checksums for both |
+
+The prebuilt binary is **built on and supported for Arch Linux only**. Snypr
+links GTK4 and gtk4-layer-shell dynamically, so it requires a matching GTK4
+stack (GTK ≥ 4.14 and gtk4-layer-shell ≥ 1.0) on the target system. It may work
+elsewhere, but that is not a promise we can keep — build from source instead.
+
+### For packagers
+
+The source tree ships these artifacts ready to install under `$PREFIX`
+(typically `/usr`):
 
 | Path                                                                | Provenance                                       |
 | ------------------------------------------------------------------- | ------------------------------------------------ |
@@ -104,7 +129,9 @@ For packagers, the source tree ships these artifacts ready to install under
 
 After installation, package post-install hooks should run
 `update-desktop-database` against `$PREFIX/share/applications` and
-`gtk-update-icon-cache -qtf $PREFIX/share/icons/hicolor`.
+`gtk-update-icon-cache -qtf $PREFIX/share/icons/hicolor`. On Arch both are
+handled by the `desktop-file-utils` and `hicolor-icon-theme` hooks, so the
+PKGBUILDs in `packaging/aur/` carry no `.install` file.
 
 The standalone `.desktop` exposes three launcher actions (visible via
 right-click in most launchers): **Take Screenshot (region)**, **Take

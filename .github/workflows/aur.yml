@@ -1,0 +1,134 @@
+name: 📦 AUR
+
+# Publishes the three AUR packages once a release is public. It runs on
+# `release: published` rather than from `publish-release`, because gh-ship only
+# undrafts the release after that workflow succeeds — waiting means the URLs
+# baked into the PKGBUILDs already resolve when the packages land.
+#
+# The pkgbases must exist before this can push: the AUR creates a repository on
+# its first push, so `snypr`, `snypr-bin` and `snypr-git` are bootstrapped
+# manually once. See CONTRIBUTING.md.
+run-name: 📦 AUR ${{ inputs.tag || github.event.release.tag_name }}
+
+on:
+  release:
+    types: [published]
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to publish to the AUR
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  aur:
+    name: 📦 ${{ matrix.pkg }}
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+
+    # `AUR_SSH_PRIVATE_KEY` lives alongside the other release credentials.
+    environment: release
+
+    strategy:
+      # One broken package should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        pkg: [snypr-bin, snypr, snypr-git]
+
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --needed --noconfirm git openssh github-cli rust pkgconf gtk4 gtk4-layer-shell wayland
+
+      - uses: actions/checkout@v4
+
+      # makepkg refuses to run as root, and the container has no other user.
+      - name: Create the build user
+        run: |
+          set -euo pipefail
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          # `actions/checkout` leaves the tree owned by root.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Render the PKGBUILD
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PKG: ${{ matrix.pkg }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          cp "packaging/aur/$PKG/PKGBUILD" build/PKGBUILD
+
+          # snypr-git has no version or checksum to pin: makepkg derives both.
+          if [ "$PKG" = "snypr-git" ]; then
+            exit 0
+          fi
+
+          case "$PKG" in
+            snypr-bin) asset="snypr-${TAG}-x86_64-unknown-linux-gnu.tar.gz" ;;
+            snypr) asset="snypr-${TAG}.tar.gz" ;;
+          esac
+
+          # Checksum the published asset itself rather than trusting SHA256SUMS,
+          # so a mismatch between the two cannot slip into the AUR.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir build
+          sha256=$(sha256sum "build/$asset" | cut -d' ' -f1)
+
+          sed -i -e "s/@VERSION@/${TAG}/" -e "s/@SHA256@/${sha256}/" build/PKGBUILD
+          rm -f "build/$asset"
+
+      # Proves the PKGBUILD actually builds before it reaches users. Skipped for
+      # snypr-git, whose source is the branch tip rather than the release.
+      - name: Build the package
+        if: matrix.pkg != 'snypr-git'
+        working-directory: build
+        run: |
+          set -euo pipefail
+          chown -R builder .
+          sudo -u builder makepkg --syncdeps --noconfirm --clean
+
+      - name: Generate .SRCINFO
+        working-directory: build
+        run: |
+          set -euo pipefail
+          chown -R builder .
+          # The redirect must happen as `builder` too, otherwise root owns the
+          # generated file (shellcheck SC2024).
+          sudo -u builder bash -c 'makepkg --printsrcinfo > .SRCINFO'
+
+      - name: Push to the AUR
+        env:
+          PKG: ${{ matrix.pkg }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/aur -o IdentitiesOnly=yes'
+
+          git clone "ssh://aur@aur.archlinux.org/${PKG}.git" aur
+          cp build/PKGBUILD build/.SRCINFO aur/
+
+          cd aur
+          git config user.name 'snypr release bot'
+          git config user.email 'noirbizarre@gmail.com'
+
+          # A re-run on an unchanged package must not create an empty commit.
+          if git diff --quiet; then
+            echo "::notice::${PKG} is already up to date on the AUR"
+            exit 0
+          fi
+
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${TAG}"
+          git push origin master
