@@ -16,7 +16,13 @@ workflows:
   publish: publish-release
 
 pull_request:
-  title: "Release {{ version }}"
+  # Conventional on purpose. The repository squashes with
+  # `squash_merge_commit_title=PR_TITLE`, so this string becomes the subject of
+  # the commit landing on main. `chore(release):` is what cliff.toml skips
+  # explicitly; anything else would only be kept out of the changelog by
+  # `filter_unconventional`, which is an accident rather than a guarantee, and
+  # would fail the Commitizen convention the pre-push hook enforces.
+  title: "chore(release): {{ version }}"
   header: |
     This PR prepares the next release of Snypr.
 
