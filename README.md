@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo-text.png" alt="Snypr" />
+  <img src="docs/images/logo.svg" alt="Snypr" width="640" />
 </p>
 
 A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https://hyprland.org/).
