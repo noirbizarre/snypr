@@ -115,7 +115,7 @@ ksni = { version = "0.3", optional = true }
 notify-rust = { version = "4", optional = true }
 
 # Internationalization (Fluent + embedded catalogs)
-i18n-embed = { version = "0.15", features = [
+i18n-embed = { version = "0.16", features = [
   "fluent-system",
   "desktop-requester",
 ] }
