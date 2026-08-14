@@ -30,8 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
 
-    # `AUR_SSH_PRIVATE_KEY` lives alongside the other release credentials.
-    environment: release
+    # A dedicated environment: `AUR_SSH_PRIVATE_KEY` is scoped to it rather than
+    # sitting next to the GitHub App credentials in `release`, and each package
+    # push is registered as its own deployment.
+    environment:
+      name: aur
+      url: https://aur.archlinux.org/packages/${{ matrix.pkg }}
 
     strategy:
       # One broken package should not hide the state of the other two.

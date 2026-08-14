@@ -85,8 +85,11 @@ means the URLs baked into the PKGBUILDs already resolve. It builds each package
 with `makepkg` before pushing, so a broken PKGBUILD fails in CI rather than on a
 user's machine.
 
-Pushing requires an `AUR_SSH_PRIVATE_KEY` secret in the `release` environment,
-whose public half is registered on the maintainer's aur.archlinux.org account.
+Pushing requires an `AUR_SSH_PRIVATE_KEY` secret in the dedicated `aur`
+environment, whose public half is registered on the maintainer's
+aur.archlinux.org account. It is deliberately not in `release`: the AUR key has
+no business sitting next to the GitHub App credentials, and a separate
+environment makes each package push show up as its own deployment.
 
 The AUR creates a repository on its **first** push, so each pkgbase has to be
 bootstrapped manually once:
