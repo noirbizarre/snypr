@@ -50,7 +50,7 @@ jobs:
       - name: Install dependencies
         run: pacman -Syu --needed --noconfirm git openssh github-cli rust pkgconf gtk4 gtk4-layer-shell wayland
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # makepkg refuses to run as root, and the container has no other user.
       - name: Create the build user

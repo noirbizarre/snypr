@@ -61,7 +61,7 @@ jobs:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         # A plain shallow checkout is enough: `gh ship prepare` reads
         # .github/ship.yml and discovers workflows from .github/workflows,
         # both of which are in the tree. gh-ship never shells out to git.
@@ -101,7 +101,7 @@ jobs:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install gh-ship
         run: gh extension install noirbizarre/gh-ship
