@@ -12,3 +12,15 @@ updates:
         - dependency-name: "semver"
         - dependency-name: "crates-io"
     rebase-strategy: "disabled"
+
+  - package-ecosystem: "github-actions"
+    directories:
+      # Workflows plus the in-tree composite action
+      - "/"
+      - "/.github/actions/install-gtk4-layer-shell"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+    rebase-strategy: "disabled"

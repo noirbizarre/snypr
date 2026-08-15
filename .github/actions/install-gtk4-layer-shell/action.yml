@@ -25,7 +25,7 @@ runs:
 
     - name: Restore gtk4-layer-shell install cache
       id: gtk4ls-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: /tmp/gtk4ls-install
         key: gtk4-layer-shell-${{ inputs.version }}-${{ runner.os }}-${{ runner.arch }}

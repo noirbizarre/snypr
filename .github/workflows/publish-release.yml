@@ -39,7 +39,7 @@ jobs:
       - name: Install build dependencies
         run: pacman -Syu --needed --noconfirm git rust gtk4 gtk4-layer-shell wayland pkgconf
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
 
@@ -73,7 +73,7 @@ jobs:
           mkdir -p dist
           tar -czf "dist/$stage.tar.gz" "$stage"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binary-x86_64
           path: dist/*.tar.gz
@@ -103,7 +103,7 @@ jobs:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Build exactly what is being released, not a branch tip that
           # may have moved since. `git archive` needs the tag object, which a
@@ -125,7 +125,7 @@ jobs:
             -o "dist/snypr-${TAG}.tar.gz" "$TAG"
 
       - name: Collect the prebuilt binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: binary-x86_64
           path: dist
