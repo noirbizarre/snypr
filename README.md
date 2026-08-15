@@ -161,8 +161,11 @@ snypr screenshot --output DP-1 --to clipboard
 # selection (middle-click paste). Per-sink form: --to clipboard=primary.
 snypr screenshot --full --to clipboard --clipboard-type both
 
-# Focused window, queried over Hyprland IPC.
+# Focused monitor, queried over Hyprland IPC.
 snypr screenshot --focused
+
+# Currently active window, queried over Hyprland IPC.
+snypr screenshot --window
 
 # Explicit region (logical pixels): X,Y,WxH.
 snypr screenshot --region 100,200,800x600 --to file
@@ -277,9 +280,13 @@ hl.bind("SUPER + SHIFT + Print",
 hl.bind("SUPER + SHIFT + ALT + Print",
     hl.dsp.exec_cmd("snypr screenshot --full --per-output --to file"))
 
--- Currently focused window (queried over Hyprland IPC), copied to the clipboard.
+-- Currently focused monitor (queried over Hyprland IPC), copied to the clipboard.
 hl.bind("SUPER + CTRL + Print",
     hl.dsp.exec_cmd("snypr screenshot --focused --to clipboard"))
+
+-- Currently active window (queried over Hyprland IPC), copied to the clipboard.
+hl.bind("SUPER + CTRL + SHIFT + Print",
+    hl.dsp.exec_cmd("snypr screenshot --window --to clipboard"))
 
 -- Live draw-on-screen overlay — ideal for presentations / Google Meet.
 -- See the README keybind table for the full tool/action list; Esc quits.
