@@ -59,6 +59,9 @@ pub async fn run(args: Args) -> Result<()> {
         .into_iter()
         .map(|s| s.resolve_clipboard_default(kind))
         .collect();
+    // The returned paths are deliberately discarded: Draw-mode save is non-terminating and
+    // may fire many times, so `run_draw_save` prints each batch as it lands rather than
+    // waiting for the overlay to close. Printing again here would duplicate every line.
     let _ = run_overlay(
         ctx,
         OverlayMode::Draw {

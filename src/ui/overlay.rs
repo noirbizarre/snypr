@@ -373,6 +373,7 @@ fn build_overlays(
         draw_save,
         blur_capture_in_flight: Rc::new(Cell::new(false)),
         annotate_colors: Rc::new(ctx.config.annotate.colors.clone()),
+        notify: Rc::new(ctx.config.notify.clone()),
         // Edit mode mirrors the selector's `dim_strong` veil around the captured slice so
         // the visual context the user just had in the region selector persists into the
         // annotation editor. `None` in Draw mode keeps the overlay fully transparent.
@@ -476,6 +477,10 @@ struct Shared {
     /// [`AnnotationCanvas`] in [`spawn_monitor_overlay`]. Cloned from
     /// `ctx.config.annotate.colors` in [`build_overlays`].
     annotate_colors: Rc<crate::config::AnnotateColors>,
+    /// Notification settings, so failures raised inside the overlay reach the user instead
+    /// of only the log. The overlay stays up after a failed Save and the process still
+    /// exits 0, so `main`'s top-level `notify_error` never fires for these.
+    notify: Rc<crate::config::NotifyConfig>,
     /// Color for the [`EditVeil`] strips painted around the captured slice in Edit mode.
     /// Sourced from `ctx.config.ui.selector.dim_strong` so the annotation editor reuses the
     /// exact veil the user just saw in the region selector. Unused in Draw mode.
@@ -719,6 +724,22 @@ fn apply_passthrough_state(
 /// the canvas registry lazily, so it sees every canvas by the time the user interacts. The
 /// picker swatches are seeded separately by [`seed_toolbar_from_canvas`] after the canvases are
 /// built.
+/// Log an overlay failure *and* surface it to the user.
+///
+/// The overlay survives most failures and the process still exits 0, so `main`'s top-level
+/// `notify_error` never runs for them — without this the user gets no feedback at all.
+fn report_overlay_error(
+    notify: &crate::config::NotifyConfig,
+    context: &'static str,
+    err: &anyhow::Error,
+) {
+    tracing::error!(error = ?err, "{context}");
+    #[cfg(feature = "notify")]
+    crate::notify::notify_error(notify, err);
+    #[cfg(not(feature = "notify"))]
+    let _ = notify;
+}
+
 fn wire_toolbar(shared: &Shared) {
     let canvases = shared.canvases.clone();
     let windows = shared.windows.clone();
@@ -730,6 +751,7 @@ fn wire_toolbar(shared: &Shared) {
     let app_weak = shared.app_weak.clone();
     let focus_shutdown = shared.focus_shutdown.clone();
     let blur_in_flight = shared.blur_capture_in_flight.clone();
+    let notify = shared.notify.clone();
 
     let toolbar = shared.host.toolbar();
     toolbar.connect(move |action| match action {
@@ -827,9 +849,9 @@ fn wire_toolbar(shared: &Shared) {
                             }
                             tear_down(&windows, &focus_shutdown, &app_weak);
                         }
-                        Err(err) => tracing::error!(error = ?err, "save failed"),
+                        Err(err) => report_overlay_error(&notify, "save failed", &err),
                     },
-                    Err(err) => tracing::error!(error = ?err, "composing edit failed"),
+                    Err(err) => report_overlay_error(&notify, "composing edit failed", &err),
                 }
             } else if let Some(draw_save) = draw_save.as_ref() {
                 // Draw-mode save: hand off to `run_draw_save` on the GLib main context so
@@ -1219,7 +1241,11 @@ async fn run_draw_save(
             if err.chain().any(|e| e.is::<selector::Cancelled>()) {
                 tracing::info!("draw-save: selector cancelled");
             } else {
-                tracing::error!(error = ?err, "draw-save: selector failed");
+                report_overlay_error(
+                    &draw_save.app_ctx.config.notify,
+                    "draw-save: selector failed",
+                    &err,
+                );
             }
             toolbar_widget.set_visible(true);
             apply_passthrough_state(&passthrough, &windows, &host, prev_passthrough);
@@ -1276,8 +1302,16 @@ async fn run_draw_save(
                 g.extend(paths.iter().cloned());
             }
         }
-        Ok(Err(err)) => tracing::error!(error = ?err, "draw-save: capture/write failed"),
-        Err(err) => tracing::error!(error = ?err, "draw-save: capture task panicked"),
+        Ok(Err(err)) => report_overlay_error(
+            &draw_save.app_ctx.config.notify,
+            "draw-save: capture/write failed",
+            &err,
+        ),
+        Err(err) => report_overlay_error(
+            &draw_save.app_ctx.config.notify,
+            "draw-save: capture task panicked",
+            &anyhow!("{err}"),
+        ),
     }
 
     toolbar_widget.set_visible(true);
