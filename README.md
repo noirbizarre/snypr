@@ -372,6 +372,9 @@ use_utc            = false
 compression        = "balanced"
 
 [capture]
+# Include the pointer in captures by default. `--cursor` turns it on for a single
+# invocation; because the flag is a bare boolean it can only enable, so with
+# `cursor = true` use the selector's cursor toggle to leave it out of one capture.
 cursor = false
 # Pre-capture delay in whole seconds. `0` (or omitted) means no delay. The CLI's
 # `--delay SECONDS` flag overrides this value.

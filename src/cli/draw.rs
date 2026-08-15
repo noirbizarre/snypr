@@ -59,6 +59,9 @@ pub async fn run(args: Args, config_override: Option<&std::path::Path>) -> Resul
         .into_iter()
         .map(|s| s.resolve_clipboard_default(kind))
         .collect();
+    // `--cursor` turns the cursor on, otherwise `[capture].cursor` decides. Resolved before
+    // `ctx` is moved into the overlay.
+    let cursor = crate::cli::screenshot::effective_cursor(args.cursor, ctx.config.capture.cursor);
     // The returned paths are deliberately discarded: Draw-mode save is non-terminating and
     // may fire many times, so `run_draw_save` prints each batch as it lands rather than
     // waiting for the overlay to close. Printing again here would duplicate every line.
@@ -67,7 +70,7 @@ pub async fn run(args: Args, config_override: Option<&std::path::Path>) -> Resul
         OverlayMode::Draw {
             passthrough: args.passthrough,
             sinks,
-            cursor: args.cursor,
+            cursor,
         },
         None,
         None,

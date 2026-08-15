@@ -85,7 +85,10 @@ pub async fn run(args: Args, config_override: Option<&std::path::Path>) -> Resul
     // The selector's spinner can still override this interactively (see `execute`).
     let delay = effective_delay(args.delay, ctx.config.capture.delay);
 
-    let paths = execute(ctx, selection, args.cursor, sinks, args.edit, delay).await?;
+    // Effective cursor: `--cursor` turns it on, otherwise `[capture].cursor` decides.
+    let cursor = effective_cursor(args.cursor, ctx.config.capture.cursor);
+
+    let paths = execute(ctx, selection, cursor, sinks, args.edit, delay).await?;
     for p in &paths {
         println!("{}", p.display());
     }
@@ -97,6 +100,17 @@ pub async fn run(args: Args, config_override: Option<&std::path::Path>) -> Resul
 /// `None` so the sleep is a true no-op rather than a vacuous zero-length sleep round-trip.
 pub fn effective_delay(cli: Option<u32>, config: Option<u32>) -> Option<u32> {
     cli.or(config).filter(|n| *n > 0)
+}
+
+/// Resolve whether to include the cursor: `[capture].cursor` sets the default and the
+/// `--cursor` flag turns it on.
+///
+/// This ORs rather than overrides because `--cursor` is a bare boolean flag — its absence
+/// means "not requested", not "requested off", so letting it override would make the config
+/// field unusable. Users who set `cursor = true` and want it off for one capture toggle it
+/// in the interactive selector, which does carry three-state intent.
+pub fn effective_cursor(cli: bool, config: bool) -> bool {
+    cli || config
 }
 
 /// Resolve the effective default [`ClipboardKind`] using the documented precedence:
@@ -596,6 +610,19 @@ mod tests {
     fn effective_delay_collapses_zero_to_none() {
         assert_eq!(effective_delay(Some(0), None), None);
         assert_eq!(effective_delay(None, Some(0)), None);
+    }
+
+    #[rstest]
+    #[case::neither(false, false, false)]
+    #[case::config_only(false, true, true)]
+    #[case::flag_only(true, false, true)]
+    #[case::both(true, true, true)]
+    fn effective_cursor_ors_the_flag_with_the_config(
+        #[case] cli: bool,
+        #[case] config: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(effective_cursor(cli, config), expected);
     }
 
     #[test]

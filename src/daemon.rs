@@ -328,10 +328,12 @@ async fn run_screenshot(
     // CLI-supplied delay wins; otherwise fall back to the daemon's loaded config. Wire
     // representation is whole seconds (see `crate::ipc::ScreenshotRequest::delay_secs`).
     let delay = crate::cli::screenshot::effective_delay(req.delay_secs, ctx.config.capture.delay);
-    let paths = run_screenshot_with_optional_lock(
-        &ctx, &state, selection, req.cursor, sinks, req.edit, delay,
-    )
-    .await?;
+    // Same resolution as the CLI: the request flag turns the cursor on, otherwise the
+    // daemon's `[capture].cursor` decides.
+    let cursor = crate::cli::screenshot::effective_cursor(req.cursor, ctx.config.capture.cursor);
+    let paths =
+        run_screenshot_with_optional_lock(&ctx, &state, selection, cursor, sinks, req.edit, delay)
+            .await?;
     Ok(Response::Paths { paths })
 }
 
