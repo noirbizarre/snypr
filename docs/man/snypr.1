@@ -14,10 +14,19 @@ and other wlroots-based compositors. It captures pixels via the
 .SH GLOBAL OPTIONS
 .TP
 .BR \-\-config " " \fIPATH\fR
-Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/snypr/config.toml\fR.
+Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/snypr/config.toml\fR. Applies to every
+subcommand, and is an error if \fIPATH\fR does not exist. Ignored with
+\fB\-\-via-daemon\fR, where the request runs in the daemon's process against the
+configuration that daemon started with.
 .TP
 .BR \-v ", " \-\-verbose
-Increase log verbosity (repeatable).
+Increase log verbosity (repeatable). \fB\-v\fR selects debug, \fB\-vv\fR trace; either
+overrides \fBRUST_LOG\fR.
+.TP
+.BR \-\-lang " " \fIBCP47\fR
+Override the active language as a BCP-47 tag (\fIfr\fR, \fIen-US\fR, ...). Falls back to
+the \fBlanguage\fR field in \fIconfig.toml\fR, then \fBLC_ALL\fR / \fBLC_MESSAGES\fR /
+\fBLANG\fR, then English.
 .SH COMMANDS
 .SS screenshot
 Capture pixels and pipe them to one or more sinks. With \fB\-\-edit\fR the captured image
@@ -27,14 +36,15 @@ is handed to the in-place annotation overlay before reaching the sinks.
 Stitch the bounding box covering every output into a single image.
 .TP
 .BR \-\-per\-output
-Produce one file per output. Requires a filename template containing \fB{output}\fR.
-Incompatible with \fB\-\-edit\fR.
+Produce one file per output. \fB{output}\fR is inserted into the filename template
+automatically when the template does not already contain it, so the files cannot collapse
+onto one another. Incompatible with \fB\-\-edit\fR.
 .TP
 .BR \-\-focused
-Capture the currently focused window, queried over Hyprland's IPC.
+Capture the currently focused monitor, queried over Hyprland's IPC.
 .TP
-.BR \-\-window " " \fIADDRESS\fR
-Capture a specific Hyprland window by address.
+.BR \-\-window
+Capture the currently active window, queried over Hyprland's IPC.
 .TP
 .BR \-\-output " " \fINAME\fR
 Capture a single output (\fIDP-1\fR, \fIeDP-1\fR, ...).
@@ -42,7 +52,7 @@ Capture a single output (\fIDP-1\fR, \fIeDP-1\fR, ...).
 .BR \-\-region " " \fIX,Y,WxH\fR
 Capture an explicit logical-pixel region.
 .TP
-.BR \-\-interactive
+.BR \-i ", " \-\-interactive
 Open the selector overlay and let the user draw a region.
 .TP
 .BR \-\-edit
@@ -67,7 +77,9 @@ Default clipboard selection (\fBregular\fR, \fBprimary\fR, or \fBboth\fR) used f
 Falls back to \fB[clipboard].default_kind\fR in \fIconfig.toml\fR, then to \fBregular\fR.
 .TP
 .BR \-\-cursor
-Include the hardware cursor in the capture.
+Include the hardware cursor in the capture. Turns on \fB[capture].cursor\fR for this
+invocation; since the flag is a bare boolean it can only enable, so use the selector's
+cursor toggle to leave the pointer out when \fBcursor = true\fR is configured.
 .TP
 .BR \-\-delay " " \fISECONDS\fR
 Wait \fISECONDS\fR whole seconds before capturing. \fB0\fR is the same as omitting the
@@ -80,23 +92,37 @@ executing locally.
 .SS draw
 Launch the live draw-on-screen overlay. Tool keys: \fBR\fR rectangle, \fBO\fR ellipse,
 \fBA\fR arrow, \fBL\fR line (no arrowhead), \fBH\fR highlight, \fBF\fR freehand, \fBN\fR
-numbered marker, \fBT\fR text, \fBX\fR redact (press the active tool's key again, or click
-its button, to deactivate it). Other keys: \fBCtrl+Z\fR undo, \fBCtrl+L\fR clear all
-layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBP\fR toggle pointer
-passthrough, \fBEsc\fR quit. \fBBlur\fR and \fBCrop\fR are editor-only and are not
-available in the live overlay. With no tool active the overlay is in \fBSelect\fR mode:
+numbered marker, \fBT\fR text, \fBB\fR blur, \fBX\fR redact (press the active tool's key
+again, or click its button, to deactivate it). Other keys: \fBCtrl+Z\fR undo, \fBCtrl+L\fR
+clear all layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBP\fR toggle
+pointer passthrough, \fBEsc\fR quit. \fBCrop\fR is editor-only and is not available in the
+live overlay; \fBBlur\fR is available, and grabs the underlying desktop the first time it
+is used. With no tool active the overlay is in \fBSelect\fR mode:
 click an existing shape to pick it, drag its body to move it, drag a handle to resize it
 (an Arrow/Line endpoint, a numbered marker's radius, or — for text — corner handles scale
 the font while side handles set a wrap width), double-click text to re-edit it, press
 \fBDelete\fR / \fBBackspace\fR to remove it or \fBEsc\fR to deselect, and arrow keys to
 nudge (\fBShift\fR for a larger step). After committing a shape the overlay returns to
-Select mode automatically. \fBdraw\fR also accepts \fB\-\-via-daemon\fR to toggle a
-daemon-managed overlay instead of spawning a new process, and \fB\-\-toggle-passthrough\fR
-(requires \fB\-\-via-daemon\fR) to flip pointer passthrough on the running overlay from a
-global keybind.
+Select mode automatically.
+.TP
+.BR \-\-passthrough
+Open the overlay with pointer passthrough already enabled, so clicks fall through to the
+windows underneath until \fBP\fR (or \fB\-\-toggle-passthrough\fR) turns it off.
+.TP
+.BR \-\-via-daemon
+Toggle a daemon-managed overlay instead of spawning a new process.
+.TP
+.BR \-\-toggle-passthrough
+Flip pointer passthrough on the running overlay from a global keybind. Requires
+\fB\-\-via-daemon\fR.
 .SS daemon
-Run the IPC server on \fI$XDG_RUNTIME_DIR/snypr.sock\fR. Pass \fB\-\-systray\fR to
-also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
+Run the IPC server on \fI$XDG_RUNTIME_DIR/snypr.sock\fR.
+.TP
+.BR \-\-socket " " \fIPATH\fR
+Listen on \fIPATH\fR instead of \fI$XDG_RUNTIME_DIR/snypr.sock\fR.
+.TP
+.BR \-\-systray
+Also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
 .SS doctor
 Print a copy-pasteable Markdown diagnostic report covering version, runtime
 environment, parsed configuration, and live capability probes (Hyprland IPC,
@@ -143,18 +169,36 @@ pickers are available in the live \fBdraw\fR overlay.
 .SH CONFIGURATION
 .B snypr
 reads \fI$XDG_CONFIG_HOME/snypr/config.toml\fR. Every field is optional; see the
-sample in the project README. Filename template tokens: \fB{ts}\fR, \fB{date}\fR,
-\fB{time}\fR, \fB{output}\fR, \fB{selection}\fR. The \fB[ui.selector]\fR table
+sample in the project README. The top-level \fBlanguage\fR field sets the UI language as
+a BCP-47 tag and is overridden by \fB\-\-lang\fR. Filename template tokens: \fB{ts}\fR,
+\fB{date}\fR, \fB{time}\fR, \fB{output}\fR, \fB{selection}\fR. The \fB[ui.selector]\fR
+table
 overrides the selector chrome colors (\fIoutline\fR, \fIoutline_hover\fR,
 \fIlabel\fR, \fIdim_strong\fR,
 \fIdim_full\fR, \fIdim_light\fR, \fIcountdown_fg\fR, \fIcountdown_bg\fR) as
 \fB#RRGGBB\fR or \fB#RRGGBBAA\fR hex strings. The \fB[capture]\fR table accepts
+\fIcursor\fR (include the pointer by default; see \fB\-\-cursor\fR) and
 \fIinitial_mode\fR (\fBfull\fR / \fBscreen\fR / \fBwindow\fR / \fBregion\fR; default
 \fBscreen\fR) to pre-select a mode button in the interactive selector. The
 \fB[annotate.colors]\fR table sets the default color of each annotation tool
 (\fIrect\fR, \fIellipse\fR, \fIarrow\fR, \fIline\fR, \fIfreehand\fR, \fIhighlight\fR,
 \fInumber\fR, \fItext\fR) as \fB#RRGGBB\fR or \fB#RRGGBBAA\fR hex strings; the
 toolbar color picker still lets the user change colors at runtime.
+.SH ENVIRONMENT
+.TP
+.B SNYPR_CONFIG
+Alternative configuration file path. Equivalent to \fB\-\-config\fR.
+.TP
+.B SNYPR_LANG
+UI language as a BCP-47 tag. Equivalent to \fB\-\-lang\fR.
+.TP
+.B RUST_LOG
+Standard \fItracing-subscriber\fR filter. Overridden by \fB\-v\fR / \fB\-vv\fR.
+.TP
+.B SNYPR_CAPTURE_GRACE_MS
+Grace period, in milliseconds, between dismissing the selector surface and grabbing
+pixels. Defaults to \fB30\fR. Raise it on compositors whose surface teardown is slow
+enough that the selector chrome leaks into the capture.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/snypr/config.toml

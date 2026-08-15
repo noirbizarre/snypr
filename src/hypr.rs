@@ -48,7 +48,7 @@ pub async fn active_window() -> Result<ActiveWindow> {
     // `none` on older builds). Treat both as "no active window".
     let trimmed = body.trim();
     if trimmed.is_empty() || trimmed == "{}" || trimmed.eq_ignore_ascii_case("none") {
-        bail!("no active client");
+        bail!("{}", crate::i18n::fl!("error-no-active-window"));
     }
 
     #[derive(Deserialize)]
@@ -166,7 +166,7 @@ pub async fn focused_monitor() -> Result<String> {
         .into_iter()
         .find(|m| m.focused)
         .map(|m| m.name)
-        .ok_or_else(|| anyhow!("no focused monitor"))
+        .ok_or_else(|| anyhow!("{}", crate::i18n::fl!("error-no-focused-monitor")))
 }
 
 /// Subscribe to Hyprland focused-monitor changes.
@@ -290,9 +290,8 @@ pub(crate) fn socket_path() -> Result<PathBuf> {
 /// resolution: modern `$XDG_RUNTIME_DIR/hypr/$HIS/<file>` (Hyprland ≥ 0.42) with a fallback to
 /// the legacy `/tmp/hypr/$HIS/<file>` for older builds.
 fn socket_path_named(file: &str) -> Result<PathBuf> {
-    let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").map_err(|_| {
-        anyhow!("HYPRLAND_INSTANCE_SIGNATURE is not set; not running under Hyprland?")
-    })?;
+    let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .map_err(|_| anyhow!("{}", crate::i18n::fl!("error-not-under-hyprland")))?;
     let candidates = [
         std::env::var("XDG_RUNTIME_DIR")
             .ok()

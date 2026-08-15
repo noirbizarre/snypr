@@ -1,0 +1,24 @@
+# typos (https://github.com/crate-ci/typos) configuration.
+#
+# `typos` is English-only: it has no notion of the locale a file is written in,
+# so every French word that happens to look like an English typo is reported.
+# `git-cliff` runs `typos --write-changes` over commit messages at release time
+# (see `cliff.toml`), which makes a clean run load-bearing rather than advisory.
+
+[files]
+# The changelog is generated from commit messages that are already immutable --
+# a typo in a shipped commit subject cannot be fixed by editing this file.
+#
+# Non-English catalogs are excluded wholesale: `typos` has no notion of the
+# locale a file is written in, so it reports ordinary French words as English
+# misspellings. Add new translations here as they land.
+extend-exclude = ["CHANGELOG.md", "i18n/fr/"]
+
+[default.extend-words]
+# French strings asserted from Rust test code, which cannot be excluded by path.
+presse = "presse" # "presse-papiers" -- clipboard
+
+# Domain vocabulary that `typos` mistakes for misspellings.
+unparseable = "unparseable"
+unparented = "unparented"
+PN = "PN"                   # "PNG" truncated by the tokenizer in a prose comment

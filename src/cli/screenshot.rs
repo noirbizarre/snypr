@@ -65,8 +65,8 @@ pub struct Args {
     pub via_daemon: bool,
 }
 
-pub async fn run(args: Args) -> Result<()> {
-    let config = Config::load_default().context("loading configuration")?;
+pub async fn run(args: Args, config_override: Option<&std::path::Path>) -> Result<()> {
+    let config = Config::resolve(config_override).context("loading configuration")?;
     let ctx = Context::new(config).await?;
 
     let selection = parse_selection(&args)?;
@@ -85,7 +85,10 @@ pub async fn run(args: Args) -> Result<()> {
     // The selector's spinner can still override this interactively (see `execute`).
     let delay = effective_delay(args.delay, ctx.config.capture.delay);
 
-    let paths = execute(ctx, selection, args.cursor, sinks, args.edit, delay).await?;
+    // Effective cursor: `--cursor` turns it on, otherwise `[capture].cursor` decides.
+    let cursor = effective_cursor(args.cursor, ctx.config.capture.cursor);
+
+    let paths = execute(ctx, selection, cursor, sinks, args.edit, delay).await?;
     for p in &paths {
         println!("{}", p.display());
     }
@@ -97,6 +100,17 @@ pub async fn run(args: Args) -> Result<()> {
 /// `None` so the sleep is a true no-op rather than a vacuous zero-length sleep round-trip.
 pub fn effective_delay(cli: Option<u32>, config: Option<u32>) -> Option<u32> {
     cli.or(config).filter(|n| *n > 0)
+}
+
+/// Resolve whether to include the cursor: `[capture].cursor` sets the default and the
+/// `--cursor` flag turns it on.
+///
+/// This ORs rather than overrides because `--cursor` is a bare boolean flag — its absence
+/// means "not requested", not "requested off", so letting it override would make the config
+/// field unusable. Users who set `cursor = true` and want it off for one capture toggle it
+/// in the interactive selector, which does carry three-state intent.
+pub fn effective_cursor(cli: bool, config: bool) -> bool {
+    cli || config
 }
 
 /// Resolve the effective default [`ClipboardKind`] using the documented precedence:
@@ -245,8 +259,11 @@ pub async fn execute(
 
 /// Emit a best-effort success notification for a freshly written screenshot. Behind the
 /// `notify` feature so non-notify builds compile cleanly without a stub call.
+///
+/// Shared with the draw overlay's Save path (`crate::ui::overlay`) so both save routes
+/// notify identically.
 #[inline]
-fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _png: &[u8]) {
+pub(crate) fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _png: &[u8]) {
     #[cfg(feature = "notify")]
     crate::notify::notify_success(_config, _paths, _png);
 }
@@ -256,21 +273,9 @@ fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _png: &[u8]) 
 /// `execute` can call it directly without going through `crate::ui`.
 #[cfg(feature = "ui")]
 fn base_from_captured(img: &crate::capture::CapturedImage) -> crate::annotate::DocumentBase {
-    let w = img.width as usize;
-    let h = img.height as usize;
-    let row = w * 4;
-    let stride = img.stride as usize;
-    let mut rgba = vec![0u8; row * h];
-    for y in 0..h {
-        let src = &img.pixels[y * stride..y * stride + row];
-        let dst = &mut rgba[y * row..(y + 1) * row];
-        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-            d[0] = s[2];
-            d[1] = s[1];
-            d[2] = s[0];
-            d[3] = s[3];
-        }
-    }
+    // Shares the swizzle with `output::encode_png`. This path used to carry its own scalar
+    // copy, so opening the editor was several times slower than saving the same frame.
+    let rgba = crate::output::bgra_to_rgba(img);
     crate::annotate::DocumentBase {
         pixels: std::sync::Arc::from(rgba.into_boxed_slice()),
         width: img.width,
@@ -593,6 +598,19 @@ mod tests {
     fn effective_delay_collapses_zero_to_none() {
         assert_eq!(effective_delay(Some(0), None), None);
         assert_eq!(effective_delay(None, Some(0)), None);
+    }
+
+    #[rstest]
+    #[case::neither(false, false, false)]
+    #[case::config_only(false, true, true)]
+    #[case::flag_only(true, false, true)]
+    #[case::both(true, true, true)]
+    fn effective_cursor_ors_the_flag_with_the_config(
+        #[case] cli: bool,
+        #[case] config: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(effective_cursor(cli, config), expected);
     }
 
     #[test]

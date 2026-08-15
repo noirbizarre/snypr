@@ -1483,13 +1483,13 @@ fn install_drag(canvas: &AnnotationCanvas) {
                         let color = c
                             .tool_color(ToolKind::Highlight)
                             .unwrap_or([1.0, 1.0, 0.0, 0.35]);
-                        doc.push_layer(Box::new(HighlightTool { bounds: r, color }));
+                        doc.push_layer(Box::new(HighlightTool::new(r, color)));
                     }
                 }
                 ToolKind::Redact => {
                     let r = drag_rect(stroke.from, stroke.to);
                     if r.w >= 2 && r.h >= 2 {
-                        doc.push_layer(Box::new(RedactTool { bounds: r }));
+                        doc.push_layer(Box::new(RedactTool::new(r)));
                     }
                 }
                 ToolKind::Freehand => {
@@ -1497,12 +1497,11 @@ fn install_drag(canvas: &AnnotationCanvas) {
                         let stroke_color = c
                             .tool_color(ToolKind::Freehand)
                             .unwrap_or([1.0, 0.0, 0.0, 1.0]);
-                        doc.push_layer(Box::new(FreehandTool {
-                            points: stroke.points,
-                            stroke: stroke_color,
-                            stroke_width: 3.0,
-                            stroke_style: stroke.style,
-                        }));
+                        doc.push_layer(Box::new(FreehandTool::new(
+                            stroke.points,
+                            stroke_color,
+                            stroke.style,
+                        )));
                     }
                 }
                 ToolKind::Crop => {
@@ -1518,11 +1517,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     let r = drag_rect(stroke.from, stroke.to);
                     let clamped = clamp_to_doc(r, doc.size);
                     if clamped.w >= 2 && clamped.h >= 2 {
-                        doc.push_layer(Box::new(BlurTool {
-                            bounds: clamped,
-                            radius: 12.0,
-                            invert: stroke.invert,
-                        }));
+                        doc.push_layer(Box::new(BlurTool::new(clamped, stroke.invert)));
                     }
                 }
                 ToolKind::Number | ToolKind::Text | ToolKind::Select => {}
@@ -1648,15 +1643,9 @@ fn place_number(c: &AnnotationCanvas, x: f64, y: f64) {
     let fill = c
         .tool_color(ToolKind::Number)
         .unwrap_or([0.9, 0.1, 0.1, 1.0]);
-    doc_rc.borrow_mut().push_layer(Box::new(NumberTool {
-        center: (x, y),
-        radius: 18.0,
-        value,
-        fill,
-        // White stays hardcoded — the picker drives only the disc fill so digits keep their
-        // contrast guarantee regardless of which color the user picks for the marker.
-        text_color: [1.0, 1.0, 1.0, 1.0],
-    }));
+    doc_rc
+        .borrow_mut()
+        .push_layer(Box::new(NumberTool::new((x, y), value, fill)));
     c.queue_draw();
     notify_commit(c);
 }

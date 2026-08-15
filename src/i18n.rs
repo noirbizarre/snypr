@@ -64,6 +64,10 @@ pub fn init(explicit: Option<&str>) {
     if let Err(err) = i18n_embed::select(&*LANGUAGE_LOADER, &Localizations, &requested) {
         tracing::warn!(error = ?err, "i18n locale selection failed; using fallback");
     }
+    // Fluent wraps interpolated variables in U+2068/U+2069 bidi isolation marks by default.
+    // Terminals and notification daemons render those as stray boxes, and none of our
+    // messages mix scripts, so turn them off.
+    LANGUAGE_LOADER.set_use_isolating(false);
 }
 
 fn parse_lang(s: &str) -> Option<LanguageIdentifier> {

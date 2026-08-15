@@ -9,6 +9,22 @@ pub struct FreehandTool {
     pub stroke_style: StrokeStyle,
 }
 
+/// Default stroke width, matching [`ArrowTool`](super::arrow::ArrowTool) and
+/// [`LineTool`](super::line::LineTool): freehand strokes read as pen marks rather than as
+/// the thinner geometric outlines used by Rect / Ellipse.
+pub const DEFAULT_STROKE_WIDTH: f32 = 3.0;
+
+impl FreehandTool {
+    pub fn new(points: Vec<(f64, f64)>, stroke: [f32; 4], stroke_style: StrokeStyle) -> Self {
+        Self {
+            points,
+            stroke,
+            stroke_width: DEFAULT_STROKE_WIDTH,
+            stroke_style,
+        }
+    }
+}
+
 impl Tool for FreehandTool {
     fn kind(&self) -> ToolKind {
         ToolKind::Freehand
@@ -41,8 +57,7 @@ impl Tool for FreehandTool {
         if self.points.is_empty() {
             return false;
         }
-        let r = self.bounds();
-        x >= r.x as f64 && x <= r.right() as f64 && y >= r.y as f64 && y <= r.bottom() as f64
+        super::rect_hit_test(self.bounds(), x, y)
     }
     fn translate(&mut self, dx: f64, dy: f64) {
         for p in &mut self.points {
@@ -65,6 +80,19 @@ impl Tool for FreehandTool {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn new_applies_the_default_stroke_width() {
+        let t = FreehandTool::new(
+            vec![(0.0, 0.0), (10.0, 5.0)],
+            [0.0, 1.0, 0.0, 1.0],
+            StrokeStyle::Dashed,
+        );
+        assert_eq!(t.points.len(), 2);
+        assert_eq!(t.stroke, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(t.stroke_width, DEFAULT_STROKE_WIDTH);
+        assert_eq!(t.stroke_style, StrokeStyle::Dashed);
+    }
 
     #[test]
     fn translate_shifts_every_point() {

@@ -22,7 +22,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use gtk4::glib;
 use gtk4::glib::subclass::prelude::*;
 use gtk4::graphene;
@@ -503,10 +503,7 @@ fn run_gtk(
     let exit = app.run_with_args::<&str>(&[]);
     let code: i32 = exit.into();
     send_once(&tx, Err(anyhow!("selector closed without a selection")));
-    if code != 0 {
-        bail!("GTK exited with status {code}");
-    }
-    Ok(())
+    crate::ui::check_gtk_exit(code)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -526,12 +523,7 @@ fn build_overlays(
 ) -> Result<()> {
     crate::ui::style::install();
 
-    let display = gdk4::Display::default().ok_or_else(|| anyhow!("no GDK display available"))?;
-    let monitors_list = display.monitors();
-    let n = monitors_list.n_items();
-    if n == 0 {
-        bail!("no monitors reported by GDK");
-    }
+    let (monitors_list, n) = crate::ui::monitors()?;
 
     // Build the per-monitor info list up front so we can resolve the focused monitor's
     // connector → index mapping before seeding the shared selection state.

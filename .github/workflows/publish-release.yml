@@ -49,7 +49,8 @@ jobs:
         run: cargo build --release --locked
 
       # The layout mirrors the packager table in the README, rooted at the
-      # tarball prefix, so `snypr-bin` only has to `cp -a` it into `$pkgdir/usr`.
+      # tarball prefix, so `snypr-bin` installs straight out of it without
+      # having to build or relocate anything.
       - name: Stage the tarball
         env:
           TAG: ${{ inputs.tag }}

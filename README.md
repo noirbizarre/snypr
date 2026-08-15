@@ -7,15 +7,15 @@ A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https:
 Snypr pulls together what currently requires three separate tools on a Wayland desktop:
 
 - **Capture** — like [`grim`](https://sr.ht/~emersion/grim/) / [HyprCapture](https://github.com/gfhdhytghd/HyprCapture), but native and integrated.
-- **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, ellipse, highlight, blur, text, freehand, numbered marker, redact, crop. A built-in Select mode (active when no tool is) moves, resizes, and re-edits shapes you've already drawn.
+- **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, ellipse, line, highlight, blur, text, freehand, numbered marker, redact, crop. A built-in Select mode (active when no tool is) moves, resizes, and re-edits shapes you've already drawn.
 - **Draw live on the screen** — like [Draw-On-Gnome](https://github.com/daveprowse/Draw-On-Gnome) but on wlroots / Hyprland, ideal for streaming and Google Meet presentations.
 
 Screen capture talks the `zwlr_screencopy_manager_v1` Wayland protocol directly; UI is GTK4 with `gtk4-layer-shell`, and the annotation canvas uses GSK render nodes for GPU-accelerated drawing.
 
 ## Status
 
-The four subcommands are wired end-to-end. All ten annotation tools (Rect, Ellipse, Arrow,
-Highlight, Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on
+The four subcommands are wired end-to-end. All eleven annotation tools (Rect, Ellipse, Arrow,
+Line, Highlight, Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on
 screen and flatten to PNG through Cairo on save. With no tool active, a Select mode picks an
 existing shape to move it, resize it via drag handles, re-edit text, or delete it.
 
@@ -23,7 +23,7 @@ existing shape to move it, resize it via drag handles, re-edit text, or delete i
 | ------------- | --------------------------------------------------------------------------------- |
 | `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the in-place annotation overlay before sinks |
 | `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools; Ctrl+S saves via the zone selector |
-| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`, `PassthroughToggle`; tray (StatusNotifierItem) when enabled in config |
+| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`, `PassthroughToggle`; tray (StatusNotifierItem) with `--systray` |
 | `doctor`      | Markdown diagnostic report covering version, environment, configuration and live capability probes (Hyprland IPC, wlr-screencopy, daemon socket) |
 
 ## Build
@@ -33,7 +33,8 @@ mise run build           # cargo build
 mise run test            # cargo nextest run
 mise run lint            # cargo clippy --all-targets --all-features -- -Dclippy::all
 mise run fmt             # cargo fmt --all
-mise run cover           # cargo llvm-cov nextest
+mise run cover           # cargo llvm-cov nextest --all-features
+mise run spell           # typos
 ```
 
 ### Build dependencies
@@ -127,12 +128,15 @@ The source tree ships these artifacts ready to install under `$PREFIX`
 | `$PREFIX/share/applications/noirbizar.re.Snypr.desktop`          | Standalone launcher with Screenshot/Draw actions |
 | `$PREFIX/share/applications/noirbizar.re.Snypr.Daemon.desktop`   | Visible launcher for `snypr daemon --systray` |
 | `$PREFIX/share/man/man1/snypr.1`                                 | `docs/man/snypr.1`                            |
+| `$PREFIX/share/licenses/$pkgname/LICENSE`                        | `LICENSE`                                     |
+| `$PREFIX/share/doc/$pkgname/README.md`                           | `README.md`                                   |
 
 After installation, package post-install hooks should run
 `update-desktop-database` against `$PREFIX/share/applications` and
 `gtk-update-icon-cache -qtf $PREFIX/share/icons/hicolor`. On Arch both are
-handled by the `desktop-file-utils` and `hicolor-icon-theme` hooks, so the
-PKGBUILDs in `packaging/aur/` carry no `.install` file.
+handled by the `desktop-file-utils` and `hicolor-icon-theme` hooks, both of
+which the PKGBUILDs in `packaging/aur/` list in `depends`, so they carry no
+`.install` file.
 
 The standalone `.desktop` exposes three launcher actions (visible via
 right-click in most launchers): **Take Screenshot (region)**, **Take
@@ -151,7 +155,8 @@ snypr screenshot --full --to file=/tmp/shot.png
 # the screenshot is written to $XDG_PICTURES_DIR/Screenshots/.
 snypr screenshot --full
 
-# One file per output (uses {output} in the filename template).
+# One file per output. `{output}` is inserted into the filename template
+# automatically when the template does not already contain it.
 snypr screenshot --full --per-output
 
 # Specific output by name, copied to the clipboard.
@@ -161,11 +166,17 @@ snypr screenshot --output DP-1 --to clipboard
 # selection (middle-click paste). Per-sink form: --to clipboard=primary.
 snypr screenshot --full --to clipboard --clipboard-type both
 
-# Focused window, queried over Hyprland IPC.
+# Focused monitor, queried over Hyprland IPC.
 snypr screenshot --focused
+
+# Currently active window, queried over Hyprland IPC.
+snypr screenshot --window
 
 # Explicit region (logical pixels): X,Y,WxH.
 snypr screenshot --region 100,200,800x600 --to file
+
+# Open the interactive selector explicitly (also the default with no selection flag).
+snypr screenshot --interactive
 
 # Interactive region selector → in-place annotation overlay → sinks.
 snypr screenshot --edit --to clipboard --to file
@@ -173,6 +184,12 @@ snypr screenshot --edit --to clipboard --to file
 # Live draw-on-screen overlay (see the keybind table below for the full tool list,
 # Ctrl+Z undo, P passthrough, Esc quit).
 snypr draw --to file --to clipboard --cursor
+
+# Run the daemon (IPC server) on a custom socket path.
+snypr daemon --socket /run/user/1000/snypr.sock
+
+# Live overlay opened with pointer passthrough already on (clicks fall through).
+snypr draw --passthrough
 
 # Run the daemon (IPC server; add `--systray` for a StatusNotifierItem icon).
 snypr daemon
@@ -183,16 +200,19 @@ snypr screenshot --full --via-daemon
 
 ### Interactive selector
 
-The selector (used by `screenshot --edit` and the default `screenshot`) shows a floating
+The selector (shown by `screenshot` with no explicit selection flag, or with
+`--interactive`) shows a floating
 toolbar on the focused monitor with four modes — **Full**, **Screen**, **Window**,
-**Region** — plus a cursor toggle and a **Capture** button. The toolbar follows keyboard
+**Region** — plus a cursor toggle, a delay spinner, and a **Capture** button. The toolbar follows keyboard
 focus: it moves to whichever monitor you focus, while every monitor keeps its dimming
 overlay. Hold `Shift` while clicking Capture (the button's icon swaps live) to *also* open
 the in-place editor on the captured image. Keyboard shortcuts: `1/2/3/4` switch modes, drag
 with the mouse in Region mode, click on a monitor in Screen mode, then press `Enter`
-(Capture) or `Shift+Enter` (Capture + Annotate) to commit. `Esc` cancels.
+(Capture) or `Shift+Enter` / `Shift+KP_Enter` (Capture + Annotate) to commit. `Esc` cancels.
 
 ### Editor & overlay keybinds
+
+These are currently fixed and not configurable.
 
 | Key      | Action                       |
 | -------- | ---------------------------- |
@@ -204,7 +224,7 @@ with the mouse in Region mode, click on a monitor in Screen mode, then press `En
 | `F`      | Freehand tool                |
 | `N`      | Numbered marker              |
 | `T`      | Text                         |
-| `B`      | Blur (editor only)           |
+| `B`      | Blur                         |
 | `X`      | Redact (solid black)         |
 | `C`      | Crop (editor only)           |
 | `Ctrl+Z` | Undo last layer              |
@@ -273,13 +293,17 @@ hl.bind("SUPER + Print", hl.dsp.exec_cmd("snypr screenshot"))
 hl.bind("SUPER + SHIFT + Print",
     hl.dsp.exec_cmd("snypr screenshot --full --to file"))
 
--- One PNG per monitor (uses {output} in the filename template).
+-- One PNG per monitor; {output} is inserted into the template automatically.
 hl.bind("SUPER + SHIFT + ALT + Print",
     hl.dsp.exec_cmd("snypr screenshot --full --per-output --to file"))
 
--- Currently focused window (queried over Hyprland IPC), copied to the clipboard.
+-- Currently focused monitor (queried over Hyprland IPC), copied to the clipboard.
 hl.bind("SUPER + CTRL + Print",
     hl.dsp.exec_cmd("snypr screenshot --focused --to clipboard"))
+
+-- Currently active window (queried over Hyprland IPC), copied to the clipboard.
+hl.bind("SUPER + CTRL + SHIFT + Print",
+    hl.dsp.exec_cmd("snypr screenshot --window --to clipboard"))
 
 -- Live draw-on-screen overlay — ideal for presentations / Google Meet.
 -- See the README keybind table for the full tool/action list; Esc quits.
@@ -320,11 +344,24 @@ end)
 4. Add `-vv` to your bind (e.g. `snypr -vv screenshot`) to upgrade the
    `snypr` log level to trace without needing `RUST_LOG`.
 
+## Environment variables
+
+| Variable | Effect |
+| -------- | ------ |
+| `SNYPR_CONFIG` | Alternative config file path. Equivalent to `--config`. |
+| `SNYPR_LANG` | UI language as a BCP-47 tag. Equivalent to `--lang`. |
+| `RUST_LOG` | Standard `tracing-subscriber` filter. Overridden by `-v` / `-vv`. |
+| `SNYPR_CAPTURE_GRACE_MS` | Milliseconds to wait between dismissing the selector and grabbing pixels (default `30`). Raise it if selector chrome leaks into the capture on a slow compositor. |
+
 ## Configuration
 
 `~/.config/snypr/config.toml` (every field is optional):
 
 ```toml
+# UI language as a BCP-47 tag. Overridden by `--lang` / `SNYPR_LANG`; when unset,
+# falls back to `LC_ALL` / `LC_MESSAGES` / `LANG`, then English. Shipped catalogs: en, fr.
+language = "en"
+
 [output]
 directory          = "/home/me/Pictures/Screenshots"
 filename_template  = "snypr_{date}_{time}_{output}.png"
@@ -335,6 +372,9 @@ use_utc            = false
 compression        = "balanced"
 
 [capture]
+# Include the pointer in captures by default. `--cursor` turns it on for a single
+# invocation; because the flag is a bare boolean it can only enable, so with
+# `cursor = true` use the selector's cursor toggle to leave it out of one capture.
 cursor = false
 # Pre-capture delay in whole seconds. `0` (or omitted) means no delay. The CLI's
 # `--delay SECONDS` flag overrides this value.
@@ -350,20 +390,6 @@ initial_mode = "screen"
 # (Ctrl-V paste, default), `primary` (middle-click paste), or `both`. Overridden
 # per-invocation by `--clipboard-type`, and per-sink by `--to clipboard=KIND`.
 default_kind = "regular"
-
-[keybinds.selector]
-cancel  = "Escape"
-confirm = "Return"
-
-[keybinds.editor]
-save = "<Ctrl>s"
-copy = "<Ctrl>c"
-quit = "Escape"
-
-[keybinds.overlay]
-toggle_passthrough = "p"
-snapshot           = "s"
-quit               = "Escape"
 
 [notify]
 # Emit a desktop notification (with thumbnail) on a successful screenshot.
@@ -406,7 +432,7 @@ Template tokens: `{ts}`, `{date}`, `{time}`, `{output}`, `{selection}`.
 
 ## Architecture
 
-See the design plan at `.opencode/plans/1778929144226-shiny-panda.md` for full details. The crate is a single binary with internal modules:
+The crate is a single binary with internal modules:
 
 ```
 src/
@@ -418,9 +444,11 @@ src/
 ├── bridge.rs    # async <-> GTK glue (gated behind `ui` feature)
 ├── context.rs   # shared Ctx = Arc<Context>
 ├── hypr.rs      # Hyprland IPC
+├── i18n.rs      # Fluent catalogs + the `fl!` macro
 ├── ipc.rs       # daemon protocol
 ├── daemon.rs    # Unix-socket IPC server
 ├── notify.rs    # desktop notifications (gated behind `notify` feature)
+├── path.rs      # tilde expansion helpers
 └── config.rs    # TOML configuration
 ```
 

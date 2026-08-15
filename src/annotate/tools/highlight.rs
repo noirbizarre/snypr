@@ -7,6 +7,12 @@ pub struct HighlightTool {
     pub color: [f32; 4],
 }
 
+impl HighlightTool {
+    pub fn new(bounds: Rect, color: [f32; 4]) -> Self {
+        Self { bounds, color }
+    }
+}
+
 impl Tool for HighlightTool {
     fn kind(&self) -> ToolKind {
         ToolKind::Highlight
@@ -15,8 +21,7 @@ impl Tool for HighlightTool {
         self.bounds
     }
     fn hit_test(&self, x: f64, y: f64) -> bool {
-        let r = self.bounds;
-        x >= r.x as f64 && x <= r.right() as f64 && y >= r.y as f64 && y <= r.bottom() as f64
+        super::rect_hit_test(self.bounds, x, y)
     }
     fn translate(&mut self, dx: f64, dy: f64) {
         self.bounds = self.bounds.translate(dx, dy);
@@ -39,15 +44,22 @@ mod tests {
     use rstest::rstest;
 
     fn tool() -> HighlightTool {
-        HighlightTool {
-            bounds: Rect {
+        HighlightTool::new(
+            Rect {
                 x: 10,
                 y: 20,
                 w: 30,
                 h: 40,
             },
-            color: [1.0, 1.0, 0.0, 0.4],
-        }
+            [1.0, 1.0, 0.0, 0.4],
+        )
+    }
+
+    #[test]
+    fn new_keeps_the_bounds_and_color_it_was_given() {
+        let t = tool();
+        assert_eq!(t.bounds.x, 10);
+        assert_eq!(t.color, [1.0, 1.0, 0.0, 0.4]);
     }
 
     #[test]

@@ -28,8 +28,7 @@ impl Tool for RectTool {
         self.bounds
     }
     fn hit_test(&self, x: f64, y: f64) -> bool {
-        let r = self.bounds;
-        x >= r.x as f64 && x <= r.right() as f64 && y >= r.y as f64 && y <= r.bottom() as f64
+        super::rect_hit_test(self.bounds, x, y)
     }
     fn translate(&mut self, dx: f64, dy: f64) {
         self.bounds = self.bounds.translate(dx, dy);
@@ -49,6 +48,27 @@ impl Tool for RectTool {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    fn tool() -> RectTool {
+        RectTool::new(Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        })
+    }
+
+    /// Closed on every edge, unlike `Rect::contains`: a click exactly on the right or
+    /// bottom border is a click on the shape as far as the user is concerned.
+    #[rstest]
+    #[case::inside(15.0, 25.0, true)]
+    #[case::right_edge(40.0, 25.0, true)]
+    #[case::bottom_edge(15.0, 60.0, true)]
+    #[case::just_outside(40.1, 25.0, false)]
+    fn hit_test_uses_closed_bounds(#[case] x: f64, #[case] y: f64, #[case] expected: bool) {
+        assert_eq!(tool().hit_test(x, y), expected);
+    }
 
     #[test]
     fn translate_shifts_bounds() {

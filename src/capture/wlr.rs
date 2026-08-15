@@ -170,7 +170,7 @@ fn capture_blocking(selection: Selection, cursor: bool) -> Result<Vec<CapturedIm
 
     for slot in data.frames.iter_mut() {
         let pool = data.pool.as_mut().expect("pool just installed");
-        let format = wl_shm_format(slot.format.unwrap());
+        let format = wl_shm_format(slot.format.expect("buffer event set the format"));
         let (buffer, _canvas) = pool
             .create_buffer(
                 slot.width as i32,

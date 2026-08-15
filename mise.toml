@@ -21,8 +21,8 @@ actionlint = "latest"
 "aqua:koalaman/shellcheck" = "latest"
 
 [tasks.default]
-description = "Run fmt, lint, build and test"
-depends = ["fmt", "lint", "lint:actions", "build", "test"]
+description = "Run fmt, lint, spell, build and test"
+depends = ["fmt", "lint", "lint:actions", "spell", "build", "test"]
 
 [tasks.test]
 description = "Run tests with selectors"
@@ -31,7 +31,9 @@ run = 'cargo nextest run'
 
 [tasks.cover]
 description = "Run tests with coverage"
-run = "cargo llvm-cov nextest"
+# `--all-features` mirrors the CI invocation so local numbers match what
+# Codecov gates on.
+run = "cargo llvm-cov nextest --all-features"
 
 [tasks.build]
 description = "Build the binaries"
@@ -144,4 +146,3 @@ run = """
 resvg docs/images/social-preview.svg docs/images/social-preview.png
 echo "docs/images/social-preview.png — upload under Settings > General > Social preview"
 """
-

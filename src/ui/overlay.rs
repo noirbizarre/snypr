@@ -38,9 +38,7 @@ use crate::annotate::{Document, DocumentBase, ToolKind};
 use crate::capture::region::{Rect, slice_pixels};
 use crate::capture::{CapturedImage, Capturer};
 use crate::cli::SinkSpec;
-use crate::config::FilenameContext;
 use crate::context::Ctx;
-use crate::output::Outputs;
 use crate::ui::canvas::AnnotationCanvas;
 use crate::ui::save::{SaveFn, sinks_save_fn};
 use crate::ui::selector;
@@ -117,7 +115,12 @@ pub async fn run(
     .map_err(|e| anyhow!("overlay task panicked: {e}"))??;
     rx.recv()
         .map_err(|e| anyhow!("overlay channel closed without a result: {e}"))??;
-    Ok(std::mem::take(&mut written.lock().unwrap()))
+    // Recover from poisoning rather than panicking or dropping: the guarded value is a plain
+    // list of written paths, so a panic elsewhere cannot have left it inconsistent, and
+    // silently returning nothing would tell the caller the save produced no files.
+    Ok(std::mem::take(
+        &mut written.lock().unwrap_or_else(|e| e.into_inner()),
+    ))
 }
 
 type CanvasRegistry = Rc<RefCell<Vec<MonitorCanvas>>>;
@@ -209,10 +212,7 @@ fn run_gtk(
     // Treat a normal quit (Esc / Save / external shutdown) as success. If the channel still has
     // a slot, fill it so the caller's recv() doesn't dangle.
     send_once(&tx, Ok(()));
-    if code != 0 {
-        bail!("GTK exited with status {code}");
-    }
-    Ok(())
+    crate::ui::check_gtk_exit(code)
 }
 
 /// Wire an external shutdown receiver into the GTK main context so a daemon-driven toggle can
@@ -281,12 +281,7 @@ fn build_overlays(
 ) -> Result<Shared> {
     crate::ui::style::install();
 
-    let display = gdk4::Display::default().ok_or_else(|| anyhow!("no GDK display available"))?;
-    let monitors_list = display.monitors();
-    let n = monitors_list.n_items();
-    if n == 0 {
-        bail!("no monitors reported by GDK");
-    }
+    let (monitors_list, n) = crate::ui::monitors()?;
 
     let (initial_passthrough, edit, draw_save) = match mode {
         OverlayMode::Draw {
@@ -373,6 +368,7 @@ fn build_overlays(
         draw_save,
         blur_capture_in_flight: Rc::new(Cell::new(false)),
         annotate_colors: Rc::new(ctx.config.annotate.colors.clone()),
+        notify: Rc::new(ctx.config.notify.clone()),
         // Edit mode mirrors the selector's `dim_strong` veil around the captured slice so
         // the visual context the user just had in the region selector persists into the
         // annotation editor. `None` in Draw mode keeps the overlay fully transparent.
@@ -476,6 +472,10 @@ struct Shared {
     /// [`AnnotationCanvas`] in [`spawn_monitor_overlay`]. Cloned from
     /// `ctx.config.annotate.colors` in [`build_overlays`].
     annotate_colors: Rc<crate::config::AnnotateColors>,
+    /// Notification settings, so failures raised inside the overlay reach the user instead
+    /// of only the log. The overlay stays up after a failed Save and the process still
+    /// exits 0, so `main`'s top-level `notify_error` never fires for these.
+    notify: Rc<crate::config::NotifyConfig>,
     /// Color for the [`EditVeil`] strips painted around the captured slice in Edit mode.
     /// Sourced from `ctx.config.ui.selector.dim_strong` so the annotation editor reuses the
     /// exact veil the user just saw in the region selector. Unused in Draw mode.
@@ -719,6 +719,22 @@ fn apply_passthrough_state(
 /// the canvas registry lazily, so it sees every canvas by the time the user interacts. The
 /// picker swatches are seeded separately by [`seed_toolbar_from_canvas`] after the canvases are
 /// built.
+/// Log an overlay failure *and* surface it to the user.
+///
+/// The overlay survives most failures and the process still exits 0, so `main`'s top-level
+/// `notify_error` never runs for them — without this the user gets no feedback at all.
+fn report_overlay_error(
+    notify: &crate::config::NotifyConfig,
+    context: &'static str,
+    err: &anyhow::Error,
+) {
+    tracing::error!(error = ?err, "{context}");
+    #[cfg(feature = "notify")]
+    crate::notify::notify_error(notify, err);
+    #[cfg(not(feature = "notify"))]
+    let _ = notify;
+}
+
 fn wire_toolbar(shared: &Shared) {
     let canvases = shared.canvases.clone();
     let windows = shared.windows.clone();
@@ -730,6 +746,7 @@ fn wire_toolbar(shared: &Shared) {
     let app_weak = shared.app_weak.clone();
     let focus_shutdown = shared.focus_shutdown.clone();
     let blur_in_flight = shared.blur_capture_in_flight.clone();
+    let notify = shared.notify.clone();
 
     let toolbar = shared.host.toolbar();
     toolbar.connect(move |action| match action {
@@ -827,9 +844,9 @@ fn wire_toolbar(shared: &Shared) {
                             }
                             tear_down(&windows, &focus_shutdown, &app_weak);
                         }
-                        Err(err) => tracing::error!(error = ?err, "save failed"),
+                        Err(err) => report_overlay_error(&notify, "save failed", &err),
                     },
-                    Err(err) => tracing::error!(error = ?err, "composing edit failed"),
+                    Err(err) => report_overlay_error(&notify, "composing edit failed", &err),
                 }
             } else if let Some(draw_save) = draw_save.as_ref() {
                 // Draw-mode save: hand off to `run_draw_save` on the GLib main context so
@@ -1219,7 +1236,11 @@ async fn run_draw_save(
             if err.chain().any(|e| e.is::<selector::Cancelled>()) {
                 tracing::info!("draw-save: selector cancelled");
             } else {
-                tracing::info!(error = ?err, "draw-save: selector cancelled");
+                report_overlay_error(
+                    &draw_save.app_ctx.config.notify,
+                    "draw-save: selector failed",
+                    &err,
+                );
             }
             toolbar_widget.set_visible(true);
             apply_passthrough_state(&passthrough, &windows, &host, prev_passthrough);
@@ -1249,14 +1270,9 @@ async fn run_draw_save(
             .await
             .map_err(|e| anyhow!("capturing {selection:?}: {e}"))?;
         let stitched = crate::capture::region::stitch(&images, &selection)?;
-        let png = crate::output::encode_png(&stitched, app_ctx.config.output.compression)?;
-        let ctx_fname = FilenameContext {
-            output: None,
-            selection: Some(label),
-        };
-        let outputs = Outputs::from_specs(&sinks, &app_ctx, &ctx_fname)?;
-        let paths = outputs.write_png(&png).await?;
-        anyhow::Ok(paths)
+        // Shared with the annotation editor's save closure, so both routes encode, fan out
+        // to sinks, notify and record paths identically.
+        crate::ui::save::encode_and_write(&app_ctx, &sinks, &stitched, label, &collected).await
     });
 
     match join.await {
@@ -1269,12 +1285,17 @@ async fn run_draw_save(
                 "draw-save: wrote {} path(s)",
                 paths.len()
             );
-            if let Ok(mut g) = collected.lock() {
-                g.extend(paths.iter().cloned());
-            }
         }
-        Ok(Err(err)) => tracing::error!(error = ?err, "draw-save: capture/write failed"),
-        Err(err) => tracing::error!(error = ?err, "draw-save: capture task panicked"),
+        Ok(Err(err)) => report_overlay_error(
+            &draw_save.app_ctx.config.notify,
+            "draw-save: capture/write failed",
+            &err,
+        ),
+        Err(err) => report_overlay_error(
+            &draw_save.app_ctx.config.notify,
+            "draw-save: capture task panicked",
+            &anyhow!("{err}"),
+        ),
     }
 
     toolbar_widget.set_visible(true);

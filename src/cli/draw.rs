@@ -44,14 +44,14 @@ pub struct Args {
 }
 
 #[cfg(feature = "ui")]
-pub async fn run(args: Args) -> Result<()> {
+pub async fn run(args: Args, config_override: Option<&std::path::Path>) -> Result<()> {
     use anyhow::Context as _;
 
     use crate::config::Config;
     use crate::context::Context;
     use crate::ui::overlay::{OverlayMode, run as run_overlay};
 
-    let config = Config::load_default().context("loading configuration")?;
+    let config = Config::resolve(config_override).context("loading configuration")?;
     let ctx = Context::new(config).await?;
     let kind = crate::cli::screenshot::effective_clipboard_kind(args.clipboard_type, &ctx.config);
     let sinks: Vec<SinkSpec> = args
@@ -59,12 +59,18 @@ pub async fn run(args: Args) -> Result<()> {
         .into_iter()
         .map(|s| s.resolve_clipboard_default(kind))
         .collect();
+    // `--cursor` turns the cursor on, otherwise `[capture].cursor` decides. Resolved before
+    // `ctx` is moved into the overlay.
+    let cursor = crate::cli::screenshot::effective_cursor(args.cursor, ctx.config.capture.cursor);
+    // The returned paths are deliberately discarded: Draw-mode save is non-terminating and
+    // may fire many times, so `run_draw_save` prints each batch as it lands rather than
+    // waiting for the overlay to close. Printing again here would duplicate every line.
     let _ = run_overlay(
         ctx,
         OverlayMode::Draw {
             passthrough: args.passthrough,
             sinks,
-            cursor: args.cursor,
+            cursor,
         },
         None,
         None,
@@ -74,6 +80,6 @@ pub async fn run(args: Args) -> Result<()> {
 }
 
 #[cfg(not(feature = "ui"))]
-pub async fn run(_args: Args) -> Result<()> {
+pub async fn run(_args: Args, _config_override: Option<&std::path::Path>) -> Result<()> {
     anyhow::bail!("{}", crate::i18n::fl!("error-draw-requires-ui-feature"))
 }
