@@ -212,6 +212,8 @@ with the mouse in Region mode, click on a monitor in Screen mode, then press `En
 
 ### Editor & overlay keybinds
 
+These are currently fixed and not configurable.
+
 | Key      | Action                       |
 | -------- | ---------------------------- |
 | `R`      | Rectangle tool               |
@@ -385,20 +387,6 @@ initial_mode = "screen"
 # (Ctrl-V paste, default), `primary` (middle-click paste), or `both`. Overridden
 # per-invocation by `--clipboard-type`, and per-sink by `--to clipboard=KIND`.
 default_kind = "regular"
-
-[keybinds.selector]
-cancel  = "Escape"
-confirm = "Return"
-
-[keybinds.editor]
-save = "<Ctrl>s"
-copy = "<Ctrl>c"
-quit = "Escape"
-
-[keybinds.overlay]
-toggle_passthrough = "p"
-snapshot           = "s"
-quit               = "Escape"
 
 [notify]
 # Emit a desktop notification (with thumbnail) on a successful screenshot.

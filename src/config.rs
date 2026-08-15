@@ -1,6 +1,5 @@
 //! TOML configuration loaded from `$XDG_CONFIG_HOME/snypr/config.toml`.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -19,7 +18,6 @@ pub struct Config {
     pub output: OutputConfig,
     pub capture: CaptureConfig,
     pub clipboard: ClipboardConfig,
-    pub keybinds: KeybindConfig,
     pub notify: NotifyConfig,
     pub ui: UiConfig,
     pub annotate: AnnotateConfig,
@@ -159,38 +157,6 @@ pub struct ClipboardConfig {
     /// Default selection target for `--to clipboard`. Defaults to
     /// [`ClipboardKind::Regular`] (the Ctrl-V clipboard).
     pub default_kind: ClipboardKind,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct KeybindConfig {
-    pub selector: HashMap<String, String>,
-    pub editor: HashMap<String, String>,
-    pub overlay: HashMap<String, String>,
-}
-
-impl Default for KeybindConfig {
-    fn default() -> Self {
-        let mut selector = HashMap::new();
-        selector.insert("cancel".to_owned(), "Escape".to_owned());
-        selector.insert("confirm".to_owned(), "Return".to_owned());
-
-        let mut editor = HashMap::new();
-        editor.insert("save".to_owned(), "<Ctrl>s".to_owned());
-        editor.insert("copy".to_owned(), "<Ctrl>c".to_owned());
-        editor.insert("quit".to_owned(), "Escape".to_owned());
-
-        let mut overlay = HashMap::new();
-        overlay.insert("toggle_passthrough".to_owned(), "p".to_owned());
-        overlay.insert("snapshot".to_owned(), "s".to_owned());
-        overlay.insert("quit".to_owned(), "Escape".to_owned());
-
-        Self {
-            selector,
-            editor,
-            overlay,
-        }
-    }
 }
 
 /// UI-styling overrides. Currently scopes only to the selector overlay; future
@@ -1091,50 +1057,6 @@ mod tests {
         };
         let [r, g, b, a] = c.to_f32_array();
         assert_eq!(Color::from_rgba_f32(r, g, b, a), c);
-    }
-
-    #[test]
-    fn keybind_defaults_cover_every_surface() {
-        let k = KeybindConfig::default();
-        assert_eq!(k.selector.get("cancel").map(String::as_str), Some("Escape"));
-        assert_eq!(
-            k.selector.get("confirm").map(String::as_str),
-            Some("Return")
-        );
-        assert_eq!(k.editor.get("save").map(String::as_str), Some("<Ctrl>s"));
-        assert_eq!(k.editor.get("copy").map(String::as_str), Some("<Ctrl>c"));
-        assert_eq!(k.editor.get("quit").map(String::as_str), Some("Escape"));
-        assert_eq!(k.overlay.get("snapshot").map(String::as_str), Some("s"));
-        assert_eq!(
-            k.overlay.get("toggle_passthrough").map(String::as_str),
-            Some("p")
-        );
-        assert_eq!(k.overlay.get("quit").map(String::as_str), Some("Escape"));
-    }
-
-    #[test]
-    fn keybind_config_round_trips_through_toml() {
-        let k = KeybindConfig::default();
-        let text = toml::to_string(&k).unwrap();
-        assert_eq!(toml::from_str::<KeybindConfig>(&text).unwrap(), k);
-    }
-
-    /// A partial `[keybinds]` table must not wipe the other surfaces — that's what the
-    /// `#[serde(default)]` on the struct buys us.
-    #[test]
-    fn partial_keybind_table_keeps_the_other_surfaces_at_their_defaults() {
-        let cfg: Config = toml::from_str(
-            r#"
-            [keybinds.selector]
-            cancel = "q"
-        "#,
-        )
-        .unwrap();
-        assert_eq!(
-            cfg.keybinds.selector.get("cancel").map(String::as_str),
-            Some("q")
-        );
-        assert_eq!(cfg.keybinds.editor, KeybindConfig::default().editor);
     }
 
     #[test]
