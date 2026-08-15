@@ -51,9 +51,10 @@ pub fn sinks_save_fn(
         );
         #[cfg(feature = "notify")]
         crate::notify::notify_success(&app_ctx.config, &paths, &png);
-        if let Ok(mut g) = collected.lock() {
-            g.extend(paths.iter().cloned());
-        }
+        collected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(paths.iter().cloned());
         Ok(paths)
     })
 }

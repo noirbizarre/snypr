@@ -117,7 +117,12 @@ pub async fn run(
     .map_err(|e| anyhow!("overlay task panicked: {e}"))??;
     rx.recv()
         .map_err(|e| anyhow!("overlay channel closed without a result: {e}"))??;
-    Ok(std::mem::take(&mut written.lock().unwrap()))
+    // Recover from poisoning rather than panicking or dropping: the guarded value is a plain
+    // list of written paths, so a panic elsewhere cannot have left it inconsistent, and
+    // silently returning nothing would tell the caller the save produced no files.
+    Ok(std::mem::take(
+        &mut written.lock().unwrap_or_else(|e| e.into_inner()),
+    ))
 }
 
 type CanvasRegistry = Rc<RefCell<Vec<MonitorCanvas>>>;
@@ -1298,9 +1303,10 @@ async fn run_draw_save(
                 "draw-save: wrote {} path(s)",
                 paths.len()
             );
-            if let Ok(mut g) = collected.lock() {
-                g.extend(paths.iter().cloned());
-            }
+            collected
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(paths.iter().cloned());
         }
         Ok(Err(err)) => report_overlay_error(
             &draw_save.app_ctx.config.notify,
