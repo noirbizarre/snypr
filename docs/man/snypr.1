@@ -177,6 +177,21 @@ overrides the selector chrome colors (\fIoutline\fR, \fIoutline_hover\fR,
 (\fIrect\fR, \fIellipse\fR, \fIarrow\fR, \fIline\fR, \fIfreehand\fR, \fIhighlight\fR,
 \fInumber\fR, \fItext\fR) as \fB#RRGGBB\fR or \fB#RRGGBBAA\fR hex strings; the
 toolbar color picker still lets the user change colors at runtime.
+.SH ENVIRONMENT
+.TP
+.B SNYPR_CONFIG
+Alternative configuration file path. Equivalent to \fB\-\-config\fR.
+.TP
+.B SNYPR_LANG
+UI language as a BCP-47 tag. Equivalent to \fB\-\-lang\fR.
+.TP
+.B RUST_LOG
+Standard \fItracing-subscriber\fR filter. Overridden by \fB\-v\fR / \fB\-vv\fR.
+.TP
+.B SNYPR_CAPTURE_GRACE_MS
+Grace period, in milliseconds, between dismissing the selector surface and grabbing
+pixels. Defaults to \fB30\fR. Raise it on compositors whose surface teardown is slow
+enough that the selector chrome leaks into the capture.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/snypr/config.toml

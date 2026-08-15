@@ -333,6 +333,15 @@ end)
 4. Add `-vv` to your bind (e.g. `snypr -vv screenshot`) to upgrade the
    `snypr` log level to trace without needing `RUST_LOG`.
 
+## Environment variables
+
+| Variable | Effect |
+| -------- | ------ |
+| `SNYPR_CONFIG` | Alternative config file path. Equivalent to `--config`. |
+| `SNYPR_LANG` | UI language as a BCP-47 tag. Equivalent to `--lang`. |
+| `RUST_LOG` | Standard `tracing-subscriber` filter. Overridden by `-v` / `-vv`. |
+| `SNYPR_CAPTURE_GRACE_MS` | Milliseconds to wait between dismissing the selector and grabbing pixels (default `30`). Raise it if selector chrome leaks into the capture on a slow compositor. |
+
 ## Configuration
 
 `~/.config/snypr/config.toml` (every field is optional):
