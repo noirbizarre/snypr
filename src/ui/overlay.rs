@@ -1256,6 +1256,9 @@ async fn run_draw_save(
         };
         let outputs = Outputs::from_specs(&sinks, &app_ctx, &ctx_fname)?;
         let paths = outputs.write_png(&png).await?;
+        // Same success notification as `screenshot` and the annotation editor: without it
+        // a save from the draw overlay is indistinguishable from a no-op.
+        crate::cli::screenshot::notify_written(&app_ctx.config, &paths, &png);
         anyhow::Ok(paths)
     });
 

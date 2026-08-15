@@ -245,8 +245,11 @@ pub async fn execute(
 
 /// Emit a best-effort success notification for a freshly written screenshot. Behind the
 /// `notify` feature so non-notify builds compile cleanly without a stub call.
+///
+/// Shared with the draw overlay's Save path (`crate::ui::overlay`) so both save routes
+/// notify identically.
 #[inline]
-fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _png: &[u8]) {
+pub(crate) fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _png: &[u8]) {
     #[cfg(feature = "notify")]
     crate::notify::notify_success(_config, _paths, _png);
 }
