@@ -146,4 +146,3 @@ run = """
 resvg docs/images/social-preview.svg docs/images/social-preview.png
 echo "docs/images/social-preview.png — upload under Settings > General > Social preview"
 """
-
