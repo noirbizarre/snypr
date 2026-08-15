@@ -221,3 +221,25 @@ fn redirect_stdio_to_devnull() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    /// Everything else in this module needs a live Wayland data device, but the kind mapping
+    /// is pure — and getting it wrong silently publishes to the wrong selection.
+    #[rstest]
+    #[case(ClipboardKind::Regular, ClipboardType::Regular)]
+    #[case(ClipboardKind::Primary, ClipboardType::Primary)]
+    #[case(ClipboardKind::Both, ClipboardType::Both)]
+    fn clipboard_type_maps_every_kind(
+        #[case] kind: ClipboardKind,
+        #[case] expected: ClipboardType,
+    ) {
+        assert_eq!(
+            format!("{:?}", clipboard_type_for(kind)),
+            format!("{expected:?}")
+        );
+    }
+}

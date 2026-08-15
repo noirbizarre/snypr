@@ -190,4 +190,53 @@ mod tests {
         assert_eq!(doc.layer(0).unwrap().bounds().x, 5);
         assert_eq!(doc.layer(0).unwrap().bounds().y, 7);
     }
+
+    #[test]
+    fn bounds_default_to_the_document_size() {
+        let doc = Document::empty((800, 600));
+        assert_eq!(
+            doc.bounds(),
+            Rect {
+                x: 0,
+                y: 0,
+                w: 800,
+                h: 600
+            }
+        );
+        assert_eq!(doc.layer_count(), 0);
+        assert!(doc.layer(0).is_none());
+    }
+
+    #[test]
+    fn bounds_follow_the_crop_when_one_is_set() {
+        let mut doc = Document::empty((800, 600));
+        let crop = Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        };
+        doc.crop = Some(crop);
+        assert_eq!(doc.bounds(), crop);
+    }
+
+    #[test]
+    fn with_base_takes_its_size_from_the_base_image() {
+        let doc = Document::with_base(DocumentBase {
+            pixels: std::sync::Arc::from(vec![0u8; 4 * 3 * 2].into_boxed_slice()),
+            width: 3,
+            height: 2,
+            stride: 12,
+        });
+        assert_eq!(doc.size, (3, 2));
+        assert_eq!(
+            doc.bounds(),
+            Rect {
+                x: 0,
+                y: 0,
+                w: 3,
+                h: 2
+            }
+        );
+    }
 }

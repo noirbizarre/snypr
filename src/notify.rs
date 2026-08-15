@@ -194,4 +194,17 @@ mod tests {
             "~/Pictures/Screenshots/sub/shot.png"
         );
     }
+
+    #[test]
+    fn display_path_handles_paths_without_a_parent_or_name() {
+        // SAFETY: nextest runs each test in its own process.
+        unsafe {
+            std::env::set_var("HOME", "/home/u");
+        }
+        let default = Path::new("/home/u/Pictures/Screenshots");
+        // The root has no file name, and a bare filename has an empty parent: both must fall
+        // through to the tilde rendering rather than panicking or returning an empty string.
+        assert_eq!(display_path(Path::new("/"), default), "/");
+        assert_eq!(display_path(Path::new("shot.png"), default), "shot.png");
+    }
 }

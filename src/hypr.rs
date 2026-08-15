@@ -404,4 +404,77 @@ mod tests {
             Some("left")
         );
     }
+
+    #[test]
+    fn active_window_rect_maps_position_and_size() {
+        let w = ActiveWindow {
+            title: "term".into(),
+            class: "kitty".into(),
+            at: (-10, 25),
+            size: (800, 600),
+            monitor: "1".into(),
+        };
+        assert_eq!(
+            w.rect(),
+            Rect {
+                x: -10,
+                y: 25,
+                w: 800,
+                h: 600
+            }
+        );
+    }
+
+    /// Force a hermetic environment for the socket-resolution tests. Safe because nextest
+    /// runs every test in its own process.
+    fn set_env(sig: Option<&str>, runtime_dir: Option<&std::path::Path>) {
+        unsafe {
+            match sig {
+                Some(v) => std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", v),
+                None => std::env::remove_var("HYPRLAND_INSTANCE_SIGNATURE"),
+            }
+            match runtime_dir {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn socket_path_requires_the_instance_signature() {
+        set_env(None, None);
+        let err = socket_path_named(".socket.sock").unwrap_err();
+        assert!(
+            err.to_string().contains("HYPRLAND_INSTANCE_SIGNATURE"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[rstest]
+    #[case(".socket.sock")]
+    #[case(".socket2.sock")]
+    fn socket_path_prefers_the_xdg_runtime_dir(#[case] file: &str) {
+        let runtime = tempfile::tempdir().unwrap();
+        let sig = "deadbeef";
+        let dir = runtime.path().join("hypr").join(sig);
+        std::fs::create_dir_all(&dir).unwrap();
+        let expected = dir.join(file);
+        std::fs::write(&expected, b"").unwrap();
+
+        set_env(Some(sig), Some(runtime.path()));
+        assert_eq!(socket_path_named(file).unwrap(), expected);
+    }
+
+    #[test]
+    fn socket_path_reports_both_candidates_when_neither_exists() {
+        let runtime = tempfile::tempdir().unwrap();
+        // A signature that cannot plausibly exist under the legacy /tmp/hypr layout either.
+        let sig = "snypr-test-missing-instance";
+        set_env(Some(sig), Some(runtime.path()));
+
+        let err = socket_path_named(".socket.sock").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(sig), "unexpected error: {msg}");
+        assert!(msg.contains("/tmp/hypr/"), "unexpected error: {msg}");
+    }
 }

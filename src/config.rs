@@ -549,6 +549,7 @@ fn expand_template(template: &str, ctx: &FilenameContext<'_>, utc: bool) -> Stri
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     #[test]
     fn defaults_are_valid() {
@@ -969,5 +970,192 @@ mod tests {
         let err = toml::from_str::<Config>(toml).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("must start with '#'"), "{msg}");
+    }
+
+    fn cfg_with_template(template: &str) -> Config {
+        Config {
+            output: OutputConfig {
+                filename_template: template.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[rstest]
+    // Already contains the token: used verbatim, wherever the token sits.
+    #[case("{output}_{selection}.png", "DP-1_region.png")]
+    #[case("shot-{output}.png", "shot-DP-1.png")]
+    // No token but an extension: `-{output}` goes before the *last* dot.
+    #[case("shot.png", "shot-DP-1.png")]
+    #[case("my.shot.png", "my.shot-DP-1.png")]
+    // No token and no dot at all: appended.
+    #[case("shot", "shot-DP-1")]
+    fn per_output_template_always_varies_with_the_output(
+        #[case] template: &str,
+        #[case] expected: &str,
+    ) {
+        let out = cfg_with_template(template).expand_filename_per_output(&FilenameContext {
+            output: Some("DP-1"),
+            selection: Some("region"),
+        });
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn per_output_filenames_do_not_collide() {
+        let cfg = cfg_with_template("shot.png");
+        let a = cfg.expand_filename_per_output(&FilenameContext {
+            output: Some("DP-1"),
+            ..Default::default()
+        });
+        let b = cfg.expand_filename_per_output(&FilenameContext {
+            output: Some("DP-2"),
+            ..Default::default()
+        });
+        assert_ne!(a, b);
+    }
+
+    #[rstest]
+    #[case(Color { r: 0, g: 0, b: 0, a: 0 }, [0.0, 0.0, 0.0, 0.0])]
+    #[case(Color { r: 255, g: 255, b: 255, a: 255 }, [1.0, 1.0, 1.0, 1.0])]
+    #[case(Color { r: 255, g: 0, b: 51, a: 128 }, [1.0, 0.0, 0.2, 128.0 / 255.0])]
+    fn color_to_f32_array_normalises_channels(#[case] c: Color, #[case] expected: [f32; 4]) {
+        let got = c.to_f32_array();
+        for (i, (g, e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!((g - e).abs() < 1e-6, "channel {i}: {g} != {e}");
+        }
+    }
+
+    #[rstest]
+    #[case(Color { r: 255, g: 0, b: 0, a: 255 }, "rgba(255, 0, 0, 1.0000)")]
+    #[case(Color { r: 1, g: 2, b: 3, a: 0 }, "rgba(1, 2, 3, 0.0000)")]
+    #[case(Color { r: 0, g: 0, b: 0, a: 128 }, "rgba(0, 0, 0, 0.5020)")]
+    fn color_to_css_rgba_formats_alpha_with_four_decimals(
+        #[case] c: Color,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(c.to_css_rgba(), expected);
+    }
+
+    #[rstest]
+    // Saturating and rounding behaviour of the private `f32_to_u8` helper.
+    #[case(-1.0, 0)]
+    #[case(0.0, 0)]
+    #[case(1.0, 255)]
+    #[case(2.0, 255)]
+    #[case(0.5, 128)]
+    fn color_from_f32_clamps_and_rounds(#[case] v: f32, #[case] expected: u8) {
+        assert_eq!(Color::from_rgba_f32(v, v, v, v).r, expected);
+    }
+
+    #[test]
+    fn color_f32_round_trips_through_to_f32_array() {
+        let c = Color {
+            r: 12,
+            g: 34,
+            b: 56,
+            a: 78,
+        };
+        let [r, g, b, a] = c.to_f32_array();
+        assert_eq!(Color::from_rgba_f32(r, g, b, a), c);
+    }
+
+    #[test]
+    fn keybind_defaults_cover_every_surface() {
+        let k = KeybindConfig::default();
+        assert_eq!(k.selector.get("cancel").map(String::as_str), Some("Escape"));
+        assert_eq!(
+            k.selector.get("confirm").map(String::as_str),
+            Some("Return")
+        );
+        assert_eq!(k.editor.get("save").map(String::as_str), Some("<Ctrl>s"));
+        assert_eq!(k.editor.get("copy").map(String::as_str), Some("<Ctrl>c"));
+        assert_eq!(k.editor.get("quit").map(String::as_str), Some("Escape"));
+        assert_eq!(k.overlay.get("snapshot").map(String::as_str), Some("s"));
+        assert_eq!(
+            k.overlay.get("toggle_passthrough").map(String::as_str),
+            Some("p")
+        );
+        assert_eq!(k.overlay.get("quit").map(String::as_str), Some("Escape"));
+    }
+
+    #[test]
+    fn keybind_config_round_trips_through_toml() {
+        let k = KeybindConfig::default();
+        let text = toml::to_string(&k).unwrap();
+        assert_eq!(toml::from_str::<KeybindConfig>(&text).unwrap(), k);
+    }
+
+    /// A partial `[keybinds]` table must not wipe the other surfaces — that's what the
+    /// `#[serde(default)]` on the struct buys us.
+    #[test]
+    fn partial_keybind_table_keeps_the_other_surfaces_at_their_defaults() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [keybinds.selector]
+            cancel = "q"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.keybinds.selector.get("cancel").map(String::as_str),
+            Some("q")
+        );
+        assert_eq!(cfg.keybinds.editor, KeybindConfig::default().editor);
+    }
+
+    #[test]
+    fn save_directory_uses_the_configured_directory_verbatim() {
+        let cfg = Config {
+            output: OutputConfig {
+                directory: Some(PathBuf::from("/tmp/shots")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(cfg.save_directory(), PathBuf::from("/tmp/shots"));
+    }
+
+    /// With no `[output].directory`, the save path is derived from the XDG user-dirs
+    /// definition of the pictures directory (read from `$XDG_CONFIG_HOME/user-dirs.dirs`),
+    /// with `Screenshots` appended.
+    #[test]
+    fn save_directory_falls_back_to_the_xdg_pictures_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let config_home = home.path().join(".config");
+        std::fs::create_dir_all(&config_home).unwrap();
+        std::fs::write(
+            config_home.join("user-dirs.dirs"),
+            "XDG_PICTURES_DIR=\"$HOME/Snaps\"\n",
+        )
+        .unwrap();
+        // SAFETY: nextest runs each test in its own process, so no other thread observes
+        // these env vars concurrently.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        }
+        assert_eq!(
+            Config::default().save_directory(),
+            home.path().join("Snaps").join("Screenshots")
+        );
+    }
+
+    /// Last-resort branch: when the environment defines no XDG pictures directory at all
+    /// (no `user-dirs.dirs`, as on a bare CI runner), the save directory degrades to the
+    /// current directory rather than guessing a location.
+    #[test]
+    fn save_directory_falls_back_to_the_current_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let config_home = home.path().join(".config");
+        std::fs::create_dir_all(&config_home).unwrap();
+        // Deliberately no `user-dirs.dirs` inside `config_home`.
+        // SAFETY: nextest runs each test in its own process.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        }
+        assert_eq!(Config::default().save_directory(), PathBuf::from("."));
     }
 }
