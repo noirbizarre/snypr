@@ -100,16 +100,19 @@ impl Outputs {
     }
 }
 
-/// Encode a `CapturedImage` to PNG bytes (BGRA → RGBA swizzle) using the supplied
-/// compression preset. See [`PngCompression`] for the speed/size trade-offs.
-pub fn encode_png(img: &CapturedImage, compression: PngCompression) -> Result<Vec<u8>> {
+/// Convert a `CapturedImage`'s BGRA pixels (possibly with a padded stride) into a tight
+/// RGBA buffer.
+///
+/// Reading `u32`s and rotating bytes is several times faster than a `chunks_exact(4)` copy
+/// per pixel, with a scalar fallback for the unusual case where the rows do not align.
+/// Shared by [`encode_png`] and the annotation editor's document base so the editor path
+/// gets the same fast route.
+pub fn bgra_to_rgba(img: &CapturedImage) -> Vec<u8> {
     let width = img.width as usize;
     let height = img.height as usize;
     let row_bytes = width * 4;
     let stride = img.stride as usize;
 
-    // Tight RGBA buffer with the BGRA→RGBA swizzle baked in. Reading `u32`s and rotating bytes
-    // is several times faster than a `chunks_exact(4)` + `extend_from_slice` per pixel.
     let mut rgba = vec![0u8; row_bytes * height];
     for y in 0..height {
         let src = &img.pixels[y * stride..y * stride + row_bytes];
@@ -139,6 +142,13 @@ pub fn encode_png(img: &CapturedImage, compression: PngCompression) -> Result<Ve
             }
         }
     }
+    rgba
+}
+
+/// Encode a `CapturedImage` to PNG bytes (BGRA → RGBA swizzle) using the supplied
+/// compression preset. See [`PngCompression`] for the speed/size trade-offs.
+pub fn encode_png(img: &CapturedImage, compression: PngCompression) -> Result<Vec<u8>> {
+    let rgba = bgra_to_rgba(img);
 
     let mut out = Vec::with_capacity(rgba.len() / 4);
     {
@@ -237,6 +247,28 @@ mod tests {
                 assert_eq!(
                     decoded.get_pixel(x, y).0,
                     [30 + x as u8, 20 + x as u8, 10 + x as u8, 40 + y as u8],
+                    "pixel ({x}, {y}) has the wrong channel order"
+                );
+            }
+        }
+    }
+
+    /// The aligned `u32` fast path and the scalar fallback must agree byte for byte. A zero
+    /// padding keeps rows `u32`-aligned; a non-zero padding forces the fallback.
+    #[rstest]
+    #[case::fast_path(0)]
+    #[case::scalar_fallback(8)]
+    fn bgra_to_rgba_drops_padding_and_swizzles(#[case] padding: u32) {
+        let img = distinct_image(3, 2, padding);
+        let rgba = bgra_to_rgba(&img);
+
+        assert_eq!(rgba.len(), 3 * 2 * 4);
+        for y in 0..2usize {
+            for x in 0..3usize {
+                let i = (y * 3 + x) * 4;
+                assert_eq!(
+                    &rgba[i..i + 4],
+                    &[30 + x as u8, 20 + x as u8, 10 + x as u8, 40 + y as u8],
                     "pixel ({x}, {y}) has the wrong channel order"
                 );
             }

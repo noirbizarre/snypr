@@ -273,21 +273,9 @@ pub(crate) fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _p
 /// `execute` can call it directly without going through `crate::ui`.
 #[cfg(feature = "ui")]
 fn base_from_captured(img: &crate::capture::CapturedImage) -> crate::annotate::DocumentBase {
-    let w = img.width as usize;
-    let h = img.height as usize;
-    let row = w * 4;
-    let stride = img.stride as usize;
-    let mut rgba = vec![0u8; row * h];
-    for y in 0..h {
-        let src = &img.pixels[y * stride..y * stride + row];
-        let dst = &mut rgba[y * row..(y + 1) * row];
-        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-            d[0] = s[2];
-            d[1] = s[1];
-            d[2] = s[0];
-            d[3] = s[3];
-        }
-    }
+    // Shares the swizzle with `output::encode_png`. This path used to carry its own scalar
+    // copy, so opening the editor was several times slower than saving the same frame.
+    let rgba = crate::output::bgra_to_rgba(img);
     crate::annotate::DocumentBase {
         pixels: std::sync::Arc::from(rgba.into_boxed_slice()),
         width: img.width,
