@@ -1219,7 +1219,7 @@ async fn run_draw_save(
             if err.chain().any(|e| e.is::<selector::Cancelled>()) {
                 tracing::info!("draw-save: selector cancelled");
             } else {
-                tracing::info!(error = ?err, "draw-save: selector cancelled");
+                tracing::error!(error = ?err, "draw-save: selector failed");
             }
             toolbar_widget.set_visible(true);
             apply_passthrough_state(&passthrough, &windows, &host, prev_passthrough);
