@@ -10,7 +10,10 @@ pkgdesc="Screenshot, annotation, and live-drawing tool for Hyprland and wlroots 
 arch=('x86_64')
 url="https://github.com/noirbizarre/snypr"
 license=('MIT')
-depends=('gtk4' 'gtk4-layer-shell' 'wayland' 'hicolor-icon-theme')
+# `desktop-file-utils` and `hicolor-icon-theme` provide the pacman hooks that
+# refresh the desktop database and the icon cache, which is why this package
+# ships no .install file.
+depends=('gtk4' 'gtk4-layer-shell' 'wayland' 'hicolor-icon-theme' 'desktop-file-utils')
 makedepends=('rust' 'pkgconf')
 optdepends=(
   'libnotify: desktop notifications (any notification daemon, e.g. mako, dunst, swaync)'
