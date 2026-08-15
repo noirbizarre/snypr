@@ -10,6 +10,25 @@ pub struct NumberTool {
     pub text_color: [f32; 4],
 }
 
+/// Default badge radius, in logical pixels.
+pub const DEFAULT_RADIUS: f64 = 18.0;
+
+/// Digits are always white. The color picker drives only the disc fill, so the numeral keeps
+/// its contrast guarantee whichever fill the user chooses.
+pub const TEXT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+impl NumberTool {
+    pub fn new(center: (f64, f64), value: u32, fill: [f32; 4]) -> Self {
+        Self {
+            center,
+            radius: DEFAULT_RADIUS,
+            value,
+            fill,
+            text_color: TEXT_COLOR,
+        }
+    }
+}
+
 impl Tool for NumberTool {
     fn kind(&self) -> ToolKind {
         ToolKind::Number

@@ -12,6 +12,20 @@ pub struct BlurTool {
     pub invert: bool,
 }
 
+/// Default Gaussian blur radius, in logical pixels. Chosen to make small text unreadable
+/// at typical screenshot scales without smearing the region beyond recognition.
+pub const DEFAULT_RADIUS: f32 = 12.0;
+
+impl BlurTool {
+    pub fn new(bounds: Rect, invert: bool) -> Self {
+        Self {
+            bounds,
+            radius: DEFAULT_RADIUS,
+            invert,
+        }
+    }
+}
+
 impl Tool for BlurTool {
     fn kind(&self) -> ToolKind {
         ToolKind::Blur
@@ -20,9 +34,7 @@ impl Tool for BlurTool {
         self.bounds
     }
     fn hit_test(&self, x: f64, y: f64) -> bool {
-        let r = self.bounds;
-        let inside =
-            x >= r.x as f64 && x <= r.right() as f64 && y >= r.y as f64 && y <= r.bottom() as f64;
+        let inside = super::rect_hit_test(self.bounds, x, y);
         // For an inverted blur the *outside* is the affected area; clicks outside the
         // selection rect should still hit the layer (so users can pick it from the canvas
         // to delete or otherwise act on it). Clicks inside the rect — which renders sharp

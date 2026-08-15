@@ -6,6 +6,12 @@ pub struct RedactTool {
     pub bounds: Rect,
 }
 
+impl RedactTool {
+    pub fn new(bounds: Rect) -> Self {
+        Self { bounds }
+    }
+}
+
 impl Tool for RedactTool {
     fn kind(&self) -> ToolKind {
         ToolKind::Redact
@@ -14,8 +20,7 @@ impl Tool for RedactTool {
         self.bounds
     }
     fn hit_test(&self, x: f64, y: f64) -> bool {
-        let r = self.bounds;
-        x >= r.x as f64 && x <= r.right() as f64 && y >= r.y as f64 && y <= r.bottom() as f64
+        super::rect_hit_test(self.bounds, x, y)
     }
     fn translate(&mut self, dx: f64, dy: f64) {
         self.bounds = self.bounds.translate(dx, dy);
