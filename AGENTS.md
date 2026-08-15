@@ -9,7 +9,8 @@ Build/Test:
 - Lint: `cargo clippy --all-targets --all-features -- -Dclippy::all` (or `mise run lint`)
 - Test all: `cargo nextest run` (or `mise run test`)
 - Single test: `cargo nextest run --test <file> -- <name::path>` or fallback `cargo test <name>`
-- Coverage: `cargo llvm-cov nextest` (or `mise run cover`)
+- Coverage: `cargo llvm-cov nextest --all-features` (or `mise run cover`)
+- Spellcheck: `typos` (or `mise run spell`); `git-cliff` also runs it on the changelog at release time
 
 Releases: orchestrated by gh-ship; `cliff.toml` and `.github/ship.yml` are the
 contract, `git-cliff` derives both the version and `CHANGELOG.md` from the
@@ -29,12 +30,13 @@ Code Style:
 - Types: use explicit `PathBuf`; share state through `Ctx = Arc<Context>` (see `src/context.rs`); prefer enums over strings for state (e.g. `PngCompression`, `SinkSpec`, `SelectionSpec`).
 - Naming: snake_case for functions/vars, PascalCase for types/traits; modules named after their domain (`capture`, `annotate`, `output`, `ui`, `hypr`, `ipc`); constants UPPER_SNAKE; avoid abbreviations except well-known (`ctx`, `cfg`).
 - Async: traits with `#[async_trait]`; pass cloned `Arc<Context>` rather than `&mut`; avoid blocking in async (use `tokio::task::spawn_blocking` for sync work).
-- Error handling: never silence errors; use `anyhow!(...)` / `.context(...)` / `.with_context(...)` for context; return early on invalid state. Use `thiserror` for typed errors that callers branch on (e.g. `CaptureError`, `ProtocolError`, `ui::selector::Cancelled`).
+- Error handling: never silence errors; use `anyhow!(...)` / `.context(...)` / `.with_context(...)` for context; return early on invalid state. Use `thiserror` for typed errors that callers branch on (e.g. `CaptureError`, `ProtocolError`); `ui::selector::Cancelled` is a hand-rolled unit error for the same purpose.
 - CLI: derive `Parser`/`Subcommand`; keep help strings imperative; prefer explicit flags (`--per-output`, `--via-daemon`); document precedence in doc-comments when CLI/config/IPC fields overlap.
 - Configuration: every field optional; types live in `src/config.rs`; the source of truth for default values is `impl Default`. Keep README/manpage examples in sync.
 - Formatting enforced by `cargo fmt`; do not hand-align; trailing whitespace stripped by prek.
 - Tests: use `rstest` for parametrization; assertions via `pretty_assertions` when readability matters; unit tests live beside code under `#[cfg(test)]`. Integration tests requiring a live Wayland compositor go behind the `integration-wayland` feature.
-- Git hooks: commit messages follow Commitizen (conventional commits); prek runs cargo-fmt, cargo-clippy, and Taplo TOML formatting.
+- Git hooks: commit messages follow Commitizen (conventional commits); prek runs cargo-fmt, cargo-clippy, actionlint, Taplo TOML formatting, commitizen,
+  and the usual whitespace/YAML/TOML hygiene hooks.
 
 General: Do not add new dependencies lightly; prefer existing patterns
 (notifications via `notify-rust` wrapped in `src/notify.rs`, GTK styling via

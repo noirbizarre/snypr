@@ -81,9 +81,12 @@ published release assets; `snypr-git` derives both itself.
 
 `aur.yml` runs on `release: published` rather than from `publish-release`,
 because gh-ship only undrafts the release once that workflow succeeds — waiting
-means the URLs baked into the PKGBUILDs already resolve. It builds each package
-with `makepkg` before pushing, so a broken PKGBUILD fails in CI rather than on a
-user's machine.
+means the URLs baked into the PKGBUILDs already resolve. It builds `snypr-bin`
+and `snypr` with `makepkg --nocheck` before pushing, so a broken PKGBUILD fails
+in CI rather than on a user's machine. `snypr-git` is skipped: its source is the
+branch tip rather than the release, so a CI build would not describe what users
+get. `check()` is skipped everywhere because it re-runs, in release mode, the
+suite CI already ran on the same commit.
 
 Pushing requires an `AUR_SSH_PRIVATE_KEY` secret in the dedicated `aur`
 environment, whose public half is registered on the maintainer's
@@ -116,3 +119,4 @@ Useful locally:
 | `mise run changelog` | preview `CHANGELOG.md` for the next release |
 | `mise run dogfood` | `gh ship validate` — check the release setup |
 | `mise run lint:actions` | lint the workflow files with actionlint |
+| `mise run spell` | spellcheck with `typos` (also run by `git-cliff` at release time) |

@@ -33,7 +33,8 @@ mise run build           # cargo build
 mise run test            # cargo nextest run
 mise run lint            # cargo clippy --all-targets --all-features -- -Dclippy::all
 mise run fmt             # cargo fmt --all
-mise run cover           # cargo llvm-cov nextest
+mise run cover           # cargo llvm-cov nextest --all-features
+mise run spell           # typos
 ```
 
 ### Build dependencies
