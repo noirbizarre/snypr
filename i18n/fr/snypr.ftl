@@ -79,3 +79,6 @@ error-invalid-region-size = taille de région invalide : { $size } (attendu LxH)
 error-overlay-no-monitor = aucun moniteur n'intersecte la zone d'édition demandée ; rien à annoter
 error-daemon-no-response = le démon a fermé la connexion sans répondre
 error-daemon-message = démon : { $message }
+error-no-display = aucun affichage GDK disponible
+error-no-monitors = aucun moniteur signalé par GDK
+error-gtk-exit = GTK s'est arrêté avec le statut { $code }

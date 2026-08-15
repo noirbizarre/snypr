@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -66,19 +66,11 @@ fn run_gtk(duration: Duration, style: SelectorStyleConfig) -> Result<()> {
     if let Some(err) = setup_error.lock().unwrap().take() {
         return Err(err);
     }
-    if code != 0 {
-        bail!("GTK exited with status {code}");
-    }
-    Ok(())
+    crate::ui::check_gtk_exit(code)
 }
 
 fn build_overlays(app: &gtk4::Application, duration: Duration) -> Result<()> {
-    let display = gdk4::Display::default().ok_or_else(|| anyhow!("no GDK display available"))?;
-    let monitors_list = display.monitors();
-    let n = monitors_list.n_items();
-    if n == 0 {
-        bail!("no monitors reported by GDK");
-    }
+    let (monitors_list, n) = crate::ui::monitors()?;
 
     // Whole-seconds resolution matches the selector's countdown — sub-second delays are
     // valid at the CLI / config layer but UI countdowns are not the place to surface them.

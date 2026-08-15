@@ -214,10 +214,7 @@ fn run_gtk(
     // Treat a normal quit (Esc / Save / external shutdown) as success. If the channel still has
     // a slot, fill it so the caller's recv() doesn't dangle.
     send_once(&tx, Ok(()));
-    if code != 0 {
-        bail!("GTK exited with status {code}");
-    }
-    Ok(())
+    crate::ui::check_gtk_exit(code)
 }
 
 /// Wire an external shutdown receiver into the GTK main context so a daemon-driven toggle can
@@ -286,12 +283,7 @@ fn build_overlays(
 ) -> Result<Shared> {
     crate::ui::style::install();
 
-    let display = gdk4::Display::default().ok_or_else(|| anyhow!("no GDK display available"))?;
-    let monitors_list = display.monitors();
-    let n = monitors_list.n_items();
-    if n == 0 {
-        bail!("no monitors reported by GDK");
-    }
+    let (monitors_list, n) = crate::ui::monitors()?;
 
     let (initial_passthrough, edit, draw_save) = match mode {
         OverlayMode::Draw {

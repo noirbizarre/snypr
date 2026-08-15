@@ -79,3 +79,6 @@ error-invalid-region-size = invalid region size: { $size } (expected WxH)
 error-overlay-no-monitor = no monitor intersected the requested edit region; nothing to annotate
 error-daemon-no-response = daemon closed connection without responding
 error-daemon-message = daemon: { $message }
+error-no-display = no GDK display available
+error-no-monitors = no monitors reported by GDK
+error-gtk-exit = GTK exited with status { $code }
