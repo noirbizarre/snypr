@@ -127,12 +127,15 @@ The source tree ships these artifacts ready to install under `$PREFIX`
 | `$PREFIX/share/applications/noirbizar.re.Snypr.desktop`          | Standalone launcher with Screenshot/Draw actions |
 | `$PREFIX/share/applications/noirbizar.re.Snypr.Daemon.desktop`   | Visible launcher for `snypr daemon --systray` |
 | `$PREFIX/share/man/man1/snypr.1`                                 | `docs/man/snypr.1`                            |
+| `$PREFIX/share/licenses/$pkgname/LICENSE`                        | `LICENSE`                                     |
+| `$PREFIX/share/doc/$pkgname/README.md`                           | `README.md`                                   |
 
 After installation, package post-install hooks should run
 `update-desktop-database` against `$PREFIX/share/applications` and
 `gtk-update-icon-cache -qtf $PREFIX/share/icons/hicolor`. On Arch both are
-handled by the `desktop-file-utils` and `hicolor-icon-theme` hooks, so the
-PKGBUILDs in `packaging/aur/` carry no `.install` file.
+handled by the `desktop-file-utils` and `hicolor-icon-theme` hooks, both of
+which the PKGBUILDs in `packaging/aur/` list in `depends`, so they carry no
+`.install` file.
 
 The standalone `.desktop` exposes three launcher actions (visible via
 right-click in most launchers): **Take Screenshot (region)**, **Take
