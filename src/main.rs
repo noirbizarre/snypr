@@ -25,6 +25,7 @@ fn main() -> ExitCode {
 
     // Kept out of `cli` because `dispatch` consumes it, and the error path below still
     // needs the override to decide whether error notifications are enabled.
+    #[cfg(feature = "notify")]
     let cli_config = cli.config.clone();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()

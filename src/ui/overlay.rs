@@ -38,9 +38,7 @@ use crate::annotate::{Document, DocumentBase, ToolKind};
 use crate::capture::region::{Rect, slice_pixels};
 use crate::capture::{CapturedImage, Capturer};
 use crate::cli::SinkSpec;
-use crate::config::FilenameContext;
 use crate::context::Ctx;
-use crate::output::Outputs;
 use crate::ui::canvas::AnnotationCanvas;
 use crate::ui::save::{SaveFn, sinks_save_fn};
 use crate::ui::selector;
@@ -1272,17 +1270,9 @@ async fn run_draw_save(
             .await
             .map_err(|e| anyhow!("capturing {selection:?}: {e}"))?;
         let stitched = crate::capture::region::stitch(&images, &selection)?;
-        let png = crate::output::encode_png(&stitched, app_ctx.config.output.compression)?;
-        let ctx_fname = FilenameContext {
-            output: None,
-            selection: Some(label),
-        };
-        let outputs = Outputs::from_specs(&sinks, &app_ctx, &ctx_fname)?;
-        let paths = outputs.write_png(&png).await?;
-        // Same success notification as `screenshot` and the annotation editor: without it
-        // a save from the draw overlay is indistinguishable from a no-op.
-        crate::cli::screenshot::notify_written(&app_ctx.config, &paths, &png);
-        anyhow::Ok(paths)
+        // Shared with the annotation editor's save closure, so both routes encode, fan out
+        // to sinks, notify and record paths identically.
+        crate::ui::save::encode_and_write(&app_ctx, &sinks, &stitched, label, &collected).await
     });
 
     match join.await {
@@ -1295,10 +1285,6 @@ async fn run_draw_save(
                 "draw-save: wrote {} path(s)",
                 paths.len()
             );
-            collected
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(paths.iter().cloned());
         }
         Ok(Err(err)) => report_overlay_error(
             &draw_save.app_ctx.config.notify,
