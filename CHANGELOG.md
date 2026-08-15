@@ -4,6 +4,68 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/noirbizarre/snypr/compare/0.1.0..0.2.0) - 2026-08-15
+
+### 💫 Features
+
+- **capture** Honor [capture] cursor as the --cursor default - ([46c920a](https://github.com/noirbizarre/snypr/commit/46c920a0d5ccdef8f416986393ca7aa35556df1b))
+- **config** Honor --config in every subcommand - ([dd10d1d](https://github.com/noirbizarre/snypr/commit/dd10d1db09e6e47e412d65df161cb0212b613fa3))
+
+### 🐛 Bug Fixes
+
+- **aur** Compute the real pkgver for the VCS package - ([f591da1](https://github.com/noirbizarre/snypr/commit/f591da1fa3a9d424f16640d8900955c1095a9554))
+- **aur** Resolve SSH paths and the idempotency guard - ([285434b](https://github.com/noirbizarre/snypr/commit/285434b5e41a5c91d1daa7986a2ab8cfdb4fca49))
+- **packaging** Ship a scalable icon and the 48x48 size - ([46f3e74](https://github.com/noirbizarre/snypr/commit/46f3e74b916f66dec1d8de237eb0209e389d99ad))
+- **ui** Surface overlay failures to the user - ([f2ee0ed](https://github.com/noirbizarre/snypr/commit/f2ee0ede615e9f1a529914e3495c5acf0f6b2607))
+- **ui** Notify on draw-overlay save - ([4de2caf](https://github.com/noirbizarre/snypr/commit/4de2caf63231cd42ea1b517bbe6408568f74a2ff))
+- **ui** Report draw-save selector failures at error level - ([ce6ac05](https://github.com/noirbizarre/snypr/commit/ce6ac0537004e1f5dcd6cd243b964c61f4482eb9))
+- Unify mutex poison handling for the written-paths list - ([01718a1](https://github.com/noirbizarre/snypr/commit/01718a19340ed9f0c16c92bb00f8aec729d5d1e3))
+
+### ⚡ Performance
+
+- **cli** Reuse the fast swizzle for the editor's document base - ([26d5e7c](https://github.com/noirbizarre/snypr/commit/26d5e7c66b2fc64e5eb9601c8a86e6dbafe3b64a))
+
+### 🔨 Refactor
+
+- **annotate** Share rect hit_test and add the missing constructors - ([68ee50f](https://github.com/noirbizarre/snypr/commit/68ee50f26e21ae831d5185f9df108e7463ea5142))
+- **config** Drop the unimplemented [keybinds] section - ([64d2f5c](https://github.com/noirbizarre/snypr/commit/64d2f5cd21bc5ed1e60a1c7d332e141cf60dd3a2))
+- **i18n** Translate the remaining user-facing errors - ([6fdddb8](https://github.com/noirbizarre/snypr/commit/6fdddb8b844f49b4942b8ef4010ce1fd533cfe5c))
+- **ui** Share the save pipeline between both save routes - ([cffbcf4](https://github.com/noirbizarre/snypr/commit/cffbcf42c823c1442143c73d520e3ca19c1e4437))
+- **ui** Share the GTK monitor prologue and exit check - ([e35d4e8](https://github.com/noirbizarre/snypr/commit/e35d4e810b25bb200053985bc5266c654b46d05f))
+
+### 📚 Documentation
+
+- Correct the aur.yml, coverage and tooling claims - ([df91ffe](https://github.com/noirbizarre/snypr/commit/df91ffe08b9bec5b19252f6a9a4ca3d45d2aad8b))
+- Sync the packager table with the PKGBUILD install lists - ([8921e0d](https://github.com/noirbizarre/snypr/commit/8921e0d090f6732035ef106c1f1b7ccae3f9f642))
+- Fix stale README and manpage references - ([6239bce](https://github.com/noirbizarre/snypr/commit/6239bce16dd32fef3c252ee24c45712bc3a9250d))
+- Document the SNYPR_* environment variables - ([25aaf2a](https://github.com/noirbizarre/snypr/commit/25aaf2ab7dcc64e529cc3be4df2c75330419963e))
+- Document --lang, language, --socket, --passthrough and -i - ([54d11cc](https://github.com/noirbizarre/snypr/commit/54d11ccba0eba5ded99ad282924fdec6b1a2fd44))
+- Fix tray, tool count and blur availability claims - ([d760886](https://github.com/noirbizarre/snypr/commit/d7608867f3c17928a171147c930fa37a44d264c0))
+- Correct --window and --focused descriptions - ([c8fc2c3](https://github.com/noirbizarre/snypr/commit/c8fc2c315c4eae0068182b7e34363dc4caf3dab4))
+
+### 🧪 Tests
+
+- Cover the new constructors, save pipeline and exit check - ([52d793a](https://github.com/noirbizarre/snypr/commit/52d793a38f1e442c2879b43261e9db78d7ed9149))
+- Cover the pure capture, config and protocol logic ([#16](https://github.com/noirbizarre/snypr/issues/16)) - ([1be4eea](https://github.com/noirbizarre/snypr/commit/1be4eea8259fe6b708a608ffccfdd5dfdfacd943))
+
+### 🎨 Style
+
+- Apply prek formatting - ([d852d95](https://github.com/noirbizarre/snypr/commit/d852d95c96fd06c64df8b71aea7edc0ec5bd5c46))
+
+### 🏗️ Build
+
+- **deps** Bump pango from 0.22.6 to 0.22.8 ([#14](https://github.com/noirbizarre/snypr/issues/14)) - ([7bac886](https://github.com/noirbizarre/snypr/commit/7bac88630395d1673ae11ec0356b296e074d064c))
+- **deps** Bump async-trait from 0.1.89 to 0.1.92 ([#15](https://github.com/noirbizarre/snypr/issues/15)) - ([b58b94b](https://github.com/noirbizarre/snypr/commit/b58b94b7d473800fe98e6513f314f23976156044))
+- **deps** Bump gtk4-layer-shell from 0.8.0 to 0.8.1 ([#11](https://github.com/noirbizarre/snypr/issues/11)) - ([6fc5b53](https://github.com/noirbizarre/snypr/commit/6fc5b53bf152e17d2ed6aeda38ff8d9c2feba7f9))
+- **deps** Bump gsk4 from 0.11.1 to 0.11.4 ([#13](https://github.com/noirbizarre/snypr/issues/13)) - ([a7ca3db](https://github.com/noirbizarre/snypr/commit/a7ca3dbcac9832b1ba55387647971fea6422fd64))
+- **deps** Bump wayland-client from 0.31.14 to 0.31.15 ([#12](https://github.com/noirbizarre/snypr/issues/12)) - ([da78b29](https://github.com/noirbizarre/snypr/commit/da78b290cff3dc1fadcdcb95ec021f95b48789b4))
+- **packaging** Depend on desktop-file-utils - ([d889b0b](https://github.com/noirbizarre/snypr/commit/d889b0baa4f3bfb03f52b979c07b8b7b60fa248b))
+- Make the typos check pass - ([794aca5](https://github.com/noirbizarre/snypr/commit/794aca5ef11e95a01fbb197fa8edcffd82672197))
+
+### 🔧 CI
+
+- Bump actions to their latest major and let Dependabot track them ([#10](https://github.com/noirbizarre/snypr/issues/10)) - ([96120e3](https://github.com/noirbizarre/snypr/commit/96120e345f2e7edac258b08f9a7383d0753ef3a5))
+
 ## 0.1.0 - 2026-08-14
 
 ### 💫 Features
