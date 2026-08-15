@@ -177,6 +177,12 @@ snypr screenshot --edit --to clipboard --to file
 # Ctrl+Z undo, P passthrough, Esc quit).
 snypr draw --to file --to clipboard --cursor
 
+# Run the daemon (IPC server) on a custom socket path.
+snypr daemon --socket /run/user/1000/snypr.sock
+
+# Live overlay opened with pointer passthrough already on (clicks fall through).
+snypr draw --passthrough
+
 # Run the daemon (IPC server; add `--systray` for a StatusNotifierItem icon).
 snypr daemon
 
@@ -332,6 +338,10 @@ end)
 `~/.config/snypr/config.toml` (every field is optional):
 
 ```toml
+# UI language as a BCP-47 tag. Overridden by `--lang` / `SNYPR_LANG`; when unset,
+# falls back to `LC_ALL` / `LC_MESSAGES` / `LANG`, then English. Shipped catalogs: en, fr.
+language = "en"
+
 [output]
 directory          = "/home/me/Pictures/Screenshots"
 filename_template  = "snypr_{date}_{time}_{output}.png"

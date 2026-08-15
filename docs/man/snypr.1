@@ -17,7 +17,13 @@ and other wlroots-based compositors. It captures pixels via the
 Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/snypr/config.toml\fR.
 .TP
 .BR \-v ", " \-\-verbose
-Increase log verbosity (repeatable).
+Increase log verbosity (repeatable). \fB\-v\fR selects debug, \fB\-vv\fR trace; either
+overrides \fBRUST_LOG\fR.
+.TP
+.BR \-\-lang " " \fIBCP47\fR
+Override the active language as a BCP-47 tag (\fIfr\fR, \fIen-US\fR, ...). Falls back to
+the \fBlanguage\fR field in \fIconfig.toml\fR, then \fBLC_ALL\fR / \fBLC_MESSAGES\fR /
+\fBLANG\fR, then English.
 .SH COMMANDS
 .SS screenshot
 Capture pixels and pipe them to one or more sinks. With \fB\-\-edit\fR the captured image
@@ -42,7 +48,7 @@ Capture a single output (\fIDP-1\fR, \fIeDP-1\fR, ...).
 .BR \-\-region " " \fIX,Y,WxH\fR
 Capture an explicit logical-pixel region.
 .TP
-.BR \-\-interactive
+.BR \-i ", " \-\-interactive
 Open the selector overlay and let the user draw a region.
 .TP
 .BR \-\-edit
@@ -91,13 +97,26 @@ click an existing shape to pick it, drag its body to move it, drag a handle to r
 the font while side handles set a wrap width), double-click text to re-edit it, press
 \fBDelete\fR / \fBBackspace\fR to remove it or \fBEsc\fR to deselect, and arrow keys to
 nudge (\fBShift\fR for a larger step). After committing a shape the overlay returns to
-Select mode automatically. \fBdraw\fR also accepts \fB\-\-via-daemon\fR to toggle a
-daemon-managed overlay instead of spawning a new process, and \fB\-\-toggle-passthrough\fR
-(requires \fB\-\-via-daemon\fR) to flip pointer passthrough on the running overlay from a
-global keybind.
+Select mode automatically.
+.TP
+.BR \-\-passthrough
+Open the overlay with pointer passthrough already enabled, so clicks fall through to the
+windows underneath until \fBP\fR (or \fB\-\-toggle-passthrough\fR) turns it off.
+.TP
+.BR \-\-via-daemon
+Toggle a daemon-managed overlay instead of spawning a new process.
+.TP
+.BR \-\-toggle-passthrough
+Flip pointer passthrough on the running overlay from a global keybind. Requires
+\fB\-\-via-daemon\fR.
 .SS daemon
-Run the IPC server on \fI$XDG_RUNTIME_DIR/snypr.sock\fR. Pass \fB\-\-systray\fR to
-also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
+Run the IPC server on \fI$XDG_RUNTIME_DIR/snypr.sock\fR.
+.TP
+.BR \-\-socket " " \fIPATH\fR
+Listen on \fIPATH\fR instead of \fI$XDG_RUNTIME_DIR/snypr.sock\fR.
+.TP
+.BR \-\-systray
+Also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
 .SS doctor
 Print a copy-pasteable Markdown diagnostic report covering version, runtime
 environment, parsed configuration, and live capability probes (Hyprland IPC,
@@ -144,8 +163,10 @@ pickers are available in the live \fBdraw\fR overlay.
 .SH CONFIGURATION
 .B snypr
 reads \fI$XDG_CONFIG_HOME/snypr/config.toml\fR. Every field is optional; see the
-sample in the project README. Filename template tokens: \fB{ts}\fR, \fB{date}\fR,
-\fB{time}\fR, \fB{output}\fR, \fB{selection}\fR. The \fB[ui.selector]\fR table
+sample in the project README. The top-level \fBlanguage\fR field sets the UI language as
+a BCP-47 tag and is overridden by \fB\-\-lang\fR. Filename template tokens: \fB{ts}\fR,
+\fB{date}\fR, \fB{time}\fR, \fB{output}\fR, \fB{selection}\fR. The \fB[ui.selector]\fR
+table
 overrides the selector chrome colors (\fIoutline\fR, \fIoutline_hover\fR,
 \fIlabel\fR, \fIdim_strong\fR,
 \fIdim_full\fR, \fIdim_light\fR, \fIcountdown_fg\fR, \fIcountdown_bg\fR) as
