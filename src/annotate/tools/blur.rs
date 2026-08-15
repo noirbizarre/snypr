@@ -69,6 +69,19 @@ mod tests {
     }
 
     #[test]
+    fn new_applies_the_default_radius() {
+        let t = BlurTool::new(rect(), false);
+        assert_eq!(t.bounds, rect());
+        assert_eq!(t.radius, DEFAULT_RADIUS);
+        assert!(!t.invert);
+    }
+
+    #[test]
+    fn new_carries_the_invert_flag_through() {
+        assert!(BlurTool::new(rect(), true).invert);
+    }
+
+    #[test]
     fn clone_box_preserves_invert() {
         let t = BlurTool {
             bounds: rect(),

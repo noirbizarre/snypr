@@ -77,6 +77,17 @@ mod tests {
     }
 
     #[test]
+    fn new_applies_the_default_radius_and_white_digits() {
+        let t = NumberTool::new((50.0, 60.0), 7, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(t.center, (50.0, 60.0));
+        assert_eq!(t.value, 7);
+        assert_eq!(t.radius, DEFAULT_RADIUS);
+        // The picker drives only the disc fill; digits stay white for contrast.
+        assert_eq!(t.text_color, TEXT_COLOR);
+        assert_eq!(t.fill, [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn reports_its_kind() {
         assert_eq!(tool().kind(), ToolKind::Number);
     }

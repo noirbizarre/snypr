@@ -43,14 +43,19 @@ mod tests {
     use rstest::rstest;
 
     fn tool() -> RedactTool {
-        RedactTool {
-            bounds: Rect {
-                x: 10,
-                y: 20,
-                w: 30,
-                h: 40,
-            },
-        }
+        RedactTool::new(Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        })
+    }
+
+    #[test]
+    fn new_keeps_the_bounds_it_was_given() {
+        let t = tool();
+        assert_eq!(t.bounds.x, 10);
+        assert_eq!(t.bounds.w, 30);
     }
 
     #[test]

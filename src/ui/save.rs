@@ -80,3 +80,129 @@ pub fn sinks_save_fn(
         ))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::Output;
+    use crate::config::Config;
+    use crate::context::Context;
+    use pretty_assertions::assert_eq;
+
+    /// 2x2 BGRA image with a padded stride, optionally attributed to an output so the
+    /// `{output}` filename token has something to expand to.
+    fn image(source: Option<&str>) -> CapturedImage {
+        CapturedImage {
+            width: 2,
+            height: 2,
+            stride: 12, // 2px * 4 bytes + 4 bytes of row padding
+            pixels: std::sync::Arc::from(vec![0xFFu8; 24].into_boxed_slice()),
+            source: source.map(|name| Output {
+                name: name.to_owned(),
+                logical: crate::capture::region::Rect {
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                },
+                scale: 1,
+            }),
+        }
+    }
+
+    /// Context writing into `dir`, with notifications off so the test does not depend on a
+    /// running D-Bus session.
+    async fn ctx(dir: &std::path::Path) -> Ctx {
+        let mut config = Config::default();
+        config.output.directory = Some(dir.to_path_buf());
+        config.notify.success = false;
+        config.notify.error = false;
+        Context::new(config).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn writes_a_png_and_records_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_ctx = ctx(dir.path()).await;
+        let collected = Arc::new(Mutex::new(Vec::new()));
+
+        let paths = encode_and_write(
+            &app_ctx,
+            &[SinkSpec::File(None)],
+            &image(None),
+            "region",
+            &collected,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(paths.len(), 1);
+        let bytes = std::fs::read(&paths[0]).unwrap();
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
+        // The caller reads written paths off `collected`, so recording them is part of the
+        // contract rather than a side effect.
+        assert_eq!(*collected.lock().unwrap(), paths);
+    }
+
+    #[tokio::test]
+    async fn expands_the_output_token_from_the_image_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.output.directory = Some(dir.path().to_path_buf());
+        config.output.filename_template = "shot_{output}_{selection}.png".to_owned();
+        config.notify.success = false;
+        let app_ctx = Context::new(config).await.unwrap();
+        let collected = Arc::new(Mutex::new(Vec::new()));
+
+        let paths = encode_and_write(
+            &app_ctx,
+            &[SinkSpec::File(None)],
+            &image(Some("DP-1")),
+            "window",
+            &collected,
+        )
+        .await
+        .unwrap();
+
+        let name = paths[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, "shot_DP-1_window.png");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_file_sink_path_wins_over_the_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_ctx = ctx(dir.path()).await;
+        let target = dir.path().join("explicit.png");
+        let collected = Arc::new(Mutex::new(Vec::new()));
+
+        let paths = encode_and_write(
+            &app_ctx,
+            &[SinkSpec::File(Some(target.clone()))],
+            &image(None),
+            "full",
+            &collected,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(paths, vec![target]);
+    }
+
+    #[tokio::test]
+    async fn sinks_save_fn_falls_back_to_the_configured_default_sinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_ctx = ctx(dir.path()).await;
+        let collected = Arc::new(Mutex::new(Vec::new()));
+
+        // An empty sink list means "use `[output].default_sinks`", which defaults to `file`.
+        let save = sinks_save_fn(app_ctx, Vec::new(), "region", collected.clone());
+        let paths = tokio::task::spawn_blocking(move || save(&image(None)))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].starts_with(dir.path()));
+        assert_eq!(*collected.lock().unwrap(), paths);
+    }
+}

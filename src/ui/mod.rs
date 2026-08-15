@@ -67,3 +67,29 @@ pub(crate) fn install_icon_resources() {
         gtk4::IconTheme::for_display(&display).add_resource_path("/re/noirbizar/Snypr/icons");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::clean_quit(0)]
+    fn check_gtk_exit_accepts_a_clean_quit(#[case] code: i32) {
+        assert!(check_gtk_exit(code).is_ok());
+    }
+
+    #[rstest]
+    #[case::generic_failure(1)]
+    #[case::signal(139)]
+    #[case::negative(-1)]
+    fn check_gtk_exit_reports_a_non_zero_status(#[case] code: i32) {
+        let err = check_gtk_exit(code).unwrap_err();
+        // The status must survive into the message: it is the only diagnostic the user gets
+        // when GTK dies without the surface having a chance to report anything itself.
+        assert!(
+            format!("{err}").contains(&code.to_string()),
+            "status {code} missing from {err}"
+        );
+    }
+}

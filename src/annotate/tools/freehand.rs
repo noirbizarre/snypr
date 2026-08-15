@@ -82,6 +82,19 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
+    fn new_applies_the_default_stroke_width() {
+        let t = FreehandTool::new(
+            vec![(0.0, 0.0), (10.0, 5.0)],
+            [0.0, 1.0, 0.0, 1.0],
+            StrokeStyle::Dashed,
+        );
+        assert_eq!(t.points.len(), 2);
+        assert_eq!(t.stroke, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(t.stroke_width, DEFAULT_STROKE_WIDTH);
+        assert_eq!(t.stroke_style, StrokeStyle::Dashed);
+    }
+
+    #[test]
     fn translate_shifts_every_point() {
         let mut t = FreehandTool {
             points: vec![(0.0, 0.0), (10.0, 5.0)],
