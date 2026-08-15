@@ -435,8 +435,116 @@ mod tests {
 
     #[rstest]
     #[case("10,20,100x200", crate::capture::region::Rect { x: 10, y: 20, w: 100, h: 200 })]
+    #[case("-5,-10,1x1", crate::capture::region::Rect { x: -5, y: -10, w: 1, h: 1 })]
+    #[case(" 10 , 20 , 100 x 200 ", crate::capture::region::Rect { x: 10, y: 20, w: 100, h: 200 })]
     fn parses_region(#[case] s: &str, #[case] expected: crate::capture::region::Rect) {
         assert_eq!(parse_region(s).unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case::missing_size("10,20")]
+    #[case::size_without_x("10,20,100")]
+    #[case::non_numeric_x("a,20,100x200")]
+    #[case::non_numeric_height("10,20,100xb")]
+    #[case::negative_width("10,20,-1x200")]
+    #[case::empty("")]
+    fn rejects_malformed_region(#[case] s: &str) {
+        assert!(parse_region(s).is_err(), "{s:?} should not parse");
+    }
+
+    /// The clap `selection` group makes these flags mutually exclusive on the command line,
+    /// so build `Args` directly to pin the match-arm precedence in `parse_selection` itself.
+    #[test]
+    fn selection_precedence_is_full_first() {
+        let args = Args {
+            full: true,
+            per_output: true,
+            focused: true,
+            output: Some("DP-1".into()),
+            window: true,
+            region: Some("0,0,1x1".into()),
+            interactive: true,
+            ..Args::default()
+        };
+        assert_eq!(parse_selection(&args).unwrap(), Selection::Full);
+    }
+
+    #[rstest]
+    #[case::per_output(Args { per_output: true, focused: true, output: Some("DP-1".into()), window: true, region: Some("0,0,1x1".into()), interactive: true, ..Args::default() }, Selection::PerOutput)]
+    #[case::focused(Args { focused: true, output: Some("DP-1".into()), window: true, region: Some("0,0,1x1".into()), interactive: true, ..Args::default() }, Selection::Focused)]
+    #[case::output(Args { output: Some("DP-1".into()), window: true, region: Some("0,0,1x1".into()), interactive: true, ..Args::default() }, Selection::Output("DP-1".into()))]
+    #[case::window(Args { window: true, region: Some("0,0,1x1".into()), interactive: true, ..Args::default() }, Selection::Window)]
+    #[case::region(Args { region: Some("1,2,3x4".into()), interactive: true, ..Args::default() }, Selection::Region(crate::capture::region::Rect { x: 1, y: 2, w: 3, h: 4 }))]
+    #[case::interactive(Args { interactive: true, ..Args::default() }, Selection::Interactive)]
+    #[case::default_is_interactive(Args::default(), Selection::Interactive)]
+    fn parse_selection_honours_precedence(#[case] args: Args, #[case] expected: Selection) {
+        assert_eq!(parse_selection(&args).unwrap(), expected);
+    }
+
+    #[test]
+    fn parse_selection_propagates_region_parse_errors() {
+        let args = Args {
+            region: Some("nonsense".into()),
+            ..Args::default()
+        };
+        assert!(parse_selection(&args).is_err());
+    }
+
+    #[rstest]
+    #[case(Selection::Full, "full")]
+    #[case(Selection::PerOutput, "output")]
+    #[case(Selection::Focused, "focused")]
+    #[case(Selection::Output("DP-1".into()), "output")]
+    #[case(Selection::Window, "window")]
+    #[case(Selection::Region(crate::capture::region::Rect { x: 0, y: 0, w: 1, h: 1 }), "region")]
+    #[case(Selection::Interactive, "region")]
+    fn selection_label_maps_every_variant(#[case] s: Selection, #[case] expected: &str) {
+        assert_eq!(selection_label(&s), expected);
+    }
+
+    /// `base_from_captured` is a second, independent BGRA -> RGBA converter (used by the
+    /// `--edit` path), so it needs the same distinct-channel and padded-stride assertions as
+    /// `output::encode_png`.
+    #[cfg(feature = "ui")]
+    #[rstest]
+    #[case::tight(0)]
+    #[case::padded(8)]
+    fn base_from_captured_swizzles_and_compacts(#[case] padding: u32) {
+        let (width, height) = (3u32, 2u32);
+        let stride = width * 4 + padding;
+        let mut pixels = vec![0xABu8; (stride * height) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let i = (y * stride + x * 4) as usize;
+                pixels[i] = 10 + x as u8; // B
+                pixels[i + 1] = 20 + x as u8; // G
+                pixels[i + 2] = 30 + x as u8; // R
+                pixels[i + 3] = 40 + y as u8; // A
+            }
+        }
+        let img = crate::capture::CapturedImage {
+            width,
+            height,
+            stride,
+            pixels: std::sync::Arc::from(pixels.into_boxed_slice()),
+            source: None,
+        };
+
+        let base = base_from_captured(&img);
+        assert_eq!(base.width, width);
+        assert_eq!(base.height, height);
+        assert_eq!(base.stride, width * 4, "stride must be compacted");
+        assert_eq!(base.pixels.len(), (width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let i = ((y * width + x) * 4) as usize;
+                assert_eq!(
+                    &base.pixels[i..i + 4],
+                    &[30 + x as u8, 20 + x as u8, 10 + x as u8, 40 + y as u8],
+                    "pixel ({x}, {y}) has the wrong channel order"
+                );
+            }
+        }
     }
 
     /// Minimal top-level parser to exercise `screenshot::Args` through clap.

@@ -323,6 +323,7 @@ pub fn slice_pixels(
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     #[test]
     fn union_combines_two_rectangles() {
@@ -638,6 +639,180 @@ mod tests {
                 },
             )
             .is_none()
+        );
+    }
+
+    #[rstest]
+    #[case(Rect { x: 0, y: 0, w: 100, h: 50 }, 100, 50)]
+    #[case(Rect { x: 10, y: 20, w: 30, h: 40 }, 40, 60)]
+    #[case(Rect { x: -30, y: -40, w: 10, h: 10 }, -20, -30)]
+    fn right_and_bottom_are_the_exclusive_edges(
+        #[case] r: Rect,
+        #[case] right: i32,
+        #[case] bottom: i32,
+    ) {
+        assert_eq!(r.right(), right);
+        assert_eq!(r.bottom(), bottom);
+    }
+
+    #[rstest]
+    #[case(1.0, 2.0, 11, 22)]
+    #[case(-1.0, -2.0, 9, 18)]
+    #[case(0.0, 0.0, 10, 20)]
+    // `f64::round` breaks ties away from zero in both directions.
+    #[case(0.5, -0.5, 11, 19)]
+    #[case(0.4, -0.4, 10, 20)]
+    #[case(1.6, 2.6, 12, 23)]
+    fn translate_rounds_to_the_nearest_integer(
+        #[case] dx: f64,
+        #[case] dy: f64,
+        #[case] x: i32,
+        #[case] y: i32,
+    ) {
+        let r = Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        };
+        assert_eq!(r.translate(dx, dy), Rect { x, y, w: 30, h: 40 });
+    }
+
+    /// `contains` is deliberately half-open on the right/bottom edges so two adjacent
+    /// rectangles never both claim the shared border pixel.
+    #[rstest]
+    #[case::inside(20, 30, true)]
+    #[case::top_left_corner(10, 20, true)]
+    #[case::last_contained_pixel(39, 59, true)]
+    #[case::right_edge_excluded(40, 30, false)]
+    #[case::bottom_edge_excluded(20, 60, false)]
+    #[case::left_of(9, 30, false)]
+    #[case::above(20, 19, false)]
+    fn contains_is_half_open(#[case] x: i32, #[case] y: i32, #[case] expected: bool) {
+        let r = Rect {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+        };
+        assert_eq!(r.contains(x, y), expected);
+    }
+
+    #[test]
+    fn adjacent_rectangles_never_share_a_pixel() {
+        let left = Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+        };
+        let right = Rect {
+            x: 10,
+            y: 0,
+            w: 10,
+            h: 10,
+        };
+        assert!(left.contains(9, 0) && !right.contains(9, 0));
+        assert!(right.contains(10, 0) && !left.contains(10, 0));
+    }
+
+    #[test]
+    fn crop_rejects_a_region_outside_the_capture() {
+        let origin = Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 4,
+        };
+        let img = solid_image(origin, 0x11);
+        let err = crop(
+            &img,
+            &origin,
+            &Rect {
+                x: 100,
+                y: 100,
+                w: 4,
+                h: 4,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not intersect"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn crop_returns_the_input_when_the_region_covers_everything() {
+        let origin = Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 4,
+        };
+        let img = solid_image(origin, 0x11);
+        // A region larger than the capture clips back to the origin, hitting the identity path.
+        let out = crop(
+            &img,
+            &origin,
+            &Rect {
+                x: -10,
+                y: -10,
+                w: 100,
+                h: 100,
+            },
+        )
+        .unwrap();
+        assert_eq!((out.width, out.height, out.stride), (4, 4, 16));
+        assert!(
+            Arc::ptr_eq(&out.pixels, &img.pixels),
+            "the identity path should share the buffer instead of copying"
+        );
+    }
+
+    #[test]
+    fn to_logical_size_returns_the_input_without_source_metadata() {
+        let mut img = solid_image(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+            0x22,
+        );
+        img.source = None;
+        let out = to_logical_size(&img);
+        assert_eq!((out.width, out.height), (4, 4));
+        assert!(Arc::ptr_eq(&out.pixels, &img.pixels));
+    }
+
+    #[rstest]
+    // Already at its logical size.
+    #[case(Rect { x: 0, y: 0, w: 4, h: 4 })]
+    // A degenerate logical size (an output that reported nothing usable).
+    #[case(Rect { x: 0, y: 0, w: 0, h: 4 })]
+    #[case(Rect { x: 0, y: 0, w: 4, h: 0 })]
+    fn to_logical_size_short_circuits_without_resampling(#[case] logical: Rect) {
+        let mut img = solid_image(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 4,
+            },
+            0x33,
+        );
+        img.source = Some(Output {
+            name: "FAKE".into(),
+            logical,
+            scale: 1,
+        });
+        let out = to_logical_size(&img);
+        assert_eq!((out.width, out.height), (4, 4));
+        assert!(
+            Arc::ptr_eq(&out.pixels, &img.pixels),
+            "the early-return paths should share the buffer instead of resampling"
         );
     }
 }

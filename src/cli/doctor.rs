@@ -500,6 +500,7 @@ fn yes_no(b: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn sample_state() -> DoctorState {
         let config = Config::default();
@@ -583,5 +584,19 @@ mod tests {
         assert!(last.contains("OK,"));
         assert!(last.contains("WARN,"));
         assert!(last.contains("FAIL"));
+    }
+
+    #[rstest]
+    #[case(Status::Ok, "OK")]
+    #[case(Status::Warn, "WARN")]
+    #[case(Status::Fail, "FAIL")]
+    fn status_tags_are_stable(#[case] status: Status, #[case] expected: &str) {
+        assert_eq!(status.tag(), expected);
+    }
+
+    #[test]
+    fn yes_no_renders_booleans() {
+        assert_eq!(yes_no(true), "yes");
+        assert_eq!(yes_no(false), "no");
     }
 }

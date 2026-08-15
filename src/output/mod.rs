@@ -166,6 +166,8 @@ pub fn encode_png(img: &CapturedImage, compression: PngCompression) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
     use std::sync::Arc;
 
     fn pixel_image() -> CapturedImage {
@@ -180,10 +182,65 @@ mod tests {
         }
     }
 
+    /// Build a `width`x`height` image whose pixel `(x, y)` carries distinct per-channel
+    /// values, laid out BGRA with `padding` extra bytes at the end of every row.
+    fn distinct_image(width: u32, height: u32, padding: u32) -> CapturedImage {
+        let stride = width * 4 + padding;
+        let mut pixels = vec![0u8; (stride * height) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let i = (y * stride + x * 4) as usize;
+                pixels[i] = 10 + x as u8; // B
+                pixels[i + 1] = 20 + x as u8; // G
+                pixels[i + 2] = 30 + x as u8; // R
+                pixels[i + 3] = 40 + y as u8; // A
+            }
+            // Poison the padding so any code that fails to skip it produces wrong pixels.
+            for p in 0..padding {
+                pixels[(y * stride + width * 4 + p) as usize] = 0xAB;
+            }
+        }
+        CapturedImage {
+            width,
+            height,
+            stride,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+            source: None,
+        }
+    }
+
     #[test]
     fn encodes_png_with_correct_header() {
         let png = encode_png(&pixel_image(), PngCompression::Fast).unwrap();
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    /// The BGRA -> RGBA swizzle is invisible to an all-white fixture, so decode the PNG back
+    /// and assert the channel order pixel by pixel. `padding` of 0 exercises the fast aligned
+    /// `u32` path; a non-zero padding forces the scalar fallback *and* proves the row padding
+    /// is dropped rather than encoded.
+    #[rstest]
+    #[case(PngCompression::Fast, 0)]
+    #[case(PngCompression::Fast, 8)]
+    #[case(PngCompression::Balanced, 0)]
+    #[case(PngCompression::Balanced, 8)]
+    #[case(PngCompression::Best, 0)]
+    #[case(PngCompression::Best, 8)]
+    fn encode_png_swizzles_bgra_to_rgba(#[case] compression: PngCompression, #[case] padding: u32) {
+        let img = distinct_image(3, 2, padding);
+        let png = encode_png(&img, compression).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap().to_rgba8();
+
+        assert_eq!(decoded.dimensions(), (3, 2));
+        for y in 0..2u32 {
+            for x in 0..3u32 {
+                assert_eq!(
+                    decoded.get_pixel(x, y).0,
+                    [30 + x as u8, 20 + x as u8, 10 + x as u8, 40 + y as u8],
+                    "pixel ({x}, {y}) has the wrong channel order"
+                );
+            }
+        }
     }
 
     #[test]

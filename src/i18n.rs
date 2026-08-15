@@ -130,4 +130,61 @@ mod tests {
         assert!(parse_lang("").is_none());
         assert!(parse_lang("fr-FR").is_some());
     }
+
+    /// Every non-English catalog must define exactly the keys English defines. A missing key
+    /// silently falls back to English at runtime, and a stale extra key is dead weight — both
+    /// are invisible without this check.
+    #[test]
+    fn every_catalog_defines_the_same_keys_as_english() {
+        let catalog = |lang: &str| -> Vec<String> {
+            let file = Localizations::get(&format!("{lang}/snypr.ftl"))
+                .unwrap_or_else(|| panic!("missing embedded catalog for {lang}"));
+            let text = std::str::from_utf8(&file.data).unwrap().to_owned();
+            let mut keys: Vec<String> = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                // Fluent message definitions start in column 0; indented lines are
+                // continuations or attributes.
+                .filter(|l| l.starts_with(|c: char| c.is_ascii_alphabetic()))
+                .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim().to_owned()))
+                .collect();
+            keys.sort();
+            keys.dedup();
+            keys
+        };
+
+        let english = catalog("en");
+        assert!(
+            !english.is_empty(),
+            "the English catalog should not be empty"
+        );
+
+        for lang in Localizations::iter()
+            .filter_map(|p| p.split('/').next().map(str::to_owned))
+            .filter(|l| l != "en")
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let keys = catalog(&lang);
+            let missing: Vec<_> = english.iter().filter(|k| !keys.contains(k)).collect();
+            let extra: Vec<_> = keys.iter().filter(|k| !english.contains(k)).collect();
+            assert!(missing.is_empty(), "{lang} is missing keys: {missing:?}");
+            assert!(
+                extra.is_empty(),
+                "{lang} has keys absent from en: {extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_falls_back_to_english_for_an_unknown_language() {
+        init(Some("zz-ZZ"));
+        assert_eq!(fl!("notify-copied"), "Screenshot copied to clipboard");
+    }
+
+    #[test]
+    fn init_honours_an_explicit_language() {
+        init(Some("fr"));
+        assert!(fl!("notify-copied").contains("presse-papiers"));
+        init(Some("en"));
+    }
 }

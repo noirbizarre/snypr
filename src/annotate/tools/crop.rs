@@ -31,3 +31,69 @@ impl Tool for CropTool {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    fn tool() -> CropTool {
+        CropTool {
+            bounds: Rect {
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40,
+            },
+        }
+    }
+
+    #[test]
+    fn reports_its_kind_and_bounds() {
+        let t = tool();
+        assert_eq!(t.kind(), ToolKind::Crop);
+        assert_eq!(t.bounds(), t.bounds);
+    }
+
+    /// Box-shaped tools hit-test with *closed* bounds (`x <= right()`), unlike
+    /// [`Rect::contains`] which is deliberately half-open. Pin that divergence.
+    #[rstest]
+    #[case::inside(20.0, 40.0, true)]
+    #[case::top_left_corner(10.0, 20.0, true)]
+    #[case::bottom_right_corner(40.0, 60.0, true)]
+    #[case::just_left(9.9, 40.0, false)]
+    #[case::just_above(20.0, 19.9, false)]
+    #[case::just_right(40.1, 40.0, false)]
+    #[case::just_below(20.0, 60.1, false)]
+    fn hit_test_uses_closed_bounds(#[case] x: f64, #[case] y: f64, #[case] expected: bool) {
+        assert_eq!(tool().hit_test(x, y), expected);
+        assert!(
+            !tool().bounds.contains(40, 60),
+            "Rect::contains is half-open on the right/bottom edges"
+        );
+    }
+
+    #[test]
+    fn translate_shifts_bounds_and_preserves_size() {
+        let mut t = tool();
+        t.translate(5.4, -7.6);
+        assert_eq!(
+            t.bounds,
+            Rect {
+                x: 15,
+                y: 12,
+                w: 30,
+                h: 40
+            }
+        );
+    }
+
+    #[test]
+    fn clone_box_preserves_bounds() {
+        let cloned = tool().clone_box();
+        assert_eq!(cloned.kind(), ToolKind::Crop);
+        assert_eq!(cloned.bounds(), tool().bounds);
+        assert!(cloned.as_any().downcast_ref::<CropTool>().is_some());
+    }
+}

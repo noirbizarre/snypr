@@ -128,4 +128,120 @@ mod tests {
         let again = serde_json::to_string(&back).unwrap();
         assert_eq!(json, again);
     }
+
+    /// The round-trip tests above compare serialisation to serialisation, so they stay green
+    /// even if a field is dropped in *both* directions. Pin the exact wire bytes instead.
+    #[rstest]
+    #[case(Request::Ping, r#"{"kind":"ping"}"#)]
+    #[case(Request::DrawToggle, r#"{"kind":"draw_toggle"}"#)]
+    #[case(Request::PassthroughToggle, r#"{"kind":"passthrough_toggle"}"#)]
+    fn unit_requests_serialise_to_snake_case_tags(#[case] req: Request, #[case] expected: &str) {
+        assert_eq!(serde_json::to_string(&req).unwrap(), expected);
+    }
+
+    #[test]
+    fn screenshot_request_omits_optional_fields_when_unset() {
+        let json = serde_json::to_string(&Request::Screenshot(ScreenshotRequest {
+            selection: SelectionSpec::Full,
+            cursor: false,
+            edit: false,
+            delay_secs: None,
+            sinks: vec![SinkSpec::Clipboard {
+                clipboard_kind: None,
+            }],
+        }))
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"screenshot","selection":{"kind":"full"},"cursor":false,"edit":false,"sinks":[{"kind":"clipboard"}]}"#
+        );
+    }
+
+    #[test]
+    fn screenshot_request_emits_optional_fields_when_set() {
+        let json = serde_json::to_string(&Request::Screenshot(ScreenshotRequest {
+            selection: SelectionSpec::Region {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            },
+            cursor: true,
+            edit: true,
+            delay_secs: Some(3),
+            sinks: vec![
+                SinkSpec::File {
+                    path: Some("/tmp/a.png".into()),
+                },
+                SinkSpec::Clipboard {
+                    clipboard_kind: Some(ClipboardKind::Primary),
+                },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"screenshot","selection":{"kind":"region","x":1,"y":2,"w":3,"h":4},"cursor":true,"edit":true,"delay_secs":3,"sinks":[{"kind":"file","path":"/tmp/a.png"},{"kind":"clipboard","clipboard_kind":"primary"}]}"#
+        );
+    }
+
+    #[rstest]
+    #[case(SelectionSpec::Full, r#"{"kind":"full"}"#)]
+    #[case(SelectionSpec::PerOutput, r#"{"kind":"per_output"}"#)]
+    #[case(SelectionSpec::Focused, r#"{"kind":"focused"}"#)]
+    #[case(SelectionSpec::Output { name: "DP-1".into() }, r#"{"kind":"output","name":"DP-1"}"#)]
+    #[case(SelectionSpec::Window, r#"{"kind":"window"}"#)]
+    #[case(SelectionSpec::Interactive, r#"{"kind":"interactive"}"#)]
+    fn selection_specs_use_snake_case_tags(#[case] spec: SelectionSpec, #[case] expected: &str) {
+        assert_eq!(serde_json::to_string(&spec).unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case(Response::Ok, r#"{"kind":"ok"}"#)]
+    #[case(Response::Paths { paths: vec!["/tmp/a.png".into()] }, r#"{"kind":"paths","paths":["/tmp/a.png"]}"#)]
+    #[case(Response::Error { message: "boom".into() }, r#"{"kind":"error","message":"boom"}"#)]
+    fn responses_use_snake_case_tags(#[case] resp: Response, #[case] expected: &str) {
+        assert_eq!(serde_json::to_string(&resp).unwrap(), expected);
+    }
+
+    /// `edit`, `delay_secs` and `clipboard_kind` all carry `#[serde(default)]` specifically so
+    /// frames written by older clients keep deserialising. Pin that contract.
+    #[test]
+    fn legacy_frames_without_the_optional_fields_still_parse() {
+        let legacy = r#"{"kind":"screenshot","selection":{"kind":"full"},"cursor":false,"sinks":[{"kind":"clipboard"},{"kind":"file","path":null}]}"#;
+        let Request::Screenshot(req) = serde_json::from_str::<Request>(legacy).unwrap() else {
+            panic!("expected a screenshot request");
+        };
+        assert!(!req.edit);
+        assert_eq!(req.delay_secs, None);
+        assert!(matches!(
+            req.sinks.as_slice(),
+            [
+                SinkSpec::Clipboard {
+                    clipboard_kind: None
+                },
+                SinkSpec::File { path: None }
+            ]
+        ));
+    }
+
+    #[test]
+    fn an_unknown_request_kind_is_rejected() {
+        let err = serde_json::from_str::<Request>(r#"{"kind":"launch_missiles"}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("launch_missiles"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn protocol_error_wraps_json_failures() {
+        let err = serde_json::from_str::<Request>("{ not json").unwrap_err();
+        let wrapped = ProtocolError::from(err);
+        assert!(matches!(wrapped, ProtocolError::Json(_)));
+        assert_eq!(
+            ProtocolError::Malformed("no trailing newline".into()).to_string(),
+            "malformed IPC frame: no trailing newline"
+        );
+    }
 }
