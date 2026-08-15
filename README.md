@@ -151,7 +151,8 @@ snypr screenshot --full --to file=/tmp/shot.png
 # the screenshot is written to $XDG_PICTURES_DIR/Screenshots/.
 snypr screenshot --full
 
-# One file per output (uses {output} in the filename template).
+# One file per output. `{output}` is inserted into the filename template
+# automatically when the template does not already contain it.
 snypr screenshot --full --per-output
 
 # Specific output by name, copied to the clipboard.
@@ -169,6 +170,9 @@ snypr screenshot --window
 
 # Explicit region (logical pixels): X,Y,WxH.
 snypr screenshot --region 100,200,800x600 --to file
+
+# Open the interactive selector explicitly (also the default with no selection flag).
+snypr screenshot --interactive
 
 # Interactive region selector → in-place annotation overlay → sinks.
 snypr screenshot --edit --to clipboard --to file
@@ -192,14 +196,15 @@ snypr screenshot --full --via-daemon
 
 ### Interactive selector
 
-The selector (used by `screenshot --edit` and the default `screenshot`) shows a floating
+The selector (shown by `screenshot` with no explicit selection flag, or with
+`--interactive`) shows a floating
 toolbar on the focused monitor with four modes — **Full**, **Screen**, **Window**,
-**Region** — plus a cursor toggle and a **Capture** button. The toolbar follows keyboard
+**Region** — plus a cursor toggle, a delay spinner, and a **Capture** button. The toolbar follows keyboard
 focus: it moves to whichever monitor you focus, while every monitor keeps its dimming
 overlay. Hold `Shift` while clicking Capture (the button's icon swaps live) to *also* open
 the in-place editor on the captured image. Keyboard shortcuts: `1/2/3/4` switch modes, drag
 with the mouse in Region mode, click on a monitor in Screen mode, then press `Enter`
-(Capture) or `Shift+Enter` (Capture + Annotate) to commit. `Esc` cancels.
+(Capture) or `Shift+Enter` / `Shift+KP_Enter` (Capture + Annotate) to commit. `Esc` cancels.
 
 ### Editor & overlay keybinds
 
@@ -282,7 +287,7 @@ hl.bind("SUPER + Print", hl.dsp.exec_cmd("snypr screenshot"))
 hl.bind("SUPER + SHIFT + Print",
     hl.dsp.exec_cmd("snypr screenshot --full --to file"))
 
--- One PNG per monitor (uses {output} in the filename template).
+-- One PNG per monitor; {output} is inserted into the template automatically.
 hl.bind("SUPER + SHIFT + ALT + Print",
     hl.dsp.exec_cmd("snypr screenshot --full --per-output --to file"))
 
@@ -432,7 +437,7 @@ Template tokens: `{ts}`, `{date}`, `{time}`, `{output}`, `{selection}`.
 
 ## Architecture
 
-See the design plan at `.opencode/plans/1778929144226-shiny-panda.md` for full details. The crate is a single binary with internal modules:
+The crate is a single binary with internal modules:
 
 ```
 src/
@@ -444,9 +449,11 @@ src/
 ├── bridge.rs    # async <-> GTK glue (gated behind `ui` feature)
 ├── context.rs   # shared Ctx = Arc<Context>
 ├── hypr.rs      # Hyprland IPC
+├── i18n.rs      # Fluent catalogs + the `fl!` macro
 ├── ipc.rs       # daemon protocol
 ├── daemon.rs    # Unix-socket IPC server
 ├── notify.rs    # desktop notifications (gated behind `notify` feature)
+├── path.rs      # tilde expansion helpers
 └── config.rs    # TOML configuration
 ```
 

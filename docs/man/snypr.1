@@ -33,8 +33,9 @@ is handed to the in-place annotation overlay before reaching the sinks.
 Stitch the bounding box covering every output into a single image.
 .TP
 .BR \-\-per\-output
-Produce one file per output. Requires a filename template containing \fB{output}\fR.
-Incompatible with \fB\-\-edit\fR.
+Produce one file per output. \fB{output}\fR is inserted into the filename template
+automatically when the template does not already contain it, so the files cannot collapse
+onto one another. Incompatible with \fB\-\-edit\fR.
 .TP
 .BR \-\-focused
 Capture the currently focused monitor, queried over Hyprland's IPC.
