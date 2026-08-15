@@ -117,13 +117,12 @@ impl std::str::FromStr for SinkSpec {
                 Some("regular") => Ok(SinkSpec::Clipboard(Some(ClipboardKind::Regular))),
                 Some("primary") => Ok(SinkSpec::Clipboard(Some(ClipboardKind::Primary))),
                 Some("both") => Ok(SinkSpec::Clipboard(Some(ClipboardKind::Both))),
-                Some(other) => Err(format!(
-                    "unknown clipboard kind `{other}` (expected `regular`, `primary`, or `both`)"
+                Some(other) => Err(crate::i18n::fl!(
+                    "error-unknown-clipboard-kind",
+                    kind = other
                 )),
             },
-            other => Err(format!(
-                "unknown sink `{other}` (expected `file` or `clipboard`)"
-            )),
+            other => Err(crate::i18n::fl!("error-unknown-sink", sink = other)),
         }
     }
 }

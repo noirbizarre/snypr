@@ -203,7 +203,7 @@ async fn handle_client(ctx: Ctx, state: Arc<DaemonState>, stream: UnixStream) ->
         let resp = match serde_json::from_str::<Request>(trimmed) {
             Ok(req) => dispatch(ctx.clone(), state.clone(), req).await,
             Err(err) => Response::Error {
-                message: format!("malformed request: {err}"),
+                message: crate::i18n::fl!("error-malformed-request", reason = err.to_string()),
             },
         };
         let mut bytes = serde_json::to_vec(&resp)?;
@@ -241,11 +241,11 @@ async fn toggle_overlay_passthrough(state: &Arc<DaemonState>) -> Result<()> {
     let guard = state.overlay.lock().await;
     let handle = guard
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("no draw overlay is currently running"))?;
+        .ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::fl!("error-no-draw-overlay")))?;
     handle
         .commands
         .send(crate::ui::overlay::OverlayCommand::TogglePassthrough)
-        .map_err(|_| anyhow::anyhow!("overlay command channel closed"))?;
+        .map_err(|_| anyhow::anyhow!("{}", crate::i18n::fl!("error-overlay-channel-closed")))?;
     Ok(())
 }
 
@@ -266,7 +266,7 @@ async fn run_screenshot_with_optional_lock(
         let _guard = state
             .editor
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("another editor session is already in progress"))?;
+            .map_err(|_| anyhow::anyhow!("{}", crate::i18n::fl!("error-editor-busy")))?;
         crate::cli::screenshot::execute(ctx.clone(), selection, cursor, sinks, true, delay).await
     } else {
         crate::cli::screenshot::execute(ctx.clone(), selection, cursor, sinks, false, delay).await

@@ -6,6 +6,11 @@ use tracing_subscriber::EnvFilter;
 use snypr::cli::{Cli, dispatch};
 
 fn main() -> ExitCode {
+    // Seed the locale from the environment *before* parsing, because clap runs value
+    // parsers (and emits their errors) during `parse`. `--lang` cannot be honoured here --
+    // it has not been parsed yet -- so parse-time errors follow `SNYPR_LANG` / `LANG` only.
+    snypr::i18n::init(std::env::var("SNYPR_LANG").ok().as_deref());
+
     let cli = Cli::parse();
 
     if let Err(err) = init_tracing(cli.verbose) {

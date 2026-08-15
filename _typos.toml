@@ -6,17 +6,17 @@
 # (see `cliff.toml`), which makes a clean run load-bearing rather than advisory.
 
 [files]
-# The changelog is generated from commit messages that are already immutable —
+# The changelog is generated from commit messages that are already immutable --
 # a typo in a shipped commit subject cannot be fixed by editing this file.
-extend-exclude = ["CHANGELOG.md"]
+#
+# Non-English catalogs are excluded wholesale: `typos` has no notion of the
+# locale a file is written in, so it reports ordinary French words as English
+# misspellings. Add new translations here as they land.
+extend-exclude = ["CHANGELOG.md", "i18n/fr/"]
 
 [default.extend-words]
-# French UI catalog and the assertions that pin its strings.
-espace = "espace"       # "espace insécable" — non-breaking space
-sur = "sur"             # "cliquez sur" — click on
-presse = "presse"       # "presse-papiers" — clipboard
-visibles = "visibles"   # plural of "visible"
-invalide = "invalide"   # "invalid"
+# French strings asserted from Rust test code, which cannot be excluded by path.
+presse = "presse"       # "presse-papiers" -- clipboard
 
 # Domain vocabulary that `typos` mistakes for misspellings.
 unparseable = "unparseable"
