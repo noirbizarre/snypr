@@ -80,11 +80,12 @@ executing locally.
 .SS draw
 Launch the live draw-on-screen overlay. Tool keys: \fBR\fR rectangle, \fBO\fR ellipse,
 \fBA\fR arrow, \fBL\fR line (no arrowhead), \fBH\fR highlight, \fBF\fR freehand, \fBN\fR
-numbered marker, \fBT\fR text, \fBX\fR redact (press the active tool's key again, or click
-its button, to deactivate it). Other keys: \fBCtrl+Z\fR undo, \fBCtrl+L\fR clear all
-layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBP\fR toggle pointer
-passthrough, \fBEsc\fR quit. \fBBlur\fR and \fBCrop\fR are editor-only and are not
-available in the live overlay. With no tool active the overlay is in \fBSelect\fR mode:
+numbered marker, \fBT\fR text, \fBB\fR blur, \fBX\fR redact (press the active tool's key
+again, or click its button, to deactivate it). Other keys: \fBCtrl+Z\fR undo, \fBCtrl+L\fR
+clear all layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBP\fR toggle
+pointer passthrough, \fBEsc\fR quit. \fBCrop\fR is editor-only and is not available in the
+live overlay; \fBBlur\fR is available, and grabs the underlying desktop the first time it
+is used. With no tool active the overlay is in \fBSelect\fR mode:
 click an existing shape to pick it, drag its body to move it, drag a handle to resize it
 (an Arrow/Line endpoint, a numbered marker's radius, or — for text — corner handles scale
 the font while side handles set a wrap width), double-click text to re-edit it, press

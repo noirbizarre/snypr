@@ -7,15 +7,15 @@ A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https:
 Snypr pulls together what currently requires three separate tools on a Wayland desktop:
 
 - **Capture** — like [`grim`](https://sr.ht/~emersion/grim/) / [HyprCapture](https://github.com/gfhdhytghd/HyprCapture), but native and integrated.
-- **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, ellipse, highlight, blur, text, freehand, numbered marker, redact, crop. A built-in Select mode (active when no tool is) moves, resizes, and re-edits shapes you've already drawn.
+- **Annotate** — like [Satty](https://github.com/Satty-org/Satty): arrow, rectangle, ellipse, line, highlight, blur, text, freehand, numbered marker, redact, crop. A built-in Select mode (active when no tool is) moves, resizes, and re-edits shapes you've already drawn.
 - **Draw live on the screen** — like [Draw-On-Gnome](https://github.com/daveprowse/Draw-On-Gnome) but on wlroots / Hyprland, ideal for streaming and Google Meet presentations.
 
 Screen capture talks the `zwlr_screencopy_manager_v1` Wayland protocol directly; UI is GTK4 with `gtk4-layer-shell`, and the annotation canvas uses GSK render nodes for GPU-accelerated drawing.
 
 ## Status
 
-The four subcommands are wired end-to-end. All ten annotation tools (Rect, Ellipse, Arrow,
-Highlight, Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on
+The four subcommands are wired end-to-end. All eleven annotation tools (Rect, Ellipse, Arrow,
+Line, Highlight, Freehand, Number, Text, Blur, Redact, Crop) render through GSK render nodes on
 screen and flatten to PNG through Cairo on save. With no tool active, a Select mode picks an
 existing shape to move it, resize it via drag handles, re-edit text, or delete it.
 
@@ -23,7 +23,7 @@ existing shape to move it, resize it via drag handles, re-edit text, or delete i
 | ------------- | --------------------------------------------------------------------------------- |
 | `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the in-place annotation overlay before sinks |
 | `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools; Ctrl+S saves via the zone selector |
-| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`, `PassthroughToggle`; tray (StatusNotifierItem) when enabled in config |
+| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`, `PassthroughToggle`; tray (StatusNotifierItem) with `--systray` |
 | `doctor`      | Markdown diagnostic report covering version, environment, configuration and live capability probes (Hyprland IPC, wlr-screencopy, daemon socket) |
 
 ## Build
@@ -207,7 +207,7 @@ with the mouse in Region mode, click on a monitor in Screen mode, then press `En
 | `F`      | Freehand tool                |
 | `N`      | Numbered marker              |
 | `T`      | Text                         |
-| `B`      | Blur (editor only)           |
+| `B`      | Blur                         |
 | `X`      | Redact (solid black)         |
 | `C`      | Crop (editor only)           |
 | `Ctrl+Z` | Undo last layer              |
