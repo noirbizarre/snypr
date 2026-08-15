@@ -44,14 +44,14 @@ pub struct Args {
 }
 
 #[cfg(feature = "ui")]
-pub async fn run(args: Args) -> Result<()> {
+pub async fn run(args: Args, config_override: Option<&std::path::Path>) -> Result<()> {
     use anyhow::Context as _;
 
     use crate::config::Config;
     use crate::context::Context;
     use crate::ui::overlay::{OverlayMode, run as run_overlay};
 
-    let config = Config::load_default().context("loading configuration")?;
+    let config = Config::resolve(config_override).context("loading configuration")?;
     let ctx = Context::new(config).await?;
     let kind = crate::cli::screenshot::effective_clipboard_kind(args.clipboard_type, &ctx.config);
     let sinks: Vec<SinkSpec> = args
@@ -77,6 +77,6 @@ pub async fn run(args: Args) -> Result<()> {
 }
 
 #[cfg(not(feature = "ui"))]
-pub async fn run(_args: Args) -> Result<()> {
+pub async fn run(_args: Args, _config_override: Option<&std::path::Path>) -> Result<()> {
     anyhow::bail!("{}", crate::i18n::fl!("error-draw-requires-ui-feature"))
 }

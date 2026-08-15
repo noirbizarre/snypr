@@ -464,6 +464,19 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Load the configuration honoring an explicit `--config` / `SNYPR_CONFIG` override.
+    ///
+    /// An explicit override is loaded with [`load`](Self::load), which fails when the file is
+    /// missing or malformed: asking for a specific config and silently getting the default
+    /// one is exactly the failure mode this indirection exists to prevent. Without an
+    /// override, [`load_default`](Self::load_default) applies, which tolerates an absent file.
+    pub fn resolve(override_path: Option<&Path>) -> Result<Self> {
+        match override_path {
+            Some(path) => Self::load(path),
+            None => Self::load_default(),
+        }
+    }
+
     /// Resolved default save directory.
     ///
     /// - If `[output].directory` is set in the config, it is used verbatim.
@@ -607,6 +620,25 @@ mod tests {
         std::fs::write(&path, "not = a [valid").unwrap();
         let err = Config::load(&path).unwrap_err();
         assert!(format!("{err:#}").contains("parsing TOML"));
+    }
+
+    #[test]
+    fn resolve_reads_the_override_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alt.toml");
+        std::fs::write(&path, "language = \"fr\"\n").unwrap();
+        let cfg = Config::resolve(Some(&path)).unwrap();
+        assert_eq!(cfg.language.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn resolve_fails_loudly_on_a_missing_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.toml");
+        // Falling back to the default config here would silently ignore an explicit
+        // `--config`, which is precisely the bug `resolve` exists to prevent.
+        let err = Config::resolve(Some(&missing)).unwrap_err();
+        assert!(format!("{err:#}").contains("reading config"));
     }
 
     #[test]

@@ -65,8 +65,8 @@ pub struct Args {
     pub via_daemon: bool,
 }
 
-pub async fn run(args: Args) -> Result<()> {
-    let config = Config::load_default().context("loading configuration")?;
+pub async fn run(args: Args, config_override: Option<&std::path::Path>) -> Result<()> {
+    let config = Config::resolve(config_override).context("loading configuration")?;
     let ctx = Context::new(config).await?;
 
     let selection = parse_selection(&args)?;

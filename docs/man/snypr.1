@@ -14,7 +14,10 @@ and other wlroots-based compositors. It captures pixels via the
 .SH GLOBAL OPTIONS
 .TP
 .BR \-\-config " " \fIPATH\fR
-Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/snypr/config.toml\fR.
+Use \fIPATH\fR instead of \fI$XDG_CONFIG_HOME/snypr/config.toml\fR. Applies to every
+subcommand, and is an error if \fIPATH\fR does not exist. Ignored with
+\fB\-\-via-daemon\fR, where the request runs in the daemon's process against the
+configuration that daemon started with.
 .TP
 .BR \-v ", " \-\-verbose
 Increase log verbosity (repeatable). \fB\-v\fR selects debug, \fB\-vv\fR trace; either

@@ -17,11 +17,15 @@ fn main() -> ExitCode {
     // Precedence: `--lang` flag > `[language]` in config > env > English fallback.
     // Config load is best-effort: failures here just fall through to env detection.
     let lang_override = cli.lang.clone().or_else(|| {
-        snypr::config::Config::load_default()
+        snypr::config::Config::resolve(cli.config.as_deref())
             .ok()
             .and_then(|c| c.language)
     });
     snypr::i18n::init(lang_override.as_deref());
+
+    // Kept out of `cli` because `dispatch` consumes it, and the error path below still
+    // needs the override to decide whether error notifications are enabled.
+    let cli_config = cli.config.clone();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -48,7 +52,7 @@ fn main() -> ExitCode {
                     // Load the config best-effort so users can disable error notifications
                     // via `[notify] error = false`. If the config can't be loaded we fall
                     // back to defaults (notifications enabled) — matches prior behaviour.
-                    let cfg = snypr::config::Config::load_default()
+                    let cfg = snypr::config::Config::resolve(cli_config.as_deref())
                         .unwrap_or_default()
                         .notify;
                     snypr::notify::notify_error(&cfg, &err);

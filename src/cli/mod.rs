@@ -130,10 +130,10 @@ impl std::str::FromStr for SinkSpec {
 
 /// Top-level dispatch.
 pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
-    // Captured before `cli` is consumed so subcommands that need it (currently only
-    // `doctor`) can honor the global `--config` flag. Other subcommands still rely on
-    // `Config::load_default()` internally — threading `--config` through them is tracked
-    // separately.
+    // Captured before `cli` is consumed, then handed to every subcommand so the global
+    // `--config` / `SNYPR_CONFIG` override applies uniformly. `--via-daemon` is the one
+    // exception: the request executes in the daemon's process, which resolved its own
+    // configuration when it started.
     let config_override = cli.config.clone();
     let command = cli.command.unwrap_or_else(|| {
         // No subcommand → default to an interactive screenshot.
@@ -144,9 +144,9 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             dispatch_via_daemon(Command::Screenshot(args)).await
         }
         Command::Draw(args) if args.via_daemon => dispatch_via_daemon(Command::Draw(args)).await,
-        Command::Screenshot(args) => screenshot::run(args).await,
-        Command::Draw(args) => draw::run(args).await,
-        Command::Daemon(args) => daemon::run(args).await,
+        Command::Screenshot(args) => screenshot::run(args, config_override.as_deref()).await,
+        Command::Draw(args) => draw::run(args, config_override.as_deref()).await,
+        Command::Daemon(args) => daemon::run(args, config_override.as_deref()).await,
         Command::Doctor(args) => doctor::run(args, config_override).await,
     }
 }
