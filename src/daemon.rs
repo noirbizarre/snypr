@@ -6,7 +6,10 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
+// Only the overlay lifecycle uses a oneshot, and that whole path is `ui`-gated.
+#[cfg(feature = "ui")]
+use tokio::sync::oneshot;
 
 use crate::capture::Selection;
 use crate::capture::region::Rect;
@@ -17,6 +20,9 @@ use crate::ipc::{Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
 /// Handle to a daemon-spawned draw overlay. Holds the channels needed to drive it from
 /// outside the GTK thread: a oneshot to tear it down, and an mpsc to inject runtime
 /// commands (passthrough toggles, future tool changes, …).
+///
+/// Only exists in `ui` builds: without the feature there is no overlay to hold a handle to.
+#[cfg(feature = "ui")]
 struct OverlayHandle {
     shutdown: oneshot::Sender<()>,
     commands: tokio::sync::mpsc::UnboundedSender<crate::ui::overlay::OverlayCommand>,
@@ -35,6 +41,7 @@ struct DaemonState {
     /// `Some(handle)` while a daemon-managed draw overlay is alive. A `DrawToggle` request
     /// flips this: present → fire `shutdown` to tear it down; absent → spawn a fresh overlay.
     /// A `PassthroughToggle` request reads the `commands` channel instead.
+    #[cfg(feature = "ui")]
     overlay: Mutex<Option<OverlayHandle>>,
 }
 
@@ -237,6 +244,7 @@ async fn dispatch(ctx: Ctx, state: Arc<DaemonState>, req: Request) -> Response {
 /// Send a [`crate::ui::overlay::OverlayCommand::TogglePassthrough`] to a live daemon-managed
 /// overlay. Errors when no overlay is alive — the user is expected to wire this to a
 /// Hyprland global keybind that's only meaningful when an overlay is up.
+#[cfg(feature = "ui")]
 async fn toggle_overlay_passthrough(state: &Arc<DaemonState>) -> Result<()> {
     let guard = state.overlay.lock().await;
     let handle = guard
@@ -247,6 +255,12 @@ async fn toggle_overlay_passthrough(state: &Arc<DaemonState>) -> Result<()> {
         .send(crate::ui::overlay::OverlayCommand::TogglePassthrough)
         .map_err(|_| anyhow::anyhow!("{}", crate::i18n::fl!("error-overlay-channel-closed")))?;
     Ok(())
+}
+
+/// Without the `ui` feature there is no overlay to toggle passthrough on.
+#[cfg(not(feature = "ui"))]
+async fn toggle_overlay_passthrough(_state: &Arc<DaemonState>) -> Result<()> {
+    anyhow::bail!("{}", crate::i18n::fl!("error-draw-requires-ui-feature"))
 }
 
 /// Acquire `state.editor` with `try_lock` (only when `edit` is true) so a second editor request
@@ -277,6 +291,7 @@ async fn run_screenshot_with_optional_lock(
 /// spawn a fresh one. The `oneshot::Sender` stored in `state.overlay` is the shutdown signal
 /// the overlay's GTK task awaits via `attach_shutdown`; a spawned task clears the slot when
 /// the overlay actually exits so a follow-up toggle starts a new one.
+#[cfg(feature = "ui")]
 async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response> {
     let mut guard = state.overlay.lock().await;
     if let Some(handle) = guard.take() {
@@ -316,6 +331,13 @@ async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response>
         *guard = None;
     });
     Ok(Response::Ok)
+}
+
+/// Without the `ui` feature the draw overlay cannot be built, so the toggle is a hard error
+/// rather than a silent no-op — the caller asked for something this binary cannot do.
+#[cfg(not(feature = "ui"))]
+async fn toggle_overlay(_ctx: &Ctx, _state: &Arc<DaemonState>) -> Result<Response> {
+    anyhow::bail!("{}", crate::i18n::fl!("error-draw-requires-ui-feature"))
 }
 
 async fn run_screenshot(
