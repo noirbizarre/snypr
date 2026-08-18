@@ -7,9 +7,9 @@
 <p align="center">
   <a href="https://github.com/noirbizarre/snypr/actions/workflows/ci.yml"><img src="https://github.com/noirbizarre/snypr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://codecov.io/gh/noirbizarre/snypr"><img src="https://codecov.io/gh/noirbizarre/snypr/graph/badge.svg" alt="Codecov"></a>
-  <img src="https://img.shields.io/github/v/release/noirbizarre/snypr" alt="Release">
+  <a href="https://github.com/noirbizarre/snypr/releases/latest"><img src="https://img.shields.io/github/v/release/noirbizarre/snypr" alt="Release"></a>
   <a href="https://aur.archlinux.org/packages/snypr-bin"><img src="https://img.shields.io/aur/version/snypr-bin" alt="AUR"></a>
-  <img src="https://img.shields.io/github/license/noirbizarre/snypr" alt="License">
+  <a href="https://github.com/noirbizarre/snypr/blob/main/LICENSE"><img src="https://img.shields.io/github/license/noirbizarre/snypr" alt="License"></a>
 </p>
 
 ---
