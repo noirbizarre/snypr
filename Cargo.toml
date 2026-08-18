@@ -30,6 +30,9 @@ ui = [
   "dep:glib",
   "dep:cairo-rs",
   "dep:pango",
+  # Build-time only: compiles the icon gresource that `ui::install_icon_resources`
+  # embeds. Optional so a `--no-default-features` build needs no system glib at all.
+  "dep:glib-build-tools",
 ]
 tray = ["ui", "dep:ksni"]
 # Emit a desktop notification when snypr exits with an error. Useful when launched from a
@@ -83,7 +86,10 @@ image = { version = "0.25", default-features = false, features = [
 bytemuck = "1"
 
 # Wayland (capture)
-smithay-client-toolkit = "0.21"
+# Registry / output / shm plumbing for the capture backend only — no seat or keyboard
+# handling, so the default `xkbcommon` and `calloop` features are dead weight. Dropping
+# them also drops a libxkbcommon system dependency from the toolkit-free build.
+smithay-client-toolkit = { version = "0.21", default-features = false }
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 memmap2 = "0.9"
@@ -128,7 +134,9 @@ unic-langid = "0.9"
 once_cell = "1"
 
 [build-dependencies]
-glib-build-tools = "0.22"
+# Optional, enabled by `ui`: it pulls glib-sys, and a toolkit-free build must not
+# require system glib to compile.
+glib-build-tools = { version = "0.22", optional = true }
 
 [dev-dependencies]
 rstest = "0.26"
