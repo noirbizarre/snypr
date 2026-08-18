@@ -24,5 +24,9 @@ pub mod ui;
 pub mod annotate;
 pub mod daemon;
 
+/// Fixtures shared across the in-crate test modules.
+#[cfg(test)]
+pub(crate) mod testing;
+
 #[cfg(feature = "notify")]
 pub mod notify;

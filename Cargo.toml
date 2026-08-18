@@ -35,7 +35,9 @@ tray = ["ui", "dep:ksni"]
 # Emit a desktop notification when snypr exits with an error. Useful when launched from a
 # Hyprland keybind where stderr is detached.
 notify = ["dep:notify-rust"]
-# Reserved for tests that require a live Wayland compositor.
+# Enables `tests/wayland.rs`, which drives the real zwlr_screencopy path against a live
+# compositor. The tests skip themselves when the protocol is unavailable (CI's headless
+# Weston does not implement it); set SNYPR_REQUIRE_WAYLAND_CAPTURE=1 to make that a failure.
 integration-wayland = []
 
 [dependencies]

@@ -1617,18 +1617,10 @@ mod imp_veil {
 mod tests {
     use super::*;
     use crate::cli::ClipboardKind;
-    use crate::config::Config;
-    use crate::context::Context;
     use pretty_assertions::assert_eq;
     use rstest::rstest;
 
-    async fn test_ctx(default_sinks: &[&str]) -> Ctx {
-        let mut config = Config::default();
-        config.output.default_sinks = default_sinks.iter().map(|s| (*s).to_owned()).collect();
-        config.notify.success = false;
-        config.notify.error = false;
-        Context::new(config).await.unwrap()
-    }
+    use crate::testing::test_ctx_with_sinks as test_ctx;
 
     #[rstest]
     #[case::file(&["file"], OutputMode::File)]
@@ -1691,5 +1683,142 @@ mod tests {
             adopt_output_mode(&shared, OutputMode::File),
             vec![SinkSpec::File(Some(target))]
         );
+    }
+
+    // --- picker sensitivity tables ----------------------------------------
+    //
+    // These three predicates drive whether the colour / dash / font-size pickers are
+    // sensitive for the active tool. They are exhaustive matches over `ToolKind`, so the
+    // tests enumerate every variant explicitly: adding a tool must force a decision here
+    // rather than silently inheriting `false`.
+
+    /// Every `ToolKind`, listed by hand so a new variant breaks these tests at compile time
+    /// via the exhaustive match below rather than being quietly omitted.
+    const ALL_TOOL_KINDS: [ToolKind; 12] = [
+        ToolKind::Select,
+        ToolKind::Arrow,
+        ToolKind::Line,
+        ToolKind::Rect,
+        ToolKind::Ellipse,
+        ToolKind::Text,
+        ToolKind::Blur,
+        ToolKind::Highlight,
+        ToolKind::Freehand,
+        ToolKind::Number,
+        ToolKind::Redact,
+        ToolKind::Crop,
+    ];
+
+    #[test]
+    fn the_tool_kind_list_is_exhaustive() {
+        // The match is the actual guard: a new variant fails to compile here, which is what
+        // makes the table-driven tests below trustworthy.
+        for kind in ALL_TOOL_KINDS {
+            match kind {
+                ToolKind::Select
+                | ToolKind::Arrow
+                | ToolKind::Line
+                | ToolKind::Rect
+                | ToolKind::Ellipse
+                | ToolKind::Text
+                | ToolKind::Blur
+                | ToolKind::Highlight
+                | ToolKind::Freehand
+                | ToolKind::Number
+                | ToolKind::Redact
+                | ToolKind::Crop => {}
+            }
+        }
+        // No duplicates, so "12 variants" really is 12 distinct ones.
+        let mut seen = ALL_TOOL_KINDS.to_vec();
+        seen.dedup();
+        assert_eq!(seen.len(), ALL_TOOL_KINDS.len());
+    }
+
+    #[test]
+    fn colorable_tools_are_exactly_the_ones_that_draw_in_a_user_chosen_colour() {
+        let colorable: Vec<ToolKind> = ALL_TOOL_KINDS
+            .into_iter()
+            .filter(|k| kind_is_colorable(*k))
+            .collect();
+        assert_eq!(
+            colorable,
+            vec![
+                ToolKind::Arrow,
+                ToolKind::Line,
+                ToolKind::Rect,
+                ToolKind::Ellipse,
+                ToolKind::Text,
+                ToolKind::Highlight,
+                ToolKind::Freehand,
+                ToolKind::Number,
+            ]
+        );
+    }
+
+    #[test]
+    fn obscuring_and_modal_tools_have_no_colour() {
+        // Blur and Redact deliberately hide content — a user-chosen colour would defeat
+        // them. Select and Crop are modes, not layers.
+        for kind in [
+            ToolKind::Blur,
+            ToolKind::Redact,
+            ToolKind::Select,
+            ToolKind::Crop,
+        ] {
+            assert!(!kind_is_colorable(kind), "{kind:?} must not be colorable");
+        }
+    }
+
+    #[test]
+    fn styleable_tools_are_exactly_the_outline_rendering_ones() {
+        let styleable: Vec<ToolKind> = ALL_TOOL_KINDS
+            .into_iter()
+            .filter(|k| kind_is_styleable(*k))
+            .collect();
+        assert_eq!(
+            styleable,
+            vec![
+                ToolKind::Arrow,
+                ToolKind::Line,
+                ToolKind::Rect,
+                ToolKind::Ellipse,
+                ToolKind::Freehand,
+            ]
+        );
+    }
+
+    #[test]
+    fn every_styleable_tool_is_also_colorable() {
+        // The dash picker is documented as a subset of the colour picker; if this inverts,
+        // the toolbar can offer a dash style for a tool with no stroke to apply it to.
+        for kind in ALL_TOOL_KINDS.into_iter().filter(|k| kind_is_styleable(*k)) {
+            assert!(
+                kind_is_colorable(kind),
+                "{kind:?} is styleable but not colorable"
+            );
+        }
+    }
+
+    #[test]
+    fn filled_and_glyph_tools_are_colorable_but_not_styleable() {
+        // Highlight is a filled rect, Number is text on a disc, Text is glyphs — none has an
+        // outline for a dash pattern to apply to.
+        for kind in [ToolKind::Highlight, ToolKind::Number, ToolKind::Text] {
+            assert!(kind_is_colorable(kind), "{kind:?} should be colorable");
+            assert!(!kind_is_styleable(kind), "{kind:?} should not be styleable");
+        }
+    }
+
+    #[test]
+    fn only_text_exposes_a_font_size() {
+        let sized: Vec<ToolKind> = ALL_TOOL_KINDS
+            .into_iter()
+            .filter(|k| kind_has_font_size(*k))
+            .collect();
+        // Number renders glyphs too, but its size is derived from the disc radius and stays
+        // implicit — the font-size picker must not claim to control it.
+        assert_eq!(sized, vec![ToolKind::Text]);
+        assert!(!kind_has_font_size(ToolKind::Number));
     }
 }

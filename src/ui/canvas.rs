@@ -2651,6 +2651,40 @@ fn clamp_to_doc(r: Rect, size: (u32, u32)) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    // --- fixtures ---------------------------------------------------------
+
+    fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn pending(buffer: &str, caret: usize) -> PendingText {
+        PendingText {
+            origin: (0.0, 0.0),
+            buffer: buffer.to_owned(),
+            caret,
+            color: [1.0, 1.0, 1.0, 1.0],
+            size_pt: 16.0,
+            wrap_width: None,
+            caret_visible: false,
+        }
+    }
+
+    fn text_tool(text: &str) -> TextTool {
+        TextTool::new((10.0, 20.0), text.to_owned(), 16.0, [1.0; 4], (100, 40))
+    }
+
+    fn manip(grab: Grab, origin: GrabGeometry, start: (f64, f64)) -> Manipulation {
+        Manipulation {
+            layer: 0,
+            grab,
+            origin,
+            start,
+            last: start,
+        }
+    }
 
     #[test]
     fn clamp_to_doc_constrains_overflow() {
@@ -2709,5 +2743,911 @@ mod tests {
             color: [1.0, 1.0, 0.0, 0.35],
         });
         assert!(!set_layer_style(&mut hl, StrokeStyle::Dotted));
+    }
+
+    // --- caret / buffer helpers -------------------------------------------
+    //
+    // These index `buffer` by *byte* offset, so every one of them is a UTF-8
+    // boundary hazard. The tests below deliberately mix ASCII, 2-byte (é),
+    // 3-byte (—) and 4-byte (emoji) sequences.
+
+    #[test]
+    fn insert_at_caret_splices_at_the_byte_offset_and_advances_the_caret() {
+        let mut pt = pending("hello world", 5);
+        insert_at_caret(&mut pt, ",");
+        assert_eq!(pt.buffer, "hello, world");
+        assert_eq!(pt.caret, 6);
+    }
+
+    #[test]
+    fn insert_at_caret_advances_by_byte_length_not_char_count() {
+        let mut pt = pending("", 0);
+        insert_at_caret(&mut pt, "é");
+        // 'é' is two bytes; a char-count caret would land mid-sequence.
+        assert_eq!(pt.caret, 2);
+        assert!(pt.buffer.is_char_boundary(pt.caret));
+    }
+
+    #[test]
+    fn insert_at_caret_appends_at_the_end_of_the_buffer() {
+        let mut pt = pending("ab", 2);
+        insert_at_caret(&mut pt, "c");
+        assert_eq!(pt.buffer, "abc");
+        assert_eq!(pt.caret, 3);
+    }
+
+    #[rstest]
+    // ASCII: one byte back.
+    #[case("abc", 3, 2)]
+    #[case("abc", 1, 0)]
+    // Already at the start.
+    #[case("abc", 0, 0)]
+    #[case("", 0, 0)]
+    // 2-byte 'é' — must skip the whole sequence, not land on the continuation byte.
+    #[case("aé", 3, 1)]
+    // 3-byte em dash.
+    #[case("a—", 4, 1)]
+    // 4-byte emoji.
+    #[case("a😀", 5, 1)]
+    // Newlines are ordinary one-byte characters here.
+    #[case("a\nb", 2, 1)]
+    fn prev_char_boundary_lands_on_a_boundary(
+        #[case] s: &str,
+        #[case] idx: usize,
+        #[case] expected: usize,
+    ) {
+        let got = prev_char_boundary(s, idx);
+        assert_eq!(got, expected);
+        assert!(
+            s.is_char_boundary(got),
+            "{got} is not a char boundary of {s:?}"
+        );
+    }
+
+    #[rstest]
+    #[case("abc", 0, 1)]
+    #[case("abc", 2, 3)]
+    // Already at (or past) the end.
+    #[case("abc", 3, 3)]
+    #[case("", 0, 0)]
+    #[case("aé", 1, 3)]
+    #[case("a—", 1, 4)]
+    #[case("a😀", 1, 5)]
+    #[case("a\nb", 1, 2)]
+    fn next_char_boundary_lands_on_a_boundary(
+        #[case] s: &str,
+        #[case] idx: usize,
+        #[case] expected: usize,
+    ) {
+        let got = next_char_boundary(s, idx);
+        assert_eq!(got, expected);
+        assert!(
+            s.is_char_boundary(got),
+            "{got} is not a char boundary of {s:?}"
+        );
+    }
+
+    #[test]
+    fn char_boundary_walks_are_inverses_across_a_mixed_width_string() {
+        let s = "aé—😀z";
+        // Walk forward collecting every boundary, then walk back and expect the mirror.
+        let mut forward = vec![0usize];
+        let mut i = 0;
+        while i < s.len() {
+            i = next_char_boundary(s, i);
+            forward.push(i);
+        }
+        let mut backward = vec![s.len()];
+        let mut j = s.len();
+        while j > 0 {
+            j = prev_char_boundary(s, j);
+            backward.push(j);
+        }
+        backward.reverse();
+        assert_eq!(forward, backward);
+        assert_eq!(forward.len(), s.chars().count() + 1);
+    }
+
+    #[rstest]
+    // Single line: always 0.
+    #[case("hello", 0, 0)]
+    #[case("hello", 5, 0)]
+    // Caret on the second line.
+    #[case("ab\ncd", 3, 3)]
+    #[case("ab\ncd", 5, 3)]
+    // Caret exactly on the newline belongs to the *first* line.
+    #[case("ab\ncd", 2, 0)]
+    // Empty line between two others.
+    #[case("a\n\nb", 2, 2)]
+    #[case("", 0, 0)]
+    fn line_start_finds_the_byte_after_the_preceding_newline(
+        #[case] s: &str,
+        #[case] caret: usize,
+        #[case] expected: usize,
+    ) {
+        assert_eq!(line_start(s, caret), expected);
+    }
+
+    #[rstest]
+    #[case("hello", 0, 5)]
+    #[case("hello", 5, 5)]
+    #[case("ab\ncd", 0, 2)]
+    #[case("ab\ncd", 2, 2)]
+    // Second line runs to the end of the buffer (no trailing newline).
+    #[case("ab\ncd", 3, 5)]
+    #[case("a\n\nb", 2, 2)]
+    #[case("", 0, 0)]
+    fn line_end_stops_before_the_next_newline(
+        #[case] s: &str,
+        #[case] caret: usize,
+        #[case] expected: usize,
+    ) {
+        assert_eq!(line_end(s, caret), expected);
+    }
+
+    #[test]
+    fn home_and_end_bracket_a_multi_byte_line() {
+        // "aé—" is a(0..1) é(1..3) —(3..6), so 3 is the boundary between é and the em dash.
+        let s = "aé—\nxy";
+        let caret = 3;
+        assert_eq!(line_start(s, caret), 0);
+        // Line 1 is 'a'(1) + 'é'(2) + '—'(3) = 6 bytes.
+        assert_eq!(line_end(s, caret), 6);
+    }
+
+    // --- vertical caret movement ------------------------------------------
+
+    #[test]
+    fn move_caret_up_preserves_the_column_in_characters() {
+        let s = "abcd\nefgh";
+        // Caret after 'g' on line 2 → column 3.
+        let caret = 5 + 3;
+        assert_eq!(move_caret_vertically(s, caret, -1), 3);
+    }
+
+    #[test]
+    fn move_caret_down_preserves_the_column_in_characters() {
+        let s = "abcd\nefgh";
+        assert_eq!(move_caret_vertically(s, 3, 1), 5 + 3);
+    }
+
+    #[test]
+    fn move_caret_column_is_measured_in_chars_not_bytes() {
+        // Line 1 is three chars but seven bytes; line 2 is plain ASCII.
+        let s = "aé—\nxyz";
+        let caret = 6; // end of line 1 → column 3
+        let down = move_caret_vertically(s, caret, 1);
+        // Column 3 on "xyz" is its end, byte 7 + 3.
+        assert_eq!(down, 7 + 3);
+        assert_eq!(&s[7..down], "xyz");
+    }
+
+    #[test]
+    fn move_caret_snaps_to_the_end_of_a_shorter_destination_line() {
+        let s = "abcdef\nxy";
+        let caret = 5; // column 5 on the long line
+        let down = move_caret_vertically(s, caret, 1);
+        // "xy" has only two chars → snap to its end.
+        assert_eq!(down, s.len());
+    }
+
+    #[test]
+    fn move_caret_up_from_the_first_line_is_a_no_op() {
+        let s = "abc\ndef";
+        assert_eq!(move_caret_vertically(s, 2, -1), 2);
+    }
+
+    #[test]
+    fn move_caret_down_from_the_last_line_is_a_no_op() {
+        let s = "abc\ndef";
+        assert_eq!(move_caret_vertically(s, 6, 1), 6);
+    }
+
+    #[test]
+    fn move_caret_traverses_an_empty_line() {
+        let s = "abc\n\ndef";
+        // Down from column 2 of line 1 onto the empty line snaps to its (zero-length) end.
+        let mid = move_caret_vertically(s, 2, 1);
+        assert_eq!(mid, 4);
+        // Down again lands at column 0 of line 3 — the column was clamped, not remembered.
+        assert_eq!(move_caret_vertically(s, mid, 1), 5);
+    }
+
+    #[test]
+    fn move_caret_always_lands_on_a_char_boundary() {
+        let s = "aé—😀\nz😀é\nqq";
+        for caret in (0..=s.len()).filter(|i| s.is_char_boundary(*i)) {
+            for delta in [-1, 1] {
+                let got = move_caret_vertically(s, caret, delta);
+                assert!(
+                    s.is_char_boundary(got),
+                    "caret {caret} delta {delta} → {got}, not a boundary of {s:?}"
+                );
+            }
+        }
+    }
+
+    // --- text key translation ---------------------------------------------
+
+    #[rstest]
+    #[case(TextKey::Backspace, "abc", 3, "ab", 2)]
+    // Backspace at the start of the buffer is a no-op, not an underflow.
+    #[case(TextKey::Backspace, "abc", 0, "abc", 0)]
+    // Deletes a whole multi-byte character.
+    #[case(TextKey::Backspace, "aé", 3, "a", 1)]
+    #[case(TextKey::Delete, "abc", 0, "bc", 0)]
+    // Delete at the end of the buffer is a no-op.
+    #[case(TextKey::Delete, "abc", 3, "abc", 3)]
+    #[case(TextKey::Delete, "aé", 1, "a", 1)]
+    #[case(TextKey::Left, "abc", 2, "abc", 1)]
+    #[case(TextKey::Left, "abc", 0, "abc", 0)]
+    #[case(TextKey::Right, "abc", 1, "abc", 2)]
+    #[case(TextKey::Right, "abc", 3, "abc", 3)]
+    #[case(TextKey::Home, "ab\ncd", 5, "ab\ncd", 3)]
+    #[case(TextKey::End, "ab\ncd", 0, "ab\ncd", 2)]
+    #[case(TextKey::Char('x'), "ab", 1, "axb", 2)]
+    #[case(TextKey::Char('é'), "ab", 1, "aéb", 3)]
+    fn apply_text_key_edits_the_buffer(
+        #[case] key: TextKey,
+        #[case] before: &str,
+        #[case] caret: usize,
+        #[case] after: &str,
+        #[case] after_caret: usize,
+    ) {
+        let mut pt = pending(before, caret);
+        assert_eq!(apply_text_key(&mut pt, key, false), TextKeyOutcome::Handled);
+        assert_eq!(pt.buffer, after);
+        assert_eq!(pt.caret, after_caret);
+    }
+
+    #[test]
+    fn escape_cancels_the_edit_without_touching_the_buffer() {
+        let mut pt = pending("abc", 1);
+        assert_eq!(
+            apply_text_key(&mut pt, TextKey::Escape, false),
+            TextKeyOutcome::Cancel
+        );
+        assert_eq!(pt.buffer, "abc");
+        assert_eq!(pt.caret, 1);
+    }
+
+    #[test]
+    fn plain_enter_commits_but_shift_enter_inserts_a_newline() {
+        let mut pt = pending("ab", 1);
+        assert_eq!(
+            apply_text_key(&mut pt, TextKey::Enter, false),
+            TextKeyOutcome::Commit
+        );
+        assert_eq!(pt.buffer, "ab", "commit must not mutate the buffer");
+
+        let mut pt = pending("ab", 1);
+        assert_eq!(
+            apply_text_key(&mut pt, TextKey::Enter, true),
+            TextKeyOutcome::Handled
+        );
+        assert_eq!(pt.buffer, "a\nb");
+        assert_eq!(pt.caret, 2);
+    }
+
+    #[test]
+    fn shift_only_matters_for_enter() {
+        // Every other key ignores it, so a shifted arrow still just moves the caret.
+        for key in [TextKey::Left, TextKey::Right, TextKey::Up, TextKey::Down] {
+            let mut shifted = pending("ab\ncd", 4);
+            let mut plain = pending("ab\ncd", 4);
+            assert_eq!(
+                apply_text_key(&mut shifted, key, true),
+                apply_text_key(&mut plain, key, false)
+            );
+            assert_eq!(shifted.caret, plain.caret);
+        }
+    }
+
+    #[test]
+    fn unhandled_keys_leave_the_buffer_and_blink_state_alone() {
+        let mut pt = pending("abc", 1);
+        pt.caret_visible = false;
+        assert_eq!(
+            apply_text_key(&mut pt, TextKey::Other, false),
+            TextKeyOutcome::Unhandled
+        );
+        assert_eq!(pt.buffer, "abc");
+        assert_eq!(pt.caret, 1);
+        assert!(
+            !pt.caret_visible,
+            "an unhandled key must not restart the blink cycle"
+        );
+    }
+
+    #[test]
+    fn every_handled_key_restarts_the_caret_blink() {
+        for key in [
+            TextKey::Backspace,
+            TextKey::Delete,
+            TextKey::Left,
+            TextKey::Right,
+            TextKey::Home,
+            TextKey::End,
+            TextKey::Up,
+            TextKey::Down,
+            TextKey::Char('x'),
+        ] {
+            let mut pt = pending("ab\ncd", 4);
+            pt.caret_visible = false;
+            assert_eq!(apply_text_key(&mut pt, key, false), TextKeyOutcome::Handled);
+            assert!(pt.caret_visible, "{key:?} did not make the caret visible");
+        }
+    }
+
+    #[test]
+    fn apply_text_key_never_leaves_the_caret_off_a_boundary() {
+        let mut pt = pending("aé—😀\nz😀", 0);
+        for key in [
+            TextKey::Right,
+            TextKey::Right,
+            TextKey::Down,
+            TextKey::End,
+            TextKey::Backspace,
+            TextKey::Left,
+            TextKey::Delete,
+            TextKey::Home,
+            TextKey::Up,
+            TextKey::Char('é'),
+        ] {
+            apply_text_key(&mut pt, key, false);
+            assert!(
+                pt.buffer.is_char_boundary(pt.caret),
+                "caret {} off boundary in {:?} after {key:?}",
+                pt.caret,
+                pt.buffer
+            );
+        }
+    }
+
+    #[test]
+    fn typing_a_word_then_deleting_it_returns_to_the_empty_buffer() {
+        let mut pt = pending("", 0);
+        for ch in "héllo".chars() {
+            apply_text_key(&mut pt, TextKey::Char(ch), false);
+        }
+        assert_eq!(pt.buffer, "héllo");
+        assert_eq!(pt.caret, pt.buffer.len());
+        for _ in 0..5 {
+            apply_text_key(&mut pt, TextKey::Backspace, false);
+        }
+        assert_eq!(pt.buffer, "");
+        assert_eq!(pt.caret, 0);
+    }
+
+    // --- select key table -------------------------------------------------
+
+    #[rstest]
+    #[case(gdk4::Key::Left, -NUDGE_STEP, 0.0)]
+    #[case(gdk4::Key::Right, NUDGE_STEP, 0.0)]
+    #[case(gdk4::Key::Up, 0.0, -NUDGE_STEP)]
+    #[case(gdk4::Key::Down, 0.0, NUDGE_STEP)]
+    fn arrow_keys_nudge_the_selection(#[case] key: gdk4::Key, #[case] dx: f64, #[case] dy: f64) {
+        let action = select_key_action(ToolKind::Select, key, gdk4::ModifierType::empty(), true);
+        assert_eq!(action, SelectKeyAction::Nudge(dx, dy));
+    }
+
+    #[rstest]
+    #[case(gdk4::Key::Left, -NUDGE_STEP_COARSE, 0.0)]
+    #[case(gdk4::Key::Down, 0.0, NUDGE_STEP_COARSE)]
+    fn shift_makes_the_nudge_coarse(#[case] key: gdk4::Key, #[case] dx: f64, #[case] dy: f64) {
+        let action = select_key_action(ToolKind::Select, key, gdk4::ModifierType::SHIFT_MASK, true);
+        assert_eq!(action, SelectKeyAction::Nudge(dx, dy));
+    }
+
+    #[rstest]
+    #[case(gdk4::Key::BackSpace, SelectKeyAction::Delete)]
+    #[case(gdk4::Key::Delete, SelectKeyAction::Delete)]
+    #[case(gdk4::Key::Escape, SelectKeyAction::Deselect)]
+    // Not a Select binding.
+    #[case(gdk4::Key::Tab, SelectKeyAction::Ignore)]
+    #[case(gdk4::Key::a, SelectKeyAction::Ignore)]
+    #[case(gdk4::Key::F1, SelectKeyAction::Ignore)]
+    fn select_key_action_maps_the_editing_keys(
+        #[case] key: gdk4::Key,
+        #[case] expected: SelectKeyAction,
+    ) {
+        let action = select_key_action(ToolKind::Select, key, gdk4::ModifierType::empty(), true);
+        assert_eq!(action, expected);
+    }
+
+    #[rstest]
+    #[case(gdk4::ModifierType::CONTROL_MASK)]
+    #[case(gdk4::ModifierType::ALT_MASK)]
+    #[case(gdk4::ModifierType::SUPER_MASK)]
+    #[case(gdk4::ModifierType::CONTROL_MASK | gdk4::ModifierType::SHIFT_MASK)]
+    fn chords_are_reserved_for_global_accelerators(#[case] state: gdk4::ModifierType) {
+        // Ctrl+Z / Ctrl+S / … must reach the toolbar, so the Select tool never eats them —
+        // not even for keys it otherwise binds.
+        for key in [
+            gdk4::Key::Left,
+            gdk4::Key::Delete,
+            gdk4::Key::Escape,
+            gdk4::Key::Down,
+        ] {
+            assert_eq!(
+                select_key_action(ToolKind::Select, key, state, true),
+                SelectKeyAction::Ignore,
+                "{key:?} with {state:?} should propagate"
+            );
+        }
+    }
+
+    #[test]
+    fn select_keys_do_nothing_without_a_selection() {
+        for key in [gdk4::Key::Left, gdk4::Key::Delete, gdk4::Key::Escape] {
+            assert_eq!(
+                select_key_action(ToolKind::Select, key, gdk4::ModifierType::empty(), false),
+                SelectKeyAction::Ignore
+            );
+        }
+    }
+
+    #[rstest]
+    #[case(ToolKind::Rect)]
+    #[case(ToolKind::Text)]
+    #[case(ToolKind::Freehand)]
+    #[case(ToolKind::Crop)]
+    fn select_keys_only_apply_to_the_select_tool(#[case] tool: ToolKind) {
+        assert_eq!(
+            select_key_action(tool, gdk4::Key::Delete, gdk4::ModifierType::empty(), true),
+            SelectKeyAction::Ignore
+        );
+    }
+
+    // --- grab geometry ----------------------------------------------------
+
+    #[rstest]
+    #[case(BoxHandle::NW, "nwse-resize")]
+    #[case(BoxHandle::SE, "nwse-resize")]
+    #[case(BoxHandle::NE, "nesw-resize")]
+    #[case(BoxHandle::SW, "nesw-resize")]
+    #[case(BoxHandle::N, "ns-resize")]
+    #[case(BoxHandle::S, "ns-resize")]
+    #[case(BoxHandle::E, "ew-resize")]
+    #[case(BoxHandle::W, "ew-resize")]
+    fn box_handle_cursor_names_the_drag_axis(#[case] handle: BoxHandle, #[case] expected: &str) {
+        assert_eq!(box_handle_cursor(handle), expected);
+    }
+
+    #[test]
+    fn grab_geometry_snapshots_a_box_tool_as_its_bounds() {
+        let tool: Box<dyn Tool> = Box::new(RectTool::new(rect(1, 2, 30, 40)));
+        match grab_geometry(tool.as_ref()) {
+            GrabGeometry::Box(r) => assert_eq!(r, rect(1, 2, 30, 40)),
+            other => panic!("expected Box, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grab_geometry_snapshots_a_two_point_tool_as_a_pair() {
+        let tool: Box<dyn Tool> = Box::new(LineTool::new((1.0, 2.0), (3.0, 4.0)));
+        match grab_geometry(tool.as_ref()) {
+            GrabGeometry::Pair { from, to } => {
+                assert_eq!(from, (1.0, 2.0));
+                assert_eq!(to, (3.0, 4.0));
+            }
+            other => panic!("expected Pair, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grab_geometry_snapshots_a_number_as_a_center_and_radius() {
+        let tool: Box<dyn Tool> = Box::new(NumberTool::new((50.0, 60.0), 1, [1.0; 4]));
+        match grab_geometry(tool.as_ref()) {
+            GrabGeometry::Center { center, radius } => {
+                assert_eq!(center, (50.0, 60.0));
+                assert!(radius > 0.0);
+            }
+            other => panic!("expected Center, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grab_geometry_snapshots_text_with_everything_needed_to_resize() {
+        let tool: Box<dyn Tool> = Box::new(text_tool("hi"));
+        match grab_geometry(tool.as_ref()) {
+            GrabGeometry::Text {
+                origin,
+                size_pt,
+                wrap_width,
+                bounds,
+            } => {
+                assert_eq!(origin, (10.0, 20.0));
+                assert_eq!(size_pt, 16.0);
+                assert_eq!(wrap_width, None);
+                assert_eq!(bounds, rect(10, 20, 100, 40));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grab_geometry_snapshots_freehand_as_its_first_point() {
+        let tool: Box<dyn Tool> = Box::new(FreehandTool::new(
+            vec![(7.0, 8.0), (9.0, 10.0)],
+            [1.0; 4],
+            StrokeStyle::Solid,
+        ));
+        match grab_geometry(tool.as_ref()) {
+            GrabGeometry::Origin(p) => assert_eq!(p, (7.0, 8.0)),
+            other => panic!("expected Origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grab_geometry_tolerates_an_empty_freehand_stroke() {
+        let tool: Box<dyn Tool> = Box::new(FreehandTool::new(vec![], [1.0; 4], StrokeStyle::Solid));
+        match grab_geometry(tool.as_ref()) {
+            GrabGeometry::Origin(p) => assert_eq!(p, (0.0, 0.0)),
+            other => panic!("expected Origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn endpoints_are_reported_for_two_point_tools_only() {
+        let line: Box<dyn Tool> = Box::new(LineTool::new((0.0, 0.0), (5.0, 5.0)));
+        assert_eq!(endpoints(line.as_ref()), Some(((0.0, 0.0), (5.0, 5.0))));
+
+        let arrow: Box<dyn Tool> = Box::new(ArrowTool::new((1.0, 1.0), (2.0, 2.0)));
+        assert_eq!(endpoints(arrow.as_ref()), Some(((1.0, 1.0), (2.0, 2.0))));
+
+        let r: Box<dyn Tool> = Box::new(RectTool::new(rect(0, 0, 10, 10)));
+        assert_eq!(endpoints(r.as_ref()), None);
+    }
+
+    #[test]
+    fn text_handles_are_the_four_corners_plus_the_two_side_midpoints() {
+        let handles = text_handles(rect(0, 0, 100, 50));
+        let kinds: Vec<BoxHandle> = handles.iter().map(|(h, _)| *h).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                BoxHandle::NW,
+                BoxHandle::NE,
+                BoxHandle::SE,
+                BoxHandle::SW,
+                BoxHandle::E,
+                BoxHandle::W,
+            ]
+        );
+        // N/S are deliberately absent: vertical-only resize has no meaning for text.
+        assert!(!kinds.contains(&BoxHandle::N));
+        assert!(!kinds.contains(&BoxHandle::S));
+    }
+
+    #[test]
+    fn text_handle_points_sit_on_the_bounding_box() {
+        let r = rect(10, 20, 100, 50);
+        for (h, (x, y)) in text_handles(r) {
+            assert!(
+                (r.x as f64..=r.right() as f64).contains(&x)
+                    && (r.y as f64..=r.bottom() as f64).contains(&y),
+                "{h:?} at ({x}, {y}) is outside {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn grab_at_prefers_a_resize_handle_over_the_body() {
+        let tool: Box<dyn Tool> = Box::new(RectTool::new(rect(0, 0, 100, 100)));
+        // Dead on the north-west corner.
+        assert_eq!(
+            grab_at(tool.as_ref(), 0.0, 0.0),
+            Some(Grab::BoxHandle(BoxHandle::NW))
+        );
+        // Well inside → body move.
+        assert_eq!(grab_at(tool.as_ref(), 50.0, 50.0), Some(Grab::Body));
+        // Far outside → no grab at all, so the caller can fall through to other layers.
+        assert_eq!(grab_at(tool.as_ref(), 500.0, 500.0), None);
+    }
+
+    #[test]
+    fn grab_at_returns_endpoints_for_two_point_tools() {
+        let tool: Box<dyn Tool> = Box::new(LineTool::new((0.0, 0.0), (100.0, 100.0)));
+        assert_eq!(
+            grab_at(tool.as_ref(), 0.0, 0.0),
+            Some(Grab::Endpoint(Endpoint::From))
+        );
+        assert_eq!(
+            grab_at(tool.as_ref(), 100.0, 100.0),
+            Some(Grab::Endpoint(Endpoint::To))
+        );
+        // On the line but away from both ends.
+        assert_eq!(grab_at(tool.as_ref(), 50.0, 50.0), Some(Grab::Body));
+    }
+
+    #[test]
+    fn grab_at_finds_the_number_radius_grip() {
+        let n = NumberTool::new((100.0, 100.0), 1, [1.0; 4]);
+        let grip = (n.center.0 + n.radius, n.center.1);
+        let tool: Box<dyn Tool> = Box::new(n);
+        assert_eq!(
+            grab_at(tool.as_ref(), grip.0, grip.1),
+            Some(Grab::NumberRadius)
+        );
+        assert_eq!(grab_at(tool.as_ref(), 100.0, 100.0), Some(Grab::Body));
+    }
+
+    #[rstest]
+    #[case(ToolKind::Crop)]
+    #[case(ToolKind::Select)]
+    fn non_layer_tools_are_never_grabbable(#[case] _kind: ToolKind) {
+        // Crop and Select are modes, not layers — they never appear in `doc.layers`, so
+        // `grab_at` must decline them rather than fabricating a Body grab.
+        let tool: Box<dyn Tool> = Box::new(crate::annotate::tools::crop::CropTool::new(rect(
+            0, 0, 10, 10,
+        )));
+        assert_eq!(grab_at(tool.as_ref(), 5.0, 5.0), None);
+    }
+
+    // --- layer mutation helpers -------------------------------------------
+
+    #[test]
+    fn set_box_bounds_resizes_every_box_backed_kind() {
+        let target = rect(5, 6, 70, 80);
+        let mut layers: Vec<Box<dyn Tool>> = vec![
+            Box::new(RectTool::new(rect(0, 0, 10, 10))),
+            Box::new(EllipseTool::new(rect(0, 0, 10, 10))),
+            Box::new(HighlightTool {
+                bounds: rect(0, 0, 10, 10),
+                color: [1.0, 1.0, 0.0, 0.35],
+            }),
+            Box::new(RedactTool {
+                bounds: rect(0, 0, 10, 10),
+            }),
+        ];
+        for layer in &mut layers {
+            set_box_bounds(layer, target);
+            assert_eq!(layer.bounds(), target, "{:?} was not resized", layer.kind());
+        }
+    }
+
+    #[test]
+    fn set_box_bounds_ignores_kinds_with_no_box() {
+        let mut line: Box<dyn Tool> = Box::new(LineTool::new((0.0, 0.0), (10.0, 10.0)));
+        let before = line.bounds();
+        set_box_bounds(&mut line, rect(100, 100, 5, 5));
+        assert_eq!(line.bounds(), before);
+    }
+
+    #[test]
+    fn set_pair_moves_both_endpoints_of_a_two_point_tool() {
+        for mut layer in [
+            Box::new(LineTool::new((0.0, 0.0), (1.0, 1.0))) as Box<dyn Tool>,
+            Box::new(ArrowTool::new((0.0, 0.0), (1.0, 1.0))) as Box<dyn Tool>,
+        ] {
+            set_pair(&mut layer, (10.0, 20.0), (30.0, 40.0));
+            assert_eq!(
+                endpoints(layer.as_ref()),
+                Some(((10.0, 20.0), (30.0, 40.0))),
+                "{:?} endpoints were not set",
+                layer.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn set_pair_ignores_kinds_without_endpoints() {
+        let mut r: Box<dyn Tool> = Box::new(RectTool::new(rect(0, 0, 10, 10)));
+        let before = r.bounds();
+        set_pair(&mut r, (100.0, 100.0), (200.0, 200.0));
+        assert_eq!(r.bounds(), before);
+    }
+
+    // --- apply_manipulation -----------------------------------------------
+    //
+    // The highest-risk logic in the canvas: every resize / move arm, exercised without a
+    // widget. `pango_ctx` is None throughout; only the Text *resize* arm needs one.
+
+    #[test]
+    fn body_drag_translates_a_box_layer_by_the_total_delta() {
+        let orig = rect(10, 10, 50, 50);
+        let mut layer: Box<dyn Tool> = Box::new(RectTool::new(orig));
+        let m = manip(Grab::Body, GrabGeometry::Box(orig), (0.0, 0.0));
+        apply_manipulation(&mut layer, &m, (25.0, -5.0), None);
+        assert_eq!(layer.bounds(), rect(35, 5, 50, 50));
+    }
+
+    #[test]
+    fn body_drag_recomputes_from_the_snapshot_so_it_never_accumulates_drift() {
+        let orig = rect(0, 0, 20, 20);
+        let mut layer: Box<dyn Tool> = Box::new(RectTool::new(orig));
+        let m = manip(Grab::Body, GrabGeometry::Box(orig), (0.0, 0.0));
+        // Many intermediate positions, ending back where we started.
+        for cur in [(3.0, 3.0), (17.0, 2.0), (100.0, 100.0), (0.0, 0.0)] {
+            apply_manipulation(&mut layer, &m, cur, None);
+        }
+        assert_eq!(layer.bounds(), orig);
+    }
+
+    #[test]
+    fn body_drag_translates_a_two_point_layer() {
+        let mut layer: Box<dyn Tool> = Box::new(LineTool::new((0.0, 0.0), (10.0, 10.0)));
+        let m = manip(
+            Grab::Body,
+            GrabGeometry::Pair {
+                from: (0.0, 0.0),
+                to: (10.0, 10.0),
+            },
+            (0.0, 0.0),
+        );
+        apply_manipulation(&mut layer, &m, (5.0, 7.0), None);
+        assert_eq!(
+            endpoints(layer.as_ref()),
+            Some(((5.0, 7.0), (15.0, 17.0))),
+            "both endpoints move together, preserving length and angle"
+        );
+    }
+
+    #[test]
+    fn body_drag_moves_a_number_center_without_changing_its_radius() {
+        let n = NumberTool::new((50.0, 50.0), 3, [1.0; 4]);
+        let radius = n.radius;
+        let mut layer: Box<dyn Tool> = Box::new(n);
+        let m = manip(
+            Grab::Body,
+            GrabGeometry::Center {
+                center: (50.0, 50.0),
+                radius,
+            },
+            (0.0, 0.0),
+        );
+        apply_manipulation(&mut layer, &m, (10.0, 20.0), None);
+        let n = layer.as_any().downcast_ref::<NumberTool>().unwrap();
+        assert_eq!(n.center, (60.0, 70.0));
+        assert_eq!(n.radius, radius);
+    }
+
+    #[test]
+    fn freehand_body_drag_translates_incrementally_from_the_last_position() {
+        let mut layer: Box<dyn Tool> = Box::new(FreehandTool::new(
+            vec![(0.0, 0.0), (10.0, 0.0)],
+            [1.0; 4],
+            StrokeStyle::Solid,
+        ));
+        // `last` — not `start` — is the reference for this arm, because the point list is
+        // never snapshotted.
+        let mut m = manip(Grab::Body, GrabGeometry::Origin((0.0, 0.0)), (0.0, 0.0));
+        m.last = (0.0, 0.0);
+        apply_manipulation(&mut layer, &m, (5.0, 5.0), None);
+        m.last = (5.0, 5.0);
+        apply_manipulation(&mut layer, &m, (8.0, 5.0), None);
+        let f = layer.as_any().downcast_ref::<FreehandTool>().unwrap();
+        assert_eq!(f.points, vec![(8.0, 5.0), (18.0, 5.0)]);
+    }
+
+    #[test]
+    fn body_drag_moves_a_text_origin() {
+        let mut layer: Box<dyn Tool> = Box::new(text_tool("hi"));
+        let m = manip(
+            Grab::Body,
+            GrabGeometry::Text {
+                origin: (10.0, 20.0),
+                size_pt: 16.0,
+                wrap_width: None,
+                bounds: rect(10, 20, 100, 40),
+            },
+            (0.0, 0.0),
+        );
+        apply_manipulation(&mut layer, &m, (5.0, 5.0), None);
+        let t = layer.as_any().downcast_ref::<TextTool>().unwrap();
+        assert_eq!(t.origin, (15.0, 25.0));
+    }
+
+    #[rstest]
+    // Dragging the SE corner outward grows the box; the NW corner stays put.
+    #[case(BoxHandle::SE, (120.0, 130.0), rect(10, 10, 110, 120))]
+    // Dragging the NW corner inward shrinks it; the SE corner stays put.
+    #[case(BoxHandle::NW, (30.0, 40.0), rect(30, 40, 30, 20))]
+    // A side handle only moves one axis.
+    #[case(BoxHandle::E, (80.0, 999.0), rect(10, 10, 70, 50))]
+    #[case(BoxHandle::N, (999.0, 20.0), rect(10, 20, 50, 40))]
+    fn box_handle_drag_resizes_against_the_opposite_edge(
+        #[case] handle: BoxHandle,
+        #[case] cur: (f64, f64),
+        #[case] expected: Rect,
+    ) {
+        let orig = rect(10, 10, 50, 50);
+        let mut layer: Box<dyn Tool> = Box::new(RectTool::new(orig));
+        let m = manip(
+            Grab::BoxHandle(handle),
+            GrabGeometry::Box(orig),
+            (10.0, 10.0),
+        );
+        apply_manipulation(&mut layer, &m, cur, None);
+        assert_eq!(layer.bounds(), expected);
+    }
+
+    #[test]
+    fn dragging_a_handle_past_the_opposite_edge_flips_the_box_instead_of_inverting_it() {
+        let orig = rect(10, 10, 50, 50);
+        let mut layer: Box<dyn Tool> = Box::new(RectTool::new(orig));
+        let m = manip(
+            Grab::BoxHandle(BoxHandle::SE),
+            GrabGeometry::Box(orig),
+            (60.0, 60.0),
+        );
+        // Drag the SE corner far past the NW one.
+        apply_manipulation(&mut layer, &m, (-100.0, -100.0), None);
+        let b = layer.bounds();
+        // Width/height are unsigned, so a correct implementation normalises rather than
+        // underflowing.
+        assert!(b.w > 0, "flipped box collapsed: {b:?}");
+        assert!(b.h > 0, "flipped box collapsed: {b:?}");
+        assert!(b.x < 10, "box did not flip past the anchor: {b:?}");
+    }
+
+    #[test]
+    fn endpoint_drag_moves_only_the_grabbed_end() {
+        let mut layer: Box<dyn Tool> = Box::new(LineTool::new((0.0, 0.0), (10.0, 10.0)));
+        let geom = GrabGeometry::Pair {
+            from: (0.0, 0.0),
+            to: (10.0, 10.0),
+        };
+        let m = manip(Grab::Endpoint(Endpoint::To), geom, (10.0, 10.0));
+        apply_manipulation(&mut layer, &m, (99.0, 3.0), None);
+        let (from, to) = endpoints(layer.as_ref()).unwrap();
+        assert_eq!(from, (0.0, 0.0), "the anchored end must not move");
+        assert_eq!(to, (99.0, 3.0));
+
+        let m = manip(Grab::Endpoint(Endpoint::From), geom, (0.0, 0.0));
+        apply_manipulation(&mut layer, &m, (-4.0, -6.0), None);
+        let (from, to) = endpoints(layer.as_ref()).unwrap();
+        assert_eq!(from, (-4.0, -6.0));
+        assert_eq!(to, (10.0, 10.0));
+    }
+
+    #[test]
+    fn number_radius_drag_resizes_the_badge_without_moving_it() {
+        let n = NumberTool::new((50.0, 50.0), 1, [1.0; 4]);
+        let mut layer: Box<dyn Tool> = Box::new(n);
+        let m = manip(
+            Grab::NumberRadius,
+            GrabGeometry::Center {
+                center: (50.0, 50.0),
+                radius: 10.0,
+            },
+            (60.0, 50.0),
+        );
+        apply_manipulation(&mut layer, &m, (90.0, 50.0), None);
+        let n = layer.as_any().downcast_ref::<NumberTool>().unwrap();
+        assert_eq!(n.center, (50.0, 50.0));
+        assert_eq!(n.radius, select::new_radius((50.0, 50.0), 90.0, 50.0));
+    }
+
+    #[test]
+    fn text_resize_without_a_pango_context_is_a_no_op() {
+        // A missing display must leave the document untouched rather than panic or write a
+        // stale bounds cache.
+        let mut layer: Box<dyn Tool> = Box::new(text_tool("hello"));
+        let before = format!("{layer:?}");
+        let m = manip(
+            Grab::BoxHandle(BoxHandle::SE),
+            GrabGeometry::Text {
+                origin: (10.0, 20.0),
+                size_pt: 16.0,
+                wrap_width: None,
+                bounds: rect(10, 20, 100, 40),
+            },
+            (110.0, 60.0),
+        );
+        apply_manipulation(&mut layer, &m, (200.0, 200.0), None);
+        assert_eq!(format!("{layer:?}"), before);
+    }
+
+    #[test]
+    fn a_grab_that_does_not_match_its_geometry_is_ignored() {
+        // Defensive: a NumberRadius grab against a Box snapshot is a wiring bug, and must
+        // not corrupt the layer.
+        let orig = rect(0, 0, 10, 10);
+        let mut layer: Box<dyn Tool> = Box::new(RectTool::new(orig));
+        let m = manip(Grab::NumberRadius, GrabGeometry::Box(orig), (0.0, 0.0));
+        apply_manipulation(&mut layer, &m, (100.0, 100.0), None);
+        assert_eq!(layer.bounds(), orig);
     }
 }

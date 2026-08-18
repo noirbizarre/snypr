@@ -152,3 +152,43 @@ fn decode_logo() -> Result<ksni::Icon> {
         data: argb,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn the_embedded_logo_decodes() {
+        // Guards the `data/icons/…/64x64` asset the `icons` mise task generates: a truncated
+        // or re-encoded file would only surface as a missing tray icon at runtime.
+        let icon = decode_logo().expect("embedded tray logo should decode");
+        assert!(icon.width > 0 && icon.height > 0);
+        assert_eq!(
+            icon.data.len(),
+            (icon.width * icon.height * 4) as usize,
+            "ARGB32 is 4 bytes per pixel"
+        );
+    }
+
+    #[test]
+    fn the_logo_is_square_and_the_size_the_sni_spec_expects() {
+        let icon = decode_logo().unwrap();
+        assert_eq!(icon.width, icon.height);
+        assert_eq!(icon.width, 64, "src/ui/tray.rs embeds the 64x64 icon");
+    }
+
+    #[test]
+    fn decode_logo_reorders_rgba_into_argb32_big_endian() {
+        // The SNI spec mandates A,R,G,B byte order; `image` hands us R,G,B,A. Re-derive the
+        // expected bytes from the same source so a swap in either direction is caught.
+        let rgba = image::load_from_memory(LOGO_PNG).unwrap().to_rgba8();
+        let icon = decode_logo().unwrap();
+        let expected: Vec<u8> = rgba
+            .as_raw()
+            .chunks_exact(4)
+            .flat_map(|px| [px[3], px[0], px[1], px[2]])
+            .collect();
+        assert_eq!(icon.data, expected);
+    }
+}

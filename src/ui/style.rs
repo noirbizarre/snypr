@@ -55,3 +55,50 @@ pub fn install() {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::require_gtk;
+
+    #[test]
+    fn the_stylesheet_parses() {
+        require_gtk!();
+        // `load_from_string` reports parse errors through the `parsing-error` signal rather
+        // than a Result, so hook it and fail loudly. Without this a typo in CSS silently
+        // drops the rule and the surface renders unstyled.
+        let provider = gtk4::CssProvider::new();
+        let errors = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        provider.connect_parsing_error({
+            let errors = errors.clone();
+            move |_, section, err| {
+                errors.borrow_mut().push(format!("{section:?}: {err}"));
+            }
+        });
+        provider.load_from_string(CSS);
+        assert!(
+            errors.borrow().is_empty(),
+            "CSS parse errors: {:?}",
+            errors.borrow()
+        );
+    }
+
+    #[test]
+    fn install_is_idempotent() {
+        require_gtk!();
+        // Every GTK surface calls this on activation, and the overlay opens one window per
+        // monitor, so repeated installs must not accumulate or panic.
+        install();
+        install();
+    }
+
+    #[test]
+    fn the_transparent_surfaces_are_declared_for_both_overlay_kinds() {
+        // The selector and draw overlay composite over the live desktop; an opaque default
+        // window background would paint over it. Guarded here because the rule is easy to
+        // drop while editing neighbouring selectors.
+        assert!(CSS.contains("window.snypr-selector"));
+        assert!(CSS.contains("window.snypr-overlay"));
+        assert!(CSS.contains("background: transparent"));
+    }
+}

@@ -422,3 +422,163 @@ smithay_client_toolkit::delegate_dispatch2!(AppData);
 #[allow(dead_code)]
 fn _unused(_: wl_registry::WlRegistry, _: wl_buffer::WlBuffer, _: &dyn AsFd, _: &dyn Write) {}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    fn out(name: &str, x: i32, y: i32, w: u32, h: u32) -> Output {
+        Output {
+            name: name.to_owned(),
+            logical: Rect { x, y, w, h },
+            scale: 1,
+        }
+    }
+
+    #[rstest]
+    #[case(Selection::Focused)]
+    #[case(Selection::Window)]
+    #[case(Selection::Interactive)]
+    fn ensure_resolvable_rejects_compositor_aware_selections(#[case] selection: Selection) {
+        let err = ensure_resolvable(&selection).unwrap_err();
+        // The message names the offending variant and points at the resolver, because this
+        // only ever fires as an internal wiring bug.
+        assert!(err.to_string().contains("unresolved selection"), "{err}");
+        assert!(err.to_string().contains("resolve_selection"), "{err}");
+    }
+
+    #[rstest]
+    #[case(Selection::Full)]
+    #[case(Selection::PerOutput)]
+    #[case(Selection::Output("DP-1".into()))]
+    #[case(Selection::Region(Rect { x: 0, y: 0, w: 10, h: 10 }))]
+    fn ensure_resolvable_accepts_concrete_selections(#[case] selection: Selection) {
+        assert!(ensure_resolvable(&selection).is_ok());
+    }
+
+    #[test]
+    fn descriptor_from_info_maps_every_field() {
+        let d = descriptor_from_info(Some("DP-1"), Some((100, 200)), Some((1920, 1080)), 2);
+        assert_eq!(
+            d,
+            Output {
+                name: "DP-1".into(),
+                logical: Rect {
+                    x: 100,
+                    y: 200,
+                    w: 1920,
+                    h: 1080
+                },
+                scale: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn descriptor_from_info_falls_back_for_an_unnamed_output() {
+        let d = descriptor_from_info(None, None, None, 1);
+        assert_eq!(d.name, UNNAMED_OUTPUT);
+        // No geometry reported: a zero rect at the origin, which intersects nothing.
+        assert_eq!(
+            d.logical,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0
+            }
+        );
+    }
+
+    #[test]
+    fn an_unnamed_output_is_still_addressable_by_the_fallback_name() {
+        let d = descriptor_from_info(None, Some((0, 0)), Some((800, 600)), 1);
+        assert!(want_output(&Selection::Output(UNNAMED_OUTPUT.into()), &d));
+    }
+
+    #[rstest]
+    #[case(Selection::Full, true)]
+    #[case(Selection::PerOutput, true)]
+    fn full_and_per_output_take_every_output(#[case] selection: Selection, #[case] expected: bool) {
+        assert_eq!(
+            want_output(&selection, &out("DP-1", 0, 0, 1920, 1080)),
+            expected
+        );
+        assert_eq!(
+            want_output(&selection, &out("HDMI-A-1", 1920, 0, 1280, 720)),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case("DP-1", true)]
+    #[case("HDMI-A-1", false)]
+    // Output names are matched exactly — no prefix or case folding.
+    #[case("DP-11", false)]
+    #[case("dp-1", false)]
+    #[case("", false)]
+    fn output_selection_matches_by_exact_name(#[case] target: &str, #[case] expected: bool) {
+        let d = out("DP-1", 0, 0, 1920, 1080);
+        assert_eq!(want_output(&Selection::Output(target.into()), &d), expected);
+    }
+
+    #[rstest]
+    // Fully inside.
+    #[case(Rect { x: 10, y: 10, w: 100, h: 100 }, true)]
+    // Straddling the right edge.
+    #[case(Rect { x: 1900, y: 0, w: 100, h: 100 }, true)]
+    // Covering the whole output and more.
+    #[case(Rect { x: -100, y: -100, w: 4000, h: 4000 }, true)]
+    // Entirely to the right.
+    #[case(Rect { x: 1920, y: 0, w: 100, h: 100 }, false)]
+    // Entirely below.
+    #[case(Rect { x: 0, y: 1080, w: 100, h: 100 }, false)]
+    // Entirely to the left.
+    #[case(Rect { x: -100, y: 0, w: 100, h: 100 }, false)]
+    // Touching the edge only: rects are half-open, so adjacency is not an intersection.
+    #[case(Rect { x: 1919, y: 0, w: 1, h: 1 }, true)]
+    fn region_selection_matches_by_intersection(#[case] region: Rect, #[case] expected: bool) {
+        let d = out("DP-1", 0, 0, 1920, 1080);
+        assert_eq!(want_output(&Selection::Region(region), &d), expected);
+    }
+
+    #[test]
+    fn region_selection_picks_only_the_overlapped_output_in_a_dual_head_layout() {
+        let left = out("DP-1", 0, 0, 1920, 1080);
+        let right = out("HDMI-A-1", 1920, 0, 1280, 720);
+        // A region wholly inside the right-hand monitor.
+        let region = Selection::Region(Rect {
+            x: 2000,
+            y: 100,
+            w: 200,
+            h: 200,
+        });
+        assert!(!want_output(&region, &left));
+        assert!(want_output(&region, &right));
+    }
+
+    #[rstest]
+    #[case(Selection::Focused)]
+    #[case(Selection::Window)]
+    #[case(Selection::Interactive)]
+    fn unresolved_selections_match_nothing_rather_than_panicking(#[case] selection: Selection) {
+        // `ensure_resolvable` rejects these first; this asserts the defensive fallback so a
+        // future reordering degrades to "no targets" instead of aborting the capture.
+        assert!(!want_output(&selection, &out("DP-1", 0, 0, 1920, 1080)));
+    }
+
+    #[rstest]
+    #[case(wl_shm::Format::Xrgb8888)]
+    #[case(wl_shm::Format::Argb8888)]
+    #[case(wl_shm::Format::Xbgr8888)]
+    #[case(wl_shm::Format::Abgr8888)]
+    fn wl_shm_format_round_trips_known_formats(#[case] format: wl_shm::Format) {
+        assert_eq!(wl_shm_format(format as u32), format);
+    }
+
+    #[test]
+    fn wl_shm_format_falls_back_to_xrgb8888_for_an_unknown_fourcc() {
+        assert_eq!(wl_shm_format(u32::MAX), wl_shm::Format::Xrgb8888);
+    }
+}

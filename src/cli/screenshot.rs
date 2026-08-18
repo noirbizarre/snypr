@@ -519,12 +519,7 @@ mod tests {
     use rstest::rstest;
 
     /// Build a context with notifications off so tests never touch a D-Bus session.
-    async fn test_ctx() -> crate::context::Ctx {
-        let mut config = Config::default();
-        config.notify.success = false;
-        config.notify.error = false;
-        Context::new(config).await.unwrap()
-    }
+    use crate::testing::test_ctx;
 
     #[rstest]
     #[case::file(OutputMode::File, vec![SinkSpec::File(None)])]

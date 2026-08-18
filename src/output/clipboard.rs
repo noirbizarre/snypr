@@ -259,4 +259,41 @@ mod tests {
             format!("{expected:?}")
         );
     }
+
+    #[rstest]
+    #[case(ClipboardKind::Regular)]
+    #[case(ClipboardKind::Primary)]
+    #[case(ClipboardKind::Both)]
+    fn the_daemon_publishes_inline_and_the_cli_forks(#[case] kind: ClipboardKind) {
+        // The daemon outlives the offer, so it can own the Wayland data source directly.
+        assert_eq!(
+            ClipboardSink::new(kind, true).strategy(),
+            CopyStrategy::Inline
+        );
+        // A one-shot CLI process exits the moment the command finishes; without the fork the
+        // selection dies with it and the paste yields nothing.
+        assert_eq!(
+            ClipboardSink::new(kind, false).strategy(),
+            CopyStrategy::Fork
+        );
+    }
+
+    #[test]
+    fn the_strategy_does_not_depend_on_the_clipboard_kind() {
+        // Regular / Primary / Both change *which* selection is offered, never *how*.
+        for in_daemon in [true, false] {
+            let strategies: Vec<CopyStrategy> = [
+                ClipboardKind::Regular,
+                ClipboardKind::Primary,
+                ClipboardKind::Both,
+            ]
+            .into_iter()
+            .map(|k| ClipboardSink::new(k, in_daemon).strategy())
+            .collect();
+            assert!(
+                strategies.windows(2).all(|w| w[0] == w[1]),
+                "strategies diverged by kind: {strategies:?}"
+            );
+        }
+    }
 }

@@ -472,4 +472,125 @@ mod tests {
             .collect();
         assert_eq!(cli, back);
     }
+
+    // --- dispatch ---------------------------------------------------------
+    //
+    // `dispatch` flattens every helper error into a `Response::Error` so a client always
+    // gets a structured frame back instead of a torn connection. These assert that
+    // contract without touching a socket.
+
+    use crate::testing::test_ctx;
+
+    fn state() -> Arc<DaemonState> {
+        Arc::new(DaemonState::default())
+    }
+
+    #[tokio::test]
+    async fn ping_is_answered_ok() {
+        let ctx = test_ctx().await;
+        assert!(matches!(
+            dispatch(ctx, state(), Request::Ping).await,
+            Response::Ok
+        ));
+    }
+
+    #[tokio::test]
+    async fn toggling_passthrough_without_an_overlay_is_a_structured_error() {
+        let ctx = test_ctx().await;
+        // The client binds this to a global keybind, so pressing it with no overlay up must
+        // produce a readable message rather than dropping the connection.
+        match dispatch(ctx, state(), Request::PassthroughToggle).await {
+            Response::Error { message } => assert!(!message.is_empty(), "empty error message"),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(feature = "ui"))]
+    #[tokio::test]
+    async fn draw_toggle_reports_the_missing_ui_feature() {
+        let ctx = test_ctx().await;
+        // Without `ui` there is no overlay to spawn; the daemon must say so rather than
+        // silently answering Ok and leaving the user waiting for a window.
+        match dispatch(ctx, state(), Request::DrawToggle).await {
+            Response::Error { message } => assert!(!message.is_empty()),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_editor_request_cannot_run_twice_concurrently() {
+        let state = state();
+        // Hold the editor lock the way an open editor window does.
+        let _guard = state.editor.try_lock().expect("uncontended");
+        let ctx = test_ctx().await;
+        let err = run_screenshot_with_optional_lock(
+            &ctx,
+            &state,
+            Selection::Full,
+            false,
+            vec![],
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        // GTK's Application::run is per-process, so the second client is refused immediately
+        // rather than queued behind a window that may sit open for minutes.
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn sinks_from_specs_applies_the_daemon_default_kind_to_a_bare_clipboard_entry() {
+        use crate::cli::ClipboardKind;
+        // A client that never passed `--clipboard-type` sends `clipboard_kind: None`; the
+        // daemon's own `[clipboard].default_kind` must fill it in.
+        let specs = vec![SinkSpec::Clipboard {
+            clipboard_kind: None,
+        }];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = rt.block_on(test_ctx());
+        let out = sinks_from_specs(specs, &ctx);
+        assert_eq!(
+            out,
+            vec![CliSinkSpec::Clipboard(Some(
+                ctx.config.clipboard.default_kind
+            ))]
+        );
+        // Sanity: the default really is a concrete kind, not a placeholder.
+        assert!(matches!(
+            ctx.config.clipboard.default_kind,
+            ClipboardKind::Regular | ClipboardKind::Primary | ClipboardKind::Both
+        ));
+    }
+
+    #[test]
+    fn an_empty_sink_list_falls_back_to_the_configured_defaults() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = rt.block_on(test_ctx());
+        assert_eq!(sinks_from_specs(vec![], &ctx), ctx.config.default_sinks());
+    }
+
+    #[test]
+    fn the_default_socket_path_follows_xdg_runtime_dir() {
+        // Not parallel-safe against other env-mutating tests, but nextest runs each test in
+        // its own process.
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        assert_eq!(default_socket_path(), dir.path().join("snypr.sock"));
+    }
+
+    #[test]
+    fn the_socket_path_falls_back_to_the_temp_dir() {
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        assert_eq!(
+            default_socket_path(),
+            std::env::temp_dir().join("snypr.sock")
+        );
+    }
 }
