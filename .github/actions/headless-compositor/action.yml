@@ -1,0 +1,56 @@
+name: Headless Wayland compositor
+description: >-
+  Start a headless Wayland compositor and export WAYLAND_DISPLAY, so GTK-backed
+  tests can create a GdkDisplay on a runner with no graphics session.
+inputs:
+  socket:
+    description: Wayland socket name to create.
+    required: false
+    default: snypr-ci
+runs:
+  using: composite
+  steps:
+    - name: Install the compositor
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y weston
+
+    - name: Start the compositor
+      shell: bash
+      env:
+        SOCKET: ${{ inputs.socket }}
+      run: |
+        set -euo pipefail
+
+        # GitHub runners have no logind session, so XDG_RUNTIME_DIR is unset.
+        # Wayland requires it to exist and be private to the user.
+        runtime_dir="${XDG_RUNTIME_DIR:-/tmp/wayland-runtime}"
+        mkdir -p "$runtime_dir"
+        chmod 700 "$runtime_dir"
+
+        # The headless backend renders into memory: no DRM device, no seat, no GPU.
+        # `--idle-time=0` stops Weston from blanking mid-run.
+        XDG_RUNTIME_DIR="$runtime_dir" weston \
+          --backend=headless-backend.so \
+          --socket="$SOCKET" \
+          --idle-time=0 \
+          >"$runtime_dir/weston.log" 2>&1 &
+
+        # Wait for the socket rather than sleeping a fixed amount: startup time
+        # varies with runner load, and a short sleep is how this turns flaky.
+        for _ in $(seq 1 50); do
+          if [ -S "$runtime_dir/$SOCKET" ]; then
+            echo "XDG_RUNTIME_DIR=$runtime_dir" >>"$GITHUB_ENV"
+            echo "WAYLAND_DISPLAY=$SOCKET" >>"$GITHUB_ENV"
+            # Turn "no display" into a hard test failure instead of a silent skip,
+            # so a broken compositor shows up as a red build.
+            echo "SNYPR_REQUIRE_GTK=1" >>"$GITHUB_ENV"
+            exit 0
+          fi
+          sleep 0.2
+        done
+
+        echo "::error::the headless compositor did not come up"
+        cat "$runtime_dir/weston.log" || true
+        exit 1

@@ -35,6 +35,7 @@ Code Style:
 - Configuration: every field optional; types live in `src/config.rs`; the source of truth for default values is `impl Default`. Keep README/manpage examples in sync.
 - Formatting enforced by `cargo fmt`; do not hand-align; trailing whitespace stripped by prek.
 - Tests: use `rstest` for parametrization; assertions via `pretty_assertions` when readability matters; unit tests live beside code under `#[cfg(test)]`. Integration tests requiring a live Wayland compositor go behind the `integration-wayland` feature.
+- GTK-backed tests: widget-level tests need a `GdkDisplay`. Start them with the `require_gtk!()` macro (`src/ui/mod.rs`), which skips the test when no compositor is reachable so `cargo test` still works headless-less. CI starts a headless Weston (`.github/actions/headless-compositor`) and sets `SNYPR_REQUIRE_GTK=1`, which turns "no display" into a hard failure so the skip can never hide a regression. To reproduce locally: `weston --backend=headless-backend.so --socket=snypr-ci --idle-time=0 &` then run with `WAYLAND_DISPLAY=snypr-ci`.
 - Git hooks: commit messages follow Commitizen (conventional commits); prek runs cargo-fmt, cargo-clippy, actionlint, Taplo TOML formatting, commitizen,
   and the usual whitespace/YAML/TOML hygiene hooks.
 
