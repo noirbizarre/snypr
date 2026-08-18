@@ -6,11 +6,108 @@ pub mod file;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::capture::CapturedImage;
-use crate::cli::SinkSpec;
+use crate::cli::{ClipboardKind, SinkSpec};
 use crate::config::{FilenameContext, PngCompression};
 use crate::context::Ctx;
+
+/// Where a save lands. Mirrors the three combinations of [`SinkSpec`] the toolbar's output
+/// switcher can express, and the order in which its button cycles through them.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum OutputMode {
+    #[default]
+    File,
+    Clipboard,
+    Both,
+}
+
+impl OutputMode {
+    /// Next state in the toolbar's cycle: file → clipboard → both → file.
+    pub fn next(self) -> Self {
+        match self {
+            OutputMode::File => OutputMode::Clipboard,
+            OutputMode::Clipboard => OutputMode::Both,
+            OutputMode::Both => OutputMode::File,
+        }
+    }
+}
+
+/// Runtime-mutable output destination for the annotation and draw overlays.
+///
+/// The CLI/config resolve a `Vec<SinkSpec>` up front; this wraps it so the toolbar can flip
+/// between file, clipboard and both without losing the details that came from the command
+/// line — an explicit `--to file=PATH` target and a pinned `--to clipboard=KIND`. Cycling
+/// away from a mode and back is therefore lossless.
+///
+/// Known limitation: several file sinks (`--to file=A --to file=B`) collapse onto the first
+/// path as soon as the user touches the switcher. Multi-file fan-out stays available for the
+/// non-interactive paths, which never build a `SinkSelection`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SinkSelection {
+    mode: OutputMode,
+    file_path: Option<PathBuf>,
+    clipboard_kind: Option<ClipboardKind>,
+}
+
+/// Shared handle on the current destination. `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>`
+/// because [`SaveFn`] is `Send + Sync` and the draw flow reads it from a tokio task.
+pub type SharedSinks = Arc<Mutex<SinkSelection>>;
+
+impl SinkSelection {
+    /// Derive the initial state from already-resolved sinks. Callers must have applied the
+    /// `[output].default_sinks` fallback first; an empty or unrecognized list degrades to
+    /// [`OutputMode::File`] rather than to a silent no-op save.
+    pub fn from_sinks(sinks: &[SinkSpec]) -> Self {
+        let file_path = sinks.iter().find_map(|s| match s {
+            SinkSpec::File(path) => path.clone(),
+            SinkSpec::Clipboard(_) => None,
+        });
+        let clipboard_kind = sinks.iter().find_map(|s| match s {
+            SinkSpec::Clipboard(kind) => *kind,
+            SinkSpec::File(_) => None,
+        });
+        let has_file = sinks.iter().any(|s| matches!(s, SinkSpec::File(_)));
+        let has_clipboard = sinks.iter().any(|s| matches!(s, SinkSpec::Clipboard(_)));
+        let mode = match (has_file, has_clipboard) {
+            (true, true) => OutputMode::Both,
+            (false, true) => OutputMode::Clipboard,
+            _ => OutputMode::File,
+        };
+        Self {
+            mode,
+            file_path,
+            clipboard_kind,
+        }
+    }
+
+    pub fn mode(&self) -> OutputMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: OutputMode) {
+        self.mode = mode;
+    }
+
+    /// Advance to the next mode and return it.
+    pub fn cycle(&mut self) -> OutputMode {
+        self.mode = self.mode.next();
+        self.mode
+    }
+
+    /// Rebuild the sink list for the current mode. File first so `write_png` returns the
+    /// written path before the clipboard sink's `None`.
+    pub fn to_sinks(&self) -> Vec<SinkSpec> {
+        let file = || SinkSpec::File(self.file_path.clone());
+        let clipboard = || SinkSpec::Clipboard(self.clipboard_kind);
+        match self.mode {
+            OutputMode::File => vec![file()],
+            OutputMode::Clipboard => vec![clipboard()],
+            OutputMode::Both => vec![file(), clipboard()],
+        }
+    }
+}
 
 #[async_trait]
 pub trait OutputSink: Send + Sync {
@@ -302,6 +399,102 @@ mod tests {
             "balanced ({}) should be smaller than fast ({})",
             balanced.len(),
             fast.len()
+        );
+    }
+
+    #[test]
+    fn output_mode_cycles_through_three_states() {
+        let mut mode = OutputMode::File;
+        let seen: Vec<OutputMode> = (0..3)
+            .map(|_| {
+                mode = mode.next();
+                mode
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![OutputMode::Clipboard, OutputMode::Both, OutputMode::File]
+        );
+    }
+
+    #[rstest]
+    #[case(vec![SinkSpec::File(None)], OutputMode::File)]
+    #[case(vec![SinkSpec::Clipboard(None)], OutputMode::Clipboard)]
+    #[case(vec![SinkSpec::File(None), SinkSpec::Clipboard(None)], OutputMode::Both)]
+    #[case(vec![SinkSpec::Clipboard(None), SinkSpec::File(None)], OutputMode::Both)]
+    // An empty list should never happen (callers apply the config fallback first), but a
+    // silent no-op save would be worse than defaulting to a file.
+    #[case(vec![], OutputMode::File)]
+    fn derives_the_initial_mode_from_the_resolved_sinks(
+        #[case] sinks: Vec<SinkSpec>,
+        #[case] expected: OutputMode,
+    ) {
+        assert_eq!(SinkSelection::from_sinks(&sinks).mode(), expected);
+    }
+
+    #[rstest]
+    #[case(OutputMode::File)]
+    #[case(OutputMode::Clipboard)]
+    #[case(OutputMode::Both)]
+    fn to_sinks_round_trips_through_from_sinks(#[case] mode: OutputMode) {
+        let mut selection = SinkSelection::from_sinks(&[SinkSpec::File(None)]);
+        selection.set_mode(mode);
+        let sinks = selection.to_sinks();
+        assert_eq!(SinkSelection::from_sinks(&sinks).mode(), mode);
+    }
+
+    #[test]
+    fn a_full_cycle_preserves_the_explicit_path_and_clipboard_kind() {
+        let target = PathBuf::from("/tmp/explicit.png");
+        let mut selection = SinkSelection::from_sinks(&[
+            SinkSpec::File(Some(target.clone())),
+            SinkSpec::Clipboard(Some(ClipboardKind::Primary)),
+        ]);
+        let origin = selection.clone();
+
+        for _ in 0..3 {
+            selection.cycle();
+        }
+
+        assert_eq!(selection, origin);
+        assert_eq!(
+            selection.to_sinks(),
+            vec![
+                SinkSpec::File(Some(target)),
+                SinkSpec::Clipboard(Some(ClipboardKind::Primary)),
+            ]
+        );
+    }
+
+    #[rstest]
+    #[case(OutputMode::File)]
+    #[case(OutputMode::Both)]
+    fn applying_a_selector_override_keeps_an_explicit_cli_path(#[case] mode: OutputMode) {
+        // Mirrors what `cli::screenshot::execute` does with `ResolvedSelection::output_mode`:
+        // the switcher decides *where*, never *which file*.
+        let target = PathBuf::from("/tmp/from-cli.png");
+        let mut selection = SinkSelection::from_sinks(&[SinkSpec::File(Some(target.clone()))]);
+        selection.set_mode(mode);
+        assert!(
+            selection
+                .to_sinks()
+                .contains(&SinkSpec::File(Some(target.clone()))),
+            "explicit --to file={} was lost switching to {mode:?}",
+            target.display()
+        );
+    }
+
+    #[test]
+    fn cycling_away_from_file_keeps_the_explicit_path() {
+        let target = PathBuf::from("/tmp/explicit.png");
+        let mut selection = SinkSelection::from_sinks(&[SinkSpec::File(Some(target.clone()))]);
+
+        assert_eq!(selection.cycle(), OutputMode::Clipboard);
+        assert_eq!(selection.to_sinks(), vec![SinkSpec::Clipboard(None)]);
+        assert_eq!(selection.cycle(), OutputMode::Both);
+        assert_eq!(
+            selection.to_sinks(),
+            vec![SinkSpec::File(Some(target)), SinkSpec::Clipboard(None)]
         );
     }
 }

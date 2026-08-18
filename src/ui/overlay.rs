@@ -39,6 +39,7 @@ use crate::capture::region::{Rect, slice_pixels};
 use crate::capture::{CapturedImage, Capturer};
 use crate::cli::SinkSpec;
 use crate::context::Ctx;
+use crate::output::{SharedSinks, SinkSelection};
 use crate::ui::canvas::AnnotationCanvas;
 use crate::ui::save::{SaveFn, sinks_save_fn};
 use crate::ui::selector;
@@ -271,6 +272,22 @@ fn send_once(tx: &ResultSender, msg: Result<()>) {
     }
 }
 
+/// Apply the `[output].default_sinks` fallback and wrap the result in a runtime-mutable
+/// [`SinkSelection`].
+///
+/// The fallback used to be applied at save time (once in `sinks_save_fn`, once in
+/// `run_draw_save`). It moved here because the toolbar's output switcher needs the *resolved*
+/// destination up front to pick its initial icon — an unresolved empty list would show "file"
+/// even for a config whose `default_sinks` is `["clipboard"]`.
+fn resolve_sinks(ctx: &Ctx, sinks: Vec<SinkSpec>) -> SharedSinks {
+    let sinks = if sinks.is_empty() {
+        ctx.config.default_sinks()
+    } else {
+        sinks
+    };
+    Arc::new(Mutex::new(SinkSelection::from_sinks(&sinks)))
+}
+
 fn build_overlays(
     app: &gtk4::Application,
     ctx: Ctx,
@@ -283,7 +300,7 @@ fn build_overlays(
 
     let (monitors_list, n) = crate::ui::monitors()?;
 
-    let (initial_passthrough, edit, draw_save) = match mode {
+    let (initial_passthrough, edit, draw_save, shared_sinks) = match mode {
         OverlayMode::Draw {
             passthrough,
             sinks,
@@ -292,14 +309,15 @@ fn build_overlays(
             // Draw mode wires Save through `run_draw_save` (Ctrl+S / Enter / click) which
             // pops the zone selector, captures, encodes, fans out to sinks, then leaves the
             // overlay alive so the user keeps drawing.
+            let sinks = resolve_sinks(&ctx, sinks);
             let draw_save = DrawSaveState {
-                sinks,
+                sinks: sinks.clone(),
                 cursor,
                 app_ctx: ctx.clone(),
                 runtime: tokio::runtime::Handle::current(),
                 collected: collected.clone(),
             };
-            (passthrough, None, Some(Rc::new(draw_save)))
+            (passthrough, None, Some(Rc::new(draw_save)), sinks)
         }
         OverlayMode::Edit {
             base,
@@ -308,7 +326,8 @@ fn build_overlays(
         } => {
             // Save closure is built once, shared across every monitor's toolbar. The
             // `selection_label` populates the `{selection}` token in the filename template.
-            let save = sinks_save_fn(ctx.clone(), sinks, "edit", collected);
+            let sinks = resolve_sinks(&ctx, sinks);
+            let save = sinks_save_fn(ctx.clone(), sinks.clone(), "edit", collected);
             (
                 false,
                 Some(EditState {
@@ -317,9 +336,14 @@ fn build_overlays(
                     save,
                 }),
                 None,
+                sinks,
             )
         }
     };
+    let initial_output_mode = shared_sinks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .mode();
 
     // Both modes start in Select mode (no drawing tool active); the user picks a tool from the
     // toolbar or its shortcut. After committing a shape we return here automatically.
@@ -336,7 +360,9 @@ fn build_overlays(
             show_color_picker: true,
             show_style_picker: true,
             show_font_size_picker: true,
+            show_output_switcher: true,
             initial_tool: Some(initial_tool),
+            initial_output_mode,
             ..Default::default()
         })
     } else {
@@ -349,8 +375,10 @@ fn build_overlays(
             show_color_picker: true,
             show_style_picker: true,
             show_font_size_picker: true,
+            show_output_switcher: draw_save.is_some(),
             initial_tool: Some(initial_tool),
             initial_passthrough,
+            initial_output_mode,
             ..Default::default()
         })
     };
@@ -366,6 +394,7 @@ fn build_overlays(
         app_weak: app.downgrade(),
         edit: edit.map(Rc::new),
         draw_save,
+        sinks: shared_sinks,
         blur_capture_in_flight: Rc::new(Cell::new(false)),
         annotate_colors: Rc::new(ctx.config.annotate.colors.clone()),
         notify: Rc::new(ctx.config.notify.clone()),
@@ -436,7 +465,7 @@ struct EditState {
 /// compression + default sinks fallback + the daemon-mode flag), and the path-collection
 /// vec the outer `overlay::run` returns.
 struct DrawSaveState {
-    sinks: Vec<SinkSpec>,
+    sinks: SharedSinks,
     cursor: bool,
     app_ctx: Ctx,
     /// Captured tokio runtime handle. The Save flow needs to `await` tokio futures
@@ -465,6 +494,10 @@ struct Shared {
     /// Set in Draw mode when the overlay should respond to Save (Ctrl+S / Enter / click).
     /// `None` would disable the Save UI entirely; today we always set this in Draw mode.
     draw_save: Option<Rc<DrawSaveState>>,
+    /// Current output destination, driven by the toolbar's output switcher. Shared with the
+    /// Edit-mode save closure (which is otherwise opaque) and with [`DrawSaveState`], so both
+    /// save routes read the user's latest choice.
+    sinks: SharedSinks,
     /// `true` while the lazy Draw-mode Blur desktop capture is in flight. Prevents the user
     /// from re-triggering the capture by tapping Blur again before the first capture lands.
     blur_capture_in_flight: Rc<Cell<bool>>,
@@ -747,6 +780,7 @@ fn wire_toolbar(shared: &Shared) {
     let focus_shutdown = shared.focus_shutdown.clone();
     let blur_in_flight = shared.blur_capture_in_flight.clone();
     let notify = shared.notify.clone();
+    let sinks = shared.sinks.clone();
 
     let toolbar = shared.host.toolbar();
     toolbar.connect(move |action| match action {
@@ -833,6 +867,14 @@ fn wire_toolbar(shared: &Shared) {
         }
         ToolbarAction::PassthroughToggled(on) => {
             apply_passthrough_state(&passthrough, &windows, &host, on);
+        }
+        ToolbarAction::OutputModeChanged(mode) => {
+            // Both save routes re-read the selection when they run, so the change applies
+            // from the next save onwards — no need to rebuild the save closure.
+            sinks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_mode(mode);
         }
         ToolbarAction::Save => {
             if let Some(edit) = edit.as_ref() {
@@ -1221,6 +1263,13 @@ async fn run_draw_save(
     // exactly like a plain Capture. No pre-capture delay is plumbed through the draw
     // overlay flow today: the user is already on an annotation surface, so a timed delay
     // would just blur the workflow without an obvious entry point.
+    // The draw toolbar (and with it, its output switcher) is hidden while the selector is
+    // up, so the selector carries its own switcher seeded from the current destination.
+    let seed_output = draw_save
+        .sinks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .mode();
     let outcome = match selector::pick_region_in_app(
         &app,
         draw_save.cursor,
@@ -1228,6 +1277,7 @@ async fn run_draw_save(
         false,
         draw_save.app_ctx.config.ui.selector.clone(),
         draw_save.app_ctx.config.capture.initial_mode.into(),
+        seed_output,
     )
     .await
     {
@@ -1254,11 +1304,15 @@ async fn run_draw_save(
     // can still pick up that we don't want is our own toolbar chrome.
     let selection = outcome.selection.clone();
     let cursor = outcome.cursor;
-    let sinks = if draw_save.sinks.is_empty() {
-        draw_save.app_ctx.config.default_sinks()
-    } else {
-        draw_save.sinks.clone()
+    // Adopt whatever the selector's switcher ended on — it may differ from `seed_output` —
+    // and mirror it onto the draw toolbar's own button so the two never disagree once the
+    // toolbar comes back.
+    let sinks = {
+        let mut selection = draw_save.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        selection.set_mode(outcome.output_mode);
+        selection.to_sinks()
     };
+    host.toolbar().set_output_mode(outcome.output_mode);
     let app_ctx = draw_save.app_ctx.clone();
     let collected = draw_save.collected.clone();
     let label = crate::cli::screenshot::selection_label(&selection);

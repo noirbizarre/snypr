@@ -203,10 +203,13 @@ snypr screenshot --full --via-daemon
 The selector (shown by `screenshot` with no explicit selection flag, or with
 `--interactive`) shows a floating
 toolbar on the focused monitor with four modes — **Full**, **Screen**, **Window**,
-**Region** — plus a cursor toggle, a delay spinner, and a **Capture** button. The toolbar follows keyboard
+**Region** — plus a cursor toggle, a delay spinner, an output-destination switcher, and a
+**Capture** button. The toolbar follows keyboard
 focus: it moves to whichever monitor you focus, while every monitor keeps its dimming
 overlay. Hold `Shift` while clicking Capture (the button's icon swaps live) to *also* open
-the in-place editor on the captured image. Keyboard shortcuts: `1/2/3/4` switch modes, drag
+the in-place editor on the captured image; while Shift is held the destination switcher
+greys out, because the editor that opens carries its own. Whatever destination you picked
+in the selector seeds that editor's switcher. Keyboard shortcuts: `1/2/3/4` switch modes, drag
 with the mouse in Region mode, click on a monitor in Screen mode, then press `Enter`
 (Capture) or `Shift+Enter` / `Shift+KP_Enter` (Capture + Annotate) to commit. `Esc` cancels.
 
@@ -229,6 +232,7 @@ These are currently fixed and not configurable.
 | `C`      | Crop (editor only)           |
 | `Ctrl+Z` | Undo last layer              |
 | `Ctrl+S` / `Enter` | Save (editor and draw overlay) |
+| `Ctrl+O` | Cycle output destination: file → clipboard → both |
 | `P`      | Toggle pointer passthrough (overlay only) |
 | `Ctrl+L` | Clear all layers (overlay only)           |
 | `Delete` / `Backspace` | Delete the selected shape (Select mode) |
@@ -253,13 +257,20 @@ the currently selected shape (or the text being edited), and font size is editab
 text shape is selected or edited. The pickers are disabled for tools whose appearance is
 hardcoded (Blur, Crop, Redact) and when nothing relevant is selected.
 
+Next to the Save button — and, on the selector, just before **Capture** — an
+**output-destination switcher** shows where the next save will go. It starts on whatever
+`--to` (or `[output].default_sinks`) resolved to, and clicking it
+— or pressing `Ctrl+O` — cycles file → clipboard → both. An explicit `--to file=PATH` target
+and a pinned `--to clipboard=KIND` are remembered, so cycling away and back is lossless.
+
 In the **draw overlay**, `Ctrl+S` (or `Enter`, or the toolbar Save button) pops the
 screenshot zone selector so you choose what part of the screen to capture (region,
 monitor, window, or full desktop). Because the strokes are already painted on the
 layer-shell surfaces, the captured PNG naturally contains "desktop + strokes" — no
 post-processing. The overlay stays alive with strokes intact after saving, so you can
 keep drawing or save another zone. Sinks come from `--to` (repeatable; defaults to
-`[output].default_sinks` from the config), and `--cursor` seeds the selector's cursor toggle.
+`[output].default_sinks` from the config) and can be changed on the fly with the toolbar's
+output-destination switcher, and `--cursor` seeds the selector's cursor toggle.
 
 Next to the color picker, a stroke-style picker offers Solid / Dashed / Dotted dash
 patterns for the outline-rendering tools (Rectangle, Ellipse, Arrow, Line, Freehand).

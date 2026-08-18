@@ -21,6 +21,7 @@ use gtk4::prelude::*;
 
 use crate::annotate::{StrokeStyle, ToolKind};
 use crate::i18n::fl;
+use crate::output::OutputMode;
 
 /// Localized tooltip label for an annotation tool.
 fn tool_label(kind: ToolKind) -> String {
@@ -47,6 +48,15 @@ fn mode_label(kind: ModeKind) -> String {
         ModeKind::Screen => fl!("toolbar-mode-screen"),
         ModeKind::Window => fl!("toolbar-mode-window"),
         ModeKind::Region => fl!("toolbar-mode-region"),
+    }
+}
+
+/// Localized tooltip label for an output destination.
+fn output_mode_label(mode: OutputMode) -> String {
+    match mode {
+        OutputMode::File => fl!("toolbar-output-file"),
+        OutputMode::Clipboard => fl!("toolbar-output-clipboard"),
+        OutputMode::Both => fl!("toolbar-output-both"),
     }
 }
 
@@ -300,6 +310,11 @@ pub struct ToolbarSpec {
     /// [`ToolbarAction::FontSizeChanged`] when the user picks a new size; the caller
     /// is responsible for forwarding it to the canvas via `set_tool_font_size`.
     pub show_font_size_picker: bool,
+    /// Show a cycling output-destination button (file → clipboard → both) next to Save. The
+    /// toolbar emits [`ToolbarAction::OutputModeChanged`]; the caller owns the sink list and
+    /// is responsible for applying the new destination before the next save. Only meaningful
+    /// alongside `show_save`.
+    pub show_output_switcher: bool,
     pub initial_tool: Option<ToolKind>,
     pub initial_mode: Option<ModeKind>,
     pub initial_cursor: bool,
@@ -307,6 +322,9 @@ pub struct ToolbarSpec {
     /// Initial value (in whole seconds) for the delay spinner. Ignored when
     /// `show_delay_spinner` is false. Common values are 0, 3, and 10.
     pub initial_delay_secs: u32,
+    /// Initial state of the output switcher, derived by the caller from the sinks resolved
+    /// from `--to` / `[output].default_sinks`. Ignored when `show_output_switcher` is false.
+    pub initial_output_mode: OutputMode,
 }
 
 impl ToolbarSpec {
@@ -327,11 +345,13 @@ impl ToolbarSpec {
             show_color_picker: false,
             show_style_picker: false,
             show_font_size_picker: false,
+            show_output_switcher: false,
             initial_tool: None,
             initial_mode: None,
             initial_cursor: false,
             initial_passthrough: false,
             initial_delay_secs: 0,
+            initial_output_mode: OutputMode::File,
         }
     }
 }
@@ -374,6 +394,10 @@ pub enum ToolbarAction {
     /// applies it to the currently active tool's `size_pt` (analogous to
     /// `StrokeStyleChanged`). Only meaningful for text-rendering tools.
     FontSizeChanged(f32),
+    /// User cycled the output-destination switcher (button click or Ctrl+O). The caller
+    /// applies the new destination to whatever sink state it owns; the toolbar has already
+    /// updated its own icon and tooltip.
+    OutputModeChanged(OutputMode),
 }
 
 type Callback = Rc<RefCell<Option<Box<dyn Fn(ToolbarAction) + 'static>>>>;
@@ -393,7 +417,7 @@ struct ToolbarState {
     /// Capture-button visuals + live-shift tracking. Populated only when `show_capture` is
     /// true. `install_shortcuts` updates `shift_held` and re-skins the icon/tooltip as Shift
     /// is pressed/released so users get visual feedback before clicking.
-    capture: Option<CaptureUi>,
+    capture: Option<Rc<CaptureUi>>,
     /// Color-picker UI (button + popover + inline chooser). We use an inline
     /// `ColorChooserWidget` hosted in a `Popover` rather than the modern `ColorDialog`
     /// because `ColorDialog` opens as a new `xdg_toplevel`, which can't receive pointer
@@ -406,6 +430,10 @@ struct ToolbarState {
     /// Font-size spinner UI. Same lifecycle model as `color` / `style`. Built only
     /// when [`ToolbarSpec::show_font_size_picker`] is set.
     font_size: Option<FontSizePickerUi>,
+    /// Output-destination switcher. Built only when [`ToolbarSpec::show_output_switcher`] is
+    /// set. Unlike the toggle-based controls it is a plain `Button`, so external updates via
+    /// [`Toolbar::set_output_mode`] need no signal blocking.
+    output: Option<OutputSwitcherUi>,
     shortcuts: Vec<Shortcut>,
     callback: Callback,
 }
@@ -416,6 +444,42 @@ struct CaptureUi {
     button: gtk4::Button,
     icon: gtk4::Image,
     shift_held: Rc<Cell<bool>>,
+    /// The output-destination switcher, when the same toolbar carries one. Dimmed while
+    /// Shift is held — see the construction site for why.
+    output: Option<gtk4::Button>,
+}
+
+/// Live state for the output-destination switcher. A single `Button` whose child is a small
+/// horizontal box of icons, rebuilt on every state change: one icon for `File` / `Clipboard`,
+/// two side by side for `Both`. Composing icons at runtime avoids vendoring a third
+/// "file+clipboard" SVG and keeps the meaning of the combined state obvious.
+struct OutputSwitcherUi {
+    button: gtk4::Button,
+    /// Container for the state icons. Emptied and refilled by [`OutputSwitcherUi::apply`].
+    icons: gtk4::Box,
+    /// Current destination. Source of truth for the control.
+    mode: Rc<Cell<OutputMode>>,
+}
+
+/// Icon names shown for a destination, in display order.
+fn output_mode_icons(mode: OutputMode) -> &'static [&'static str] {
+    match mode {
+        OutputMode::File => &["document-save-symbolic"],
+        OutputMode::Clipboard => &["edit-copy-symbolic"],
+        OutputMode::Both => &["document-save-symbolic", "edit-copy-symbolic"],
+    }
+}
+
+/// Re-skin the switcher's button for `mode`. Free function so the click handler can call it
+/// without holding a reference to the (not yet constructed) `ToolbarState`.
+fn apply_output_mode(button: &gtk4::Button, icons: &gtk4::Box, mode: OutputMode) {
+    while let Some(child) = icons.first_child() {
+        icons.remove(&child);
+    }
+    for name in output_mode_icons(mode) {
+        icons.append(&icon_only(name));
+    }
+    button.set_tooltip_text(Some(&output_mode_label(mode)));
 }
 
 /// Live state for the color picker. Stored on `ToolbarState` so external callers can update
@@ -502,6 +566,9 @@ impl CaptureUi {
             self.button
                 .set_tooltip_text(Some(&fl!("toolbar-capture-tooltip-shift")));
         }
+        if let Some(output) = &self.output {
+            output.set_sensitive(!shift);
+        }
     }
 }
 
@@ -527,6 +594,9 @@ enum ShortcutAction {
     Save,
     Capture,
     Annotate,
+    /// Cycle the output destination (Ctrl+O). Dispatched by clicking the switcher button so
+    /// the visual state and the emitted action stay on a single code path.
+    OutputCycle,
 }
 
 /// Reusable toolbar widget. Cheap to clone — it holds an `Rc` to its internal state.
@@ -549,6 +619,7 @@ impl Toolbar {
         let mut passthrough = None;
         let mut capture = None;
         let mut delay = None;
+        let mut output = None;
 
         // Mode buttons (left section).
         let mut mode_group: Option<gtk4::ToggleButton> = None;
@@ -900,7 +971,8 @@ impl Toolbar {
             || spec.show_capture
             || spec.show_cursor_toggle
             || spec.show_passthrough_toggle
-            || spec.show_delay_spinner;
+            || spec.show_delay_spinner
+            || spec.show_output_switcher;
         if trailing && (!spec.modes.is_empty() || !spec.tools.is_empty()) {
             let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
             spacer.set_hexpand(true);
@@ -1084,6 +1156,42 @@ impl Toolbar {
             passthrough = Some((btn, id));
         }
 
+        // Output-destination switcher, immediately left of Save: the two read together as
+        // "where it goes" / "send it there". A cycling button rather than three toggles keeps
+        // the toolbar narrow, and avoids the popover/dropdown route that misbehaves on
+        // Hyprland layer-shell surfaces (see `StylePickerUi`).
+        if spec.show_output_switcher {
+            let btn = gtk4::Button::new();
+            let icons = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
+            btn.set_child(Some(&icons));
+            make_unfocusable(&btn);
+            let mode = Rc::new(Cell::new(spec.initial_output_mode));
+            apply_output_mode(&btn, &icons, mode.get());
+
+            let cb = callback.clone();
+            let cycle_mode = mode.clone();
+            let cycle_icons = icons.clone();
+            btn.connect_clicked(move |b| {
+                let next = cycle_mode.get().next();
+                cycle_mode.set(next);
+                apply_output_mode(b, &cycle_icons, next);
+                if let Some(f) = cb.borrow().as_ref() {
+                    f(ToolbarAction::OutputModeChanged(next));
+                }
+            });
+            widget.append(&btn);
+            shortcuts.push(Shortcut {
+                key: gdk4::Key::o,
+                action: ShortcutAction::OutputCycle,
+                modifiers: gdk4::ModifierType::CONTROL_MASK,
+            });
+            output = Some(OutputSwitcherUi {
+                button: btn,
+                icons,
+                mode,
+            });
+        }
+
         if spec.show_save {
             let btn = gtk4::Button::new();
             btn.set_child(Some(&icon_only("document-save-symbolic")));
@@ -1180,40 +1288,6 @@ impl Toolbar {
                 }
             });
 
-            if shift_annotates {
-                // Live icon/tooltip swap as Shift is pressed/released. Pointer key events on a
-                // layer-shell selector don't reliably reach `EventControllerKey` (the window may
-                // not have keyboard focus, depending on compositor + layer config), so instead
-                // we poll the seat keyboard's modifier state on a short GLib timer. This is
-                // cheap (a handful of pointer hops every 60ms) and works regardless of focus.
-                let icon_for_timer = icon.clone();
-                let btn_for_timer = btn.clone();
-                let shift_for_timer = shift_held.clone();
-                glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-                    if btn_for_timer.parent().is_none() {
-                        // Button was destroyed (window closed); cancel the timer.
-                        return glib::ControlFlow::Break;
-                    }
-                    let shift = gdk4::Display::default()
-                        .and_then(|d| d.default_seat())
-                        .and_then(|s| s.keyboard())
-                        .map(|k| k.modifier_state().contains(gdk4::ModifierType::SHIFT_MASK))
-                        .unwrap_or(false);
-                    if shift_for_timer.get() != shift {
-                        shift_for_timer.set(shift);
-                        if shift {
-                            icon_for_timer.set_icon_name(Some("document-edit-symbolic"));
-                            btn_for_timer.set_tooltip_text(Some(&fl!("toolbar-annotate-tooltip")));
-                        } else {
-                            icon_for_timer.set_icon_name(Some("camera-photo-symbolic"));
-                            btn_for_timer
-                                .set_tooltip_text(Some(&fl!("toolbar-capture-tooltip-shift")));
-                        }
-                    }
-                    glib::ControlFlow::Continue
-                });
-            }
-
             widget.append(&btn);
             // Enter → Capture, Shift+Enter → Annotate (and the KP variants). The Save block
             // never coexists with show_capture (editor toolbar vs selector toolbar), so the
@@ -1248,11 +1322,38 @@ impl Toolbar {
             // appearance — otherwise `apply_shift` (driven by `install_shortcuts`) has
             // nothing to do.
             if shift_annotates {
-                capture = Some(CaptureUi {
-                    button: btn,
+                let ui = Rc::new(CaptureUi {
+                    button: btn.clone(),
                     icon,
                     shift_held,
+                    // Dimmed while Shift is held: Capture becomes Annotate, and the editor
+                    // that opens carries its own editable switcher, so leaving this one live
+                    // would mean two controls for the same value.
+                    output: output.as_ref().map(|o: &OutputSwitcherUi| o.button.clone()),
                 });
+
+                // Live icon/tooltip swap as Shift is pressed/released. Pointer key events on a
+                // layer-shell selector don't reliably reach `EventControllerKey` (the window may
+                // not have keyboard focus, depending on compositor + layer config), so instead
+                // we poll the seat keyboard's modifier state on a short GLib timer. This is
+                // cheap (a handful of pointer hops every 60ms) and works regardless of focus.
+                // It shares `apply_shift` with the key-controller route so the two can't drift.
+                let ui_for_timer = ui.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+                    if btn.parent().is_none() {
+                        // Button was destroyed (window closed); cancel the timer.
+                        return glib::ControlFlow::Break;
+                    }
+                    let shift = gdk4::Display::default()
+                        .and_then(|d| d.default_seat())
+                        .and_then(|s| s.keyboard())
+                        .map(|k| k.modifier_state().contains(gdk4::ModifierType::SHIFT_MASK))
+                        .unwrap_or(false);
+                    ui_for_timer.apply_shift(shift);
+                    glib::ControlFlow::Continue
+                });
+
+                capture = Some(ui);
             }
         }
 
@@ -1266,6 +1367,7 @@ impl Toolbar {
             color,
             style,
             font_size,
+            output,
             shortcuts,
             callback,
         });
@@ -1378,6 +1480,17 @@ impl Toolbar {
             for (_, toggle, id) in &ui.toggles {
                 toggle.unblock_signal(id);
             }
+        }
+    }
+
+    /// Set the output-destination switcher's state without emitting
+    /// [`ToolbarAction::OutputModeChanged`]. No signal blocking is needed — the control is a
+    /// plain `Button`, so writing the `Cell` and re-skinning is inert. No-op when the
+    /// switcher was not built.
+    pub fn set_output_mode(&self, mode: OutputMode) {
+        if let Some(ui) = &self.state.output {
+            ui.mode.set(mode);
+            apply_output_mode(&ui.button, &ui.icons, mode);
         }
     }
 
@@ -1508,6 +1621,16 @@ impl Toolbar {
             ShortcutAction::Save => self.emit(ToolbarAction::Save),
             ShortcutAction::Capture => self.emit(ToolbarAction::Capture),
             ShortcutAction::Annotate => self.emit(ToolbarAction::Annotate),
+            ShortcutAction::OutputCycle => {
+                // Click the button rather than emitting directly, so the icon and tooltip
+                // follow the keyboard route exactly as they do the pointer one.
+                if let Some(ui) = &self.state.output {
+                    ui.button.emit_clicked();
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -1985,6 +2108,7 @@ impl ToolbarHost {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
 
     #[test]
     fn mode_kind_default_is_screen() {
@@ -2056,6 +2180,22 @@ mod tests {
                 "Edit-mode toolbar (EDITOR_TOOLS) is missing {kind:?}"
             );
         }
+    }
+
+    #[rstest]
+    #[case(OutputMode::File, &["document-save-symbolic"])]
+    #[case(OutputMode::Clipboard, &["edit-copy-symbolic"])]
+    #[case(
+        OutputMode::Both,
+        &["document-save-symbolic", "edit-copy-symbolic"]
+    )]
+    fn the_output_switcher_shows_one_icon_per_active_sink(
+        #[case] mode: OutputMode,
+        #[case] expected: &[&str],
+    ) {
+        // `Both` renders two icons side by side; that composition is what makes the combined
+        // state legible without vendoring a third SVG.
+        assert_eq!(output_mode_icons(mode), expected);
     }
 
     #[test]
