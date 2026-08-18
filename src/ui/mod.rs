@@ -68,6 +68,43 @@ pub(crate) fn install_icon_resources() {
     }
 }
 
+/// Test-only GTK bootstrap.
+///
+/// Widget-level tests need a `GdkDisplay`, which means a running compositor. CI provides a
+/// headless one; a developer's machine usually has a real session. When neither is present
+/// the caller skips, so `cargo test` still works over SSH or in a bare container.
+///
+/// Set `SNYPR_REQUIRE_GTK=1` to turn "no display" into a hard failure instead — CI does this
+/// so a broken compositor step surfaces as a red build rather than as silently skipped tests.
+#[cfg(test)]
+pub(crate) fn try_init_gtk() -> bool {
+    // `gtk4::init` is idempotent, but nextest runs each test in its own process anyway, so
+    // this is a single init per test.
+    if gtk4::init().is_ok() {
+        install_icon_resources();
+        return true;
+    }
+    assert!(
+        std::env::var_os("SNYPR_REQUIRE_GTK").is_none(),
+        "SNYPR_REQUIRE_GTK is set but GTK could not connect to a display; \
+         the headless compositor is not running"
+    );
+    eprintln!("no Wayland display available, skipping GTK-backed test");
+    false
+}
+
+/// Skip the enclosing test when no display is available. See [`try_init_gtk`].
+#[cfg(test)]
+macro_rules! require_gtk {
+    () => {
+        if !$crate::ui::try_init_gtk() {
+            return;
+        }
+    };
+}
+#[cfg(test)]
+pub(crate) use require_gtk;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,35 @@
+name: Prefer the official Ubuntu mirrors
+description: >-
+  Drop the Azure apt mirror from the runner's mirror list. GitHub's images
+  default to azure.archive.ubuntu.com, which is regularly slow enough to stall a
+  job for ten minutes or more.
+runs:
+  using: composite
+  steps:
+    - name: Drop the Azure mirror
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Runner images point apt at `mirror+file:/etc/apt/apt-mirrors.txt`, so
+        # deleting the Azure entry is enough to fall back to the official
+        # mirrors listed after it. Note that rewriting /etc/apt/sources.list --
+        # the workaround that circulates most widely -- is a no-op on 24.04,
+        # which uses the deb822 format in /etc/apt/sources.list.d/ubuntu.sources.
+        mirrors=/etc/apt/apt-mirrors.txt
+        if [ ! -f "$mirrors" ]; then
+          echo "::notice::$mirrors is absent; leaving the apt configuration alone"
+          exit 0
+        fi
+
+        sudo sed -i '/azure.archive.ubuntu.com/d' "$mirrors"
+
+        # An empty list would break every later apt call, so refuse to continue
+        # rather than let it fail further down where the cause is not obvious.
+        if [ ! -s "$mirrors" ]; then
+          echo "::error::$mirrors is empty after dropping the Azure mirror"
+          exit 1
+        fi
+
+        echo "Remaining mirrors:"
+        cat "$mirrors"

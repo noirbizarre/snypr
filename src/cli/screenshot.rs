@@ -150,18 +150,11 @@ pub async fn execute(
     let (selection, cursor, delay) = (resolved.selection, resolved.cursor, resolved.delay);
     let edit = edit || resolved.edit;
 
-    // The selector's output switcher wins over `--to` / `[output].default_sinks`, keeping the
-    // explicit path and clipboard kind those resolved to. Applied before every write branch
-    // below, so `--per-output`, the editor hand-off, and the plain path all honor it — and the
-    // editor receives sinks that already reflect the choice, seeding its own switcher.
-    let sinks = match resolved.output_mode {
-        Some(mode) => {
-            let mut selection = crate::output::SinkSelection::from_sinks(&sinks);
-            selection.set_mode(mode);
-            selection.to_sinks()
-        }
-        None => sinks,
-    };
+    // The selector's output switcher wins over `--to` / `[output].default_sinks`. Applied
+    // before every write branch below, so `--per-output`, the editor hand-off, and the plain
+    // path all honor it — and the editor receives sinks that already reflect the choice,
+    // seeding its own switcher.
+    let sinks = apply_output_override(sinks, resolved.output_mode);
 
     if edit && matches!(selection, Selection::PerOutput) {
         bail!("{}", fl!("error-edit-incompatible-per-output"));
@@ -324,6 +317,38 @@ struct ResolvedSelection {
     output_mode: Option<OutputMode>,
 }
 
+/// Convert a selector-reported delay into whole seconds for the downstream sleep / countdown.
+///
+/// The selector counts down inside its own overlay and reports `Duration::ZERO`, so this
+/// normally yields `None`; a non-zero value would only arise from a future code path that
+/// bypasses the in-overlay countdown. Rounds up so the visible wait is never shorter than
+/// requested.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
+fn selector_delay_secs(delay: std::time::Duration) -> Option<u32> {
+    if delay.is_zero() {
+        return None;
+    }
+    let secs = delay.as_secs_f64().ceil() as u32;
+    Some(secs).filter(|n| *n > 0)
+}
+
+/// Apply the destination the interactive selector settled on, keeping the explicit path and
+/// clipboard kind the CLI/config resolved to (see [`SinkSelection`]).
+///
+/// `None` means the selector never ran, and `sinks` is returned untouched — which is what
+/// preserves multi-file fan-out (`--to file=A --to file=B`) for every non-interactive path,
+/// including the daemon.
+fn apply_output_override(sinks: Vec<SinkSpec>, mode: Option<OutputMode>) -> Vec<SinkSpec> {
+    match mode {
+        Some(mode) => {
+            let mut selection = crate::output::SinkSelection::from_sinks(&sinks);
+            selection.set_mode(mode);
+            selection.to_sinks()
+        }
+        None => sinks,
+    }
+}
+
 impl ResolvedSelection {
     /// Pass-through result for a selection that needed no user interaction.
     fn passthrough(selection: Selection, cursor: bool, delay: Option<u32>) -> Self {
@@ -388,12 +413,7 @@ async fn resolve_selection(
                 // bypasses the in-overlay countdown. Convert it to seconds (rounding up
                 // to keep the visible wait at least as long as requested) for downstream
                 // sleep / countdown logic.
-                let chosen_delay = if outcome.delay.is_zero() {
-                    None
-                } else {
-                    let secs = outcome.delay.as_secs_f64().ceil() as u32;
-                    Some(secs).filter(|n| *n > 0)
-                };
+                let chosen_delay = selector_delay_secs(outcome.delay);
                 // Resolve any compositor-aware variants the user picked (Window) by recursing.
                 let inner = Box::pin(resolve_selection(
                     outcome.selection,
@@ -497,6 +517,86 @@ mod tests {
     use clap::Parser;
     use pretty_assertions::assert_eq;
     use rstest::rstest;
+
+    /// Build a context with notifications off so tests never touch a D-Bus session.
+    async fn test_ctx() -> crate::context::Ctx {
+        let mut config = Config::default();
+        config.notify.success = false;
+        config.notify.error = false;
+        Context::new(config).await.unwrap()
+    }
+
+    #[rstest]
+    #[case::file(OutputMode::File, vec![SinkSpec::File(None)])]
+    #[case::clipboard(OutputMode::Clipboard, vec![SinkSpec::Clipboard(None)])]
+    #[case::both(
+        OutputMode::Both,
+        vec![SinkSpec::File(None), SinkSpec::Clipboard(None)]
+    )]
+    fn the_selector_override_replaces_the_resolved_sinks(
+        #[case] mode: OutputMode,
+        #[case] expected: Vec<SinkSpec>,
+    ) {
+        let sinks = vec![SinkSpec::File(None)];
+        assert_eq!(apply_output_override(sinks, Some(mode)), expected);
+    }
+
+    #[test]
+    fn no_selector_override_leaves_the_sinks_untouched() {
+        // The daemon and every non-interactive path land here; collapsing a multi-file
+        // fan-out would silently drop one of the requested targets.
+        let sinks = vec![
+            SinkSpec::File(Some("/tmp/a.png".into())),
+            SinkSpec::File(Some("/tmp/b.png".into())),
+        ];
+        assert_eq!(apply_output_override(sinks.clone(), None), sinks);
+    }
+
+    #[test]
+    fn the_selector_override_keeps_an_explicit_cli_path() {
+        let target = std::path::PathBuf::from("/tmp/from-cli.png");
+        let sinks = vec![SinkSpec::File(Some(target.clone()))];
+        assert_eq!(
+            apply_output_override(sinks, Some(OutputMode::Both)),
+            vec![SinkSpec::File(Some(target)), SinkSpec::Clipboard(None)]
+        );
+    }
+
+    #[rstest]
+    #[case::zero(std::time::Duration::ZERO, None)]
+    #[case::whole(std::time::Duration::from_secs(3), Some(3))]
+    // Rounded up: a 2.1 s request must never wait less than the user asked for.
+    #[case::rounds_up(std::time::Duration::from_millis(2100), Some(3))]
+    #[case::sub_second(std::time::Duration::from_millis(1), Some(1))]
+    fn converts_the_selector_delay_to_whole_seconds(
+        #[case] delay: std::time::Duration,
+        #[case] expected: Option<u32>,
+    ) {
+        assert_eq!(selector_delay_secs(delay), expected);
+    }
+
+    #[rstest]
+    #[case::full(Selection::Full)]
+    #[case::per_output(Selection::PerOutput)]
+    #[case::region(Selection::Region(crate::capture::region::Rect { x: 0, y: 0, w: 4, h: 4 }))]
+    #[case::output(Selection::Output("DP-1".to_owned()))]
+    #[tokio::test]
+    async fn non_interactive_selections_pass_through_untouched(#[case] selection: Selection) {
+        // No compositor is queried for these, so they resolve without Hyprland running.
+        let ctx = test_ctx().await;
+        let resolved = resolve_selection(selection.clone(), true, Some(5), &[], &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.selection, selection);
+        assert!(resolved.cursor, "cursor flag must survive the pass-through");
+        assert!(!resolved.edit, "only the selector can request the editor");
+        assert_eq!(resolved.delay, Some(5));
+        assert_eq!(
+            resolved.output_mode, None,
+            "no selector ran, so the CLI sinks must be left alone"
+        );
+    }
 
     #[rstest]
     #[case("10,20,100x200", crate::capture::region::Rect { x: 10, y: 20, w: 100, h: 200 })]

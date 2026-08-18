@@ -39,7 +39,7 @@ use crate::capture::region::{Rect, slice_pixels};
 use crate::capture::{CapturedImage, Capturer};
 use crate::cli::SinkSpec;
 use crate::context::Ctx;
-use crate::output::{SharedSinks, SinkSelection};
+use crate::output::{OutputMode, SharedSinks, SinkSelection};
 use crate::ui::canvas::AnnotationCanvas;
 use crate::ui::save::{SaveFn, sinks_save_fn};
 use crate::ui::selector;
@@ -279,6 +279,25 @@ fn send_once(tx: &ResultSender, msg: Result<()>) {
 /// `run_draw_save`). It moved here because the toolbar's output switcher needs the *resolved*
 /// destination up front to pick its initial icon — an unresolved empty list would show "file"
 /// even for a config whose `default_sinks` is `["clipboard"]`.
+/// Record the destination the user just picked. Both save routes re-read the selection when
+/// they run, so this is all that is needed to redirect the next save.
+fn set_output_mode(sinks: &SharedSinks, mode: OutputMode) {
+    sinks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_mode(mode);
+}
+
+/// Adopt the destination a nested selector settled on and return the sinks to write to.
+///
+/// Used by the draw overlay's Save: the selector it pops carries its own switcher, so the
+/// value can come back different from what the overlay held.
+fn adopt_output_mode(sinks: &SharedSinks, mode: OutputMode) -> Vec<SinkSpec> {
+    let mut selection = sinks.lock().unwrap_or_else(|e| e.into_inner());
+    selection.set_mode(mode);
+    selection.to_sinks()
+}
+
 fn resolve_sinks(ctx: &Ctx, sinks: Vec<SinkSpec>) -> SharedSinks {
     let sinks = if sinks.is_empty() {
         ctx.config.default_sinks()
@@ -871,10 +890,7 @@ fn wire_toolbar(shared: &Shared) {
         ToolbarAction::OutputModeChanged(mode) => {
             // Both save routes re-read the selection when they run, so the change applies
             // from the next save onwards — no need to rebuild the save closure.
-            sinks
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .set_mode(mode);
+            set_output_mode(&sinks, mode);
         }
         ToolbarAction::Save => {
             if let Some(edit) = edit.as_ref() {
@@ -1307,11 +1323,7 @@ async fn run_draw_save(
     // Adopt whatever the selector's switcher ended on — it may differ from `seed_output` —
     // and mirror it onto the draw toolbar's own button so the two never disagree once the
     // toolbar comes back.
-    let sinks = {
-        let mut selection = draw_save.sinks.lock().unwrap_or_else(|e| e.into_inner());
-        selection.set_mode(outcome.output_mode);
-        selection.to_sinks()
-    };
+    let sinks = adopt_output_mode(&draw_save.sinks, outcome.output_mode);
     host.toolbar().set_output_mode(outcome.output_mode);
     let app_ctx = draw_save.app_ctx.clone();
     let collected = draw_save.collected.clone();
@@ -1598,5 +1610,86 @@ mod imp_veil {
                 &graphene::Rect::new(sx + sw, sy, (w - (sx + sw)).max(0.0), sh),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::ClipboardKind;
+    use crate::config::Config;
+    use crate::context::Context;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    async fn test_ctx(default_sinks: &[&str]) -> Ctx {
+        let mut config = Config::default();
+        config.output.default_sinks = default_sinks.iter().map(|s| (*s).to_owned()).collect();
+        config.notify.success = false;
+        config.notify.error = false;
+        Context::new(config).await.unwrap()
+    }
+
+    #[rstest]
+    #[case::file(&["file"], OutputMode::File)]
+    #[case::clipboard(&["clipboard"], OutputMode::Clipboard)]
+    #[case::both(&["file", "clipboard"], OutputMode::Both)]
+    #[tokio::test]
+    async fn an_empty_sink_list_falls_back_to_the_configured_defaults(
+        #[case] default_sinks: &[&str],
+        #[case] expected: OutputMode,
+    ) {
+        // The fallback has to happen here rather than at save time: the toolbar's switcher
+        // reads the resolved destination to pick its initial icon.
+        let ctx = test_ctx(default_sinks).await;
+        let shared = resolve_sinks(&ctx, Vec::new());
+        assert_eq!(shared.lock().unwrap().mode(), expected);
+    }
+
+    #[tokio::test]
+    async fn explicit_sinks_win_over_the_configured_defaults() {
+        let ctx = test_ctx(&["clipboard"]).await;
+        let shared = resolve_sinks(&ctx, vec![SinkSpec::File(None)]);
+        assert_eq!(shared.lock().unwrap().mode(), OutputMode::File);
+    }
+
+    #[tokio::test]
+    async fn switching_the_destination_redirects_the_next_save() {
+        let ctx = test_ctx(&["file"]).await;
+        let shared = resolve_sinks(&ctx, vec![SinkSpec::File(None)]);
+
+        set_output_mode(&shared, OutputMode::Clipboard);
+
+        assert_eq!(
+            shared.lock().unwrap().to_sinks(),
+            vec![SinkSpec::Clipboard(None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn adopting_a_nested_selector_choice_returns_the_new_sinks() {
+        let ctx = test_ctx(&["file"]).await;
+        let target = std::path::PathBuf::from("/tmp/draw.png");
+        let shared = resolve_sinks(
+            &ctx,
+            vec![
+                SinkSpec::File(Some(target.clone())),
+                SinkSpec::Clipboard(Some(ClipboardKind::Primary)),
+            ],
+        );
+
+        let sinks = adopt_output_mode(&shared, OutputMode::Clipboard);
+
+        assert_eq!(
+            sinks,
+            vec![SinkSpec::Clipboard(Some(ClipboardKind::Primary))]
+        );
+        // The choice sticks: the draw overlay keeps drawing and saves again later.
+        assert_eq!(shared.lock().unwrap().mode(), OutputMode::Clipboard);
+        // Cycling back must not have lost the explicit path from the command line.
+        assert_eq!(
+            adopt_output_mode(&shared, OutputMode::File),
+            vec![SinkSpec::File(Some(target))]
+        );
     }
 }
