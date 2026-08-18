@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/noirbizarre/snypr/compare/0.2.0..0.3.0) - 2026-08-18
+
+### 💫 Features
+
+- **ui** Switch the output destination from the toolbar ([#24](https://github.com/noirbizarre/snypr/issues/24)) - ([b08cdf1](https://github.com/noirbizarre/snypr/commit/b08cdf1b11f2dbc1942d8e2ce385984ed52fac6c))
+
+### 📚 Documentation
+
+- Add badges to the README header ([#26](https://github.com/noirbizarre/snypr/issues/26)) - ([a31d0c9](https://github.com/noirbizarre/snypr/commit/a31d0c954f52b377f44e93c79b37167a49ca8dcd))
+
+### 🧪 Tests
+
+- **ui** Cover the output-destination switcher ([#25](https://github.com/noirbizarre/snypr/issues/25)) - ([30ae7d4](https://github.com/noirbizarre/snypr/commit/30ae7d4e41b43eaefd70185e40998e6547d19029))
+
+### 🏗️ Build
+
+- **deps** Bump serde from 1.0.228 to 1.0.229 ([#18](https://github.com/noirbizarre/snypr/issues/18)) - ([ac81012](https://github.com/noirbizarre/snypr/commit/ac81012331bde4e230eded73a243ba66df47c29e))
+- **deps** Bump memmap2 from 0.9.10 to 0.9.11 ([#21](https://github.com/noirbizarre/snypr/issues/21)) - ([b00786c](https://github.com/noirbizarre/snypr/commit/b00786c024066de00b7dfaeabd30ec0b76687226))
+- **deps** Bump serde_json from 1.0.149 to 1.0.151 ([#22](https://github.com/noirbizarre/snypr/issues/22)) - ([5c32cd8](https://github.com/noirbizarre/snypr/commit/5c32cd8ebae04350dc388f5e646f35ab3ac4b9b0))
+- **deps** Bump tokio from 1.52.3 to 1.53.1 ([#20](https://github.com/noirbizarre/snypr/issues/20)) - ([2f543ed](https://github.com/noirbizarre/snypr/commit/2f543ed91dc170e3c2543e233d1dde831a6e3e39))
+- **deps** Bump gtk4 from 0.11.3 to 0.11.4 ([#19](https://github.com/noirbizarre/snypr/issues/19)) - ([2cee62c](https://github.com/noirbizarre/snypr/commit/2cee62c073b6f4fee0a9124cdff223aa84f3d7c0))
+
 ## [0.2.0](https://github.com/noirbizarre/snypr/compare/0.1.0..0.2.0) - 2026-08-15
 
 ### 💫 Features
