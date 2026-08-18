@@ -40,8 +40,8 @@ use crate::capture::{CapturedImage, Capturer};
 use crate::cli::SinkSpec;
 use crate::context::Ctx;
 use crate::output::{OutputMode, SharedSinks, SinkSelection};
+use crate::save::{SaveFn, sinks_save_fn};
 use crate::ui::canvas::AnnotationCanvas;
-use crate::ui::save::{SaveFn, sinks_save_fn};
 use crate::ui::selector;
 use crate::ui::toolbar::{
     EDITOR_TOOLS, OVERLAY_TOOLS, Toolbar, ToolbarAction, ToolbarHost, ToolbarSpec,
@@ -1338,7 +1338,7 @@ async fn run_draw_save(
         let stitched = crate::capture::region::stitch(&images, &selection)?;
         // Shared with the annotation editor's save closure, so both routes encode, fan out
         // to sinks, notify and record paths identically.
-        crate::ui::save::encode_and_write(&app_ctx, &sinks, &stitched, label, &collected).await
+        crate::save::encode_and_write(&app_ctx, &sinks, &stitched, label, &collected).await
     });
 
     match join.await {

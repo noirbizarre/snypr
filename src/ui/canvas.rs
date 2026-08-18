@@ -1850,101 +1850,121 @@ fn update_select(c: &AnnotationCanvas, cur: (f64, f64)) {
     let Some(doc_rc) = c.imp().doc.borrow().clone() else {
         return;
     };
-    // Built lazily; only Text resize needs to re-measure glyph extents.
+    // Built eagerly but only read by the Text-resize arm, which needs to re-measure glyph
+    // extents.
     let pango_ctx = c.create_pango_context();
     {
         let mut doc = doc_rc.borrow_mut();
         let Some(layer) = doc.layer_mut(m.layer) else {
             return;
         };
-        match (m.grab, m.origin) {
-            (Grab::Body, GrabGeometry::Box(orig)) => {
-                let (dx, dy) = (cur.0 - m.start.0, cur.1 - m.start.1);
-                if let Some(t) = layer.as_any_mut().downcast_mut::<RectTool>() {
-                    t.bounds = orig.translate(dx, dy);
-                } else if let Some(t) = layer.as_any_mut().downcast_mut::<EllipseTool>() {
-                    t.bounds = orig.translate(dx, dy);
-                } else if let Some(t) = layer.as_any_mut().downcast_mut::<HighlightTool>() {
-                    t.bounds = orig.translate(dx, dy);
-                } else if let Some(t) = layer.as_any_mut().downcast_mut::<BlurTool>() {
-                    t.bounds = orig.translate(dx, dy);
-                } else if let Some(t) = layer.as_any_mut().downcast_mut::<RedactTool>() {
-                    t.bounds = orig.translate(dx, dy);
-                }
-            }
-            (Grab::Body, GrabGeometry::Pair { from, to }) => {
-                let (dx, dy) = (cur.0 - m.start.0, cur.1 - m.start.1);
-                let nf = (from.0 + dx, from.1 + dy);
-                let nt = (to.0 + dx, to.1 + dy);
-                set_pair(layer, nf, nt);
-            }
-            (Grab::Body, GrabGeometry::Center { center, .. }) => {
-                let (dx, dy) = (cur.0 - m.start.0, cur.1 - m.start.1);
-                if let Some(t) = layer.as_any_mut().downcast_mut::<NumberTool>() {
-                    t.center = (center.0 + dx, center.1 + dy);
-                }
-            }
-            (Grab::Body, GrabGeometry::Origin(_)) => {
-                // Freehand body-move: translate incrementally from the last cursor position
-                // (avoids cloning the point list into the grab snapshot).
-                let (dx, dy) = (cur.0 - m.last.0, cur.1 - m.last.1);
-                layer.translate(dx, dy);
-            }
-            (
-                Grab::Body,
-                GrabGeometry::Text {
-                    origin: orig_origin,
-                    ..
-                },
-            ) => {
-                if let Some(t) = layer.as_any_mut().downcast_mut::<TextTool>() {
-                    let (dx, dy) = (cur.0 - m.start.0, cur.1 - m.start.1);
-                    t.origin = (orig_origin.0 + dx, orig_origin.1 + dy);
-                }
-            }
-            (Grab::BoxHandle(h), GrabGeometry::Box(orig)) => {
-                let nr = select::resize_box(orig, h, cur.0, cur.1);
-                set_box_bounds(layer, nr);
-            }
-            (
-                Grab::BoxHandle(h),
-                GrabGeometry::Text {
-                    origin: orig_origin,
-                    size_pt,
-                    wrap_width,
-                    bounds,
-                },
-            ) => {
-                if let Some(t) = layer.as_any_mut().downcast_mut::<TextTool>() {
-                    resize_text(
-                        t,
-                        h,
-                        orig_origin,
-                        size_pt,
-                        wrap_width,
-                        bounds,
-                        cur,
-                        &pango_ctx,
-                    );
-                }
-            }
-            (Grab::Endpoint(which), GrabGeometry::Pair { from, to }) => {
-                let (nf, nt) = select::set_endpoint(from, to, which, cur.0, cur.1);
-                set_pair(layer, nf, nt);
-            }
-            (Grab::NumberRadius, GrabGeometry::Center { center, .. }) => {
-                if let Some(t) = layer.as_any_mut().downcast_mut::<NumberTool>() {
-                    t.radius = select::new_radius(center, cur.0, cur.1);
-                }
-            }
-            _ => {}
-        }
+        apply_manipulation(layer, &m, cur, Some(&pango_ctx));
     }
     // Track the latest cursor for the incremental Freehand path.
     if let Some(m) = c.imp().manip.borrow_mut().as_mut() {
         m.last = cur;
     }
     c.queue_draw();
+}
+
+/// The geometry core of [`update_select`], split out so the resize / move / reshape math is
+/// unit-testable without a widget. Mutates `layer` in place; performs no redraw and does not
+/// advance `m.last` (the caller owns both).
+///
+/// `pango_ctx` is only consulted by the Text corner/edge resize arm, which must re-measure
+/// glyph extents. Pass `None` from tests that exercise any other arm; a `None` with a Text
+/// resize grab is a no-op rather than a panic, since a missing display must not corrupt the
+/// document.
+fn apply_manipulation(
+    layer: &mut Box<dyn Tool>,
+    m: &Manipulation,
+    cur: (f64, f64),
+    pango_ctx: Option<&pango::Context>,
+) {
+    match (m.grab, m.origin) {
+        (Grab::Body, GrabGeometry::Box(orig)) => {
+            let (dx, dy) = (cur.0 - m.start.0, cur.1 - m.start.1);
+            if let Some(t) = layer.as_any_mut().downcast_mut::<RectTool>() {
+                t.bounds = orig.translate(dx, dy);
+            } else if let Some(t) = layer.as_any_mut().downcast_mut::<EllipseTool>() {
+                t.bounds = orig.translate(dx, dy);
+            } else if let Some(t) = layer.as_any_mut().downcast_mut::<HighlightTool>() {
+                t.bounds = orig.translate(dx, dy);
+            } else if let Some(t) = layer.as_any_mut().downcast_mut::<BlurTool>() {
+                t.bounds = orig.translate(dx, dy);
+            } else if let Some(t) = layer.as_any_mut().downcast_mut::<RedactTool>() {
+                t.bounds = orig.translate(dx, dy);
+            }
+        }
+        (Grab::Body, GrabGeometry::Pair { from, to }) => {
+            let (dx, dy) = (cur.0 - m.start.0, cur.1 - m.start.1);
+            let nf = (from.0 + dx, from.1 + dy);
+            let nt = (to.0 + dx, to.1 + dy);
+            set_pair(layer, nf, nt);
+        }
+        (Grab::Body, GrabGeometry::Center { center, .. }) => {
+            let (dx, dy) = (cur.0 - m.start.0, cur.1 - m.start.1);
+            if let Some(t) = layer.as_any_mut().downcast_mut::<NumberTool>() {
+                t.center = (center.0 + dx, center.1 + dy);
+            }
+        }
+        (Grab::Body, GrabGeometry::Origin(_)) => {
+            // Freehand body-move: translate incrementally from the last cursor position
+            // (avoids cloning the point list into the grab snapshot).
+            let (dx, dy) = (cur.0 - m.last.0, cur.1 - m.last.1);
+            layer.translate(dx, dy);
+        }
+        (
+            Grab::Body,
+            GrabGeometry::Text {
+                origin: orig_origin,
+                ..
+            },
+        ) => {
+            if let Some(t) = layer.as_any_mut().downcast_mut::<TextTool>() {
+                let (dx, dy) = (cur.0 - m.start.0, cur.1 - m.start.1);
+                t.origin = (orig_origin.0 + dx, orig_origin.1 + dy);
+            }
+        }
+        (Grab::BoxHandle(h), GrabGeometry::Box(orig)) => {
+            let nr = select::resize_box(orig, h, cur.0, cur.1);
+            set_box_bounds(layer, nr);
+        }
+        (
+            Grab::BoxHandle(h),
+            GrabGeometry::Text {
+                origin: orig_origin,
+                size_pt,
+                wrap_width,
+                bounds,
+            },
+        ) => {
+            if let Some(pango_ctx) = pango_ctx
+                && let Some(t) = layer.as_any_mut().downcast_mut::<TextTool>()
+            {
+                resize_text(
+                    t,
+                    h,
+                    orig_origin,
+                    size_pt,
+                    wrap_width,
+                    bounds,
+                    cur,
+                    pango_ctx,
+                );
+            }
+        }
+        (Grab::Endpoint(which), GrabGeometry::Pair { from, to }) => {
+            let (nf, nt) = select::set_endpoint(from, to, which, cur.0, cur.1);
+            set_pair(layer, nf, nt);
+        }
+        (Grab::NumberRadius, GrabGeometry::Center { center, .. }) => {
+            if let Some(t) = layer.as_any_mut().downcast_mut::<NumberTool>() {
+                t.radius = select::new_radius(center, cur.0, cur.1);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Resize a Text layer in place during a Select drag. Corner handles scale `size_pt` by the
@@ -2287,6 +2307,64 @@ fn install_text_input(canvas: &AnnotationCanvas) {
     canvas.add_controller(key);
 }
 
+/// What a key press means to the Select tool, decided without touching the widget.
+///
+/// Split out of [`handle_select_key`] so the modifier and arrow-key policy is testable as a
+/// table; the caller owns every side effect.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum SelectKeyAction {
+    /// Not a Select action — let the key propagate.
+    Ignore,
+    /// Remove the selected layer.
+    Delete,
+    /// Clear the selection.
+    Deselect,
+    /// Translate the selected layer by this document-space delta.
+    Nudge(f64, f64),
+}
+
+/// Distance an arrow key moves the selection, in document px. Shift makes it coarse.
+const NUDGE_STEP: f64 = 1.0;
+const NUDGE_STEP_COARSE: f64 = 10.0;
+
+/// Decide what `keyval` does for the Select tool.
+///
+/// `has_selection` mirrors `imp.selection.is_some()`: with nothing selected there is nothing
+/// to delete, deselect or nudge, so every key propagates. Ctrl/Alt/Super chords are reserved
+/// for global accelerators (Undo, Save, …) and are never consumed here — note that Shift is
+/// deliberately *not* in that set, since it is the coarse-nudge modifier.
+fn select_key_action(
+    tool: ToolKind,
+    keyval: gdk4::Key,
+    state: gdk4::ModifierType,
+    has_selection: bool,
+) -> SelectKeyAction {
+    if tool != ToolKind::Select || !has_selection {
+        return SelectKeyAction::Ignore;
+    }
+    let chord = state
+        & (gdk4::ModifierType::CONTROL_MASK
+            | gdk4::ModifierType::ALT_MASK
+            | gdk4::ModifierType::SUPER_MASK);
+    if !chord.is_empty() {
+        return SelectKeyAction::Ignore;
+    }
+    let step = if state.contains(gdk4::ModifierType::SHIFT_MASK) {
+        NUDGE_STEP_COARSE
+    } else {
+        NUDGE_STEP
+    };
+    match keyval {
+        gdk4::Key::BackSpace | gdk4::Key::Delete => SelectKeyAction::Delete,
+        gdk4::Key::Escape => SelectKeyAction::Deselect,
+        gdk4::Key::Left => SelectKeyAction::Nudge(-step, 0.0),
+        gdk4::Key::Right => SelectKeyAction::Nudge(step, 0.0),
+        gdk4::Key::Up => SelectKeyAction::Nudge(0.0, -step),
+        gdk4::Key::Down => SelectKeyAction::Nudge(0.0, step),
+        _ => SelectKeyAction::Ignore,
+    }
+}
+
 /// Keyboard handling for the Select tool when no text edit is active: Delete/Backspace removes
 /// the selected layer, Escape deselects, and arrow keys nudge it (Shift = 10px). Returns
 /// `Proceed` whenever the key isn't a Select action (or nothing is selected) so global
@@ -2296,42 +2374,24 @@ fn handle_select_key(
     keyval: gdk4::Key,
     state: gdk4::ModifierType,
 ) -> glib::Propagation {
-    if canvas.tool() != ToolKind::Select {
-        return glib::Propagation::Proceed;
-    }
-    // Let Ctrl/Alt/Super chords (Undo, Save, …) through untouched.
-    let chord = state
-        & (gdk4::ModifierType::CONTROL_MASK
-            | gdk4::ModifierType::ALT_MASK
-            | gdk4::ModifierType::SUPER_MASK);
-    if !chord.is_empty() {
-        return glib::Propagation::Proceed;
-    }
-    let Some(i) = canvas.imp().selection.get() else {
-        return glib::Propagation::Proceed;
-    };
-    let step = if state.contains(gdk4::ModifierType::SHIFT_MASK) {
-        10.0
-    } else {
-        1.0
-    };
-    let (dx, dy) = match keyval {
-        gdk4::Key::BackSpace | gdk4::Key::Delete => {
+    let selection = canvas.imp().selection.get();
+    let action = select_key_action(canvas.tool(), keyval, state, selection.is_some());
+    let (dx, dy) = match action {
+        SelectKeyAction::Ignore => return glib::Propagation::Proceed,
+        SelectKeyAction::Delete => {
             delete_selected(canvas);
             return glib::Propagation::Stop;
         }
-        gdk4::Key::Escape => {
+        SelectKeyAction::Deselect => {
             canvas.imp().selection.set(None);
             canvas.queue_draw();
             notify_ui_state(canvas);
             return glib::Propagation::Stop;
         }
-        gdk4::Key::Left => (-step, 0.0),
-        gdk4::Key::Right => (step, 0.0),
-        gdk4::Key::Up => (0.0, -step),
-        gdk4::Key::Down => (0.0, step),
-        _ => return glib::Propagation::Proceed,
+        SelectKeyAction::Nudge(dx, dy) => (dx, dy),
     };
+    // `select_key_action` only returns Nudge when something is selected.
+    let i = selection.expect("nudge implies a selection");
     if let Some(doc_rc) = canvas.imp().doc.borrow().clone() {
         let mut doc = doc_rc.borrow_mut();
         if let Some(layer) = doc.layer_mut(i) {
@@ -2358,94 +2418,142 @@ fn delete_selected(canvas: &AnnotationCanvas) {
     notify_ui_state(canvas);
 }
 
+/// A key press, reduced to the vocabulary the text editor understands.
+///
+/// This is the single GTK boundary of the text-editing path: [`text_key_from`] does the
+/// `gdk4::Key` translation, and everything downstream is pure.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum TextKey {
+    Escape,
+    Enter,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    Up,
+    Down,
+    /// A printable character to insert.
+    Char(char),
+    /// Not meaningful to the editor (Tab, function keys, bare modifiers, …).
+    Other,
+}
+
+/// What [`apply_text_key`] did, and what the caller still owes.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum TextKeyOutcome {
+    /// Buffer and/or caret changed; redraw and consume the key.
+    Handled,
+    /// Nothing to do; let the key propagate.
+    Unhandled,
+    /// Abandon the edit (restoring the original layer if re-editing).
+    Cancel,
+    /// Finish the edit and commit it as a layer.
+    Commit,
+}
+
+/// Translate a `gdk4::Key` into the editor's [`TextKey`] vocabulary.
+///
+/// `to_unicode` already returns the shifted character when Shift is in the keyval's effective
+/// group, so ASCII typing works without a manual case shift. Control characters are rejected
+/// here rather than inserted as invisible garbage.
+fn text_key_from(keyval: gdk4::Key) -> TextKey {
+    match keyval {
+        gdk4::Key::Escape => TextKey::Escape,
+        gdk4::Key::Return | gdk4::Key::KP_Enter => TextKey::Enter,
+        gdk4::Key::BackSpace => TextKey::Backspace,
+        gdk4::Key::Delete => TextKey::Delete,
+        gdk4::Key::Left => TextKey::Left,
+        gdk4::Key::Right => TextKey::Right,
+        gdk4::Key::Home => TextKey::Home,
+        gdk4::Key::End => TextKey::End,
+        gdk4::Key::Up => TextKey::Up,
+        gdk4::Key::Down => TextKey::Down,
+        other => match other.to_unicode() {
+            Some(ch) if !ch.is_control() => TextKey::Char(ch),
+            _ => TextKey::Other,
+        },
+    }
+}
+
+/// Apply one key to the in-progress text edit. Pure: mutates `pt` and reports what the caller
+/// must do about it.
+///
+/// `shift` only matters for [`TextKey::Enter`], where it means "insert a newline" rather than
+/// "finish editing".
+fn apply_text_key(pt: &mut PendingText, key: TextKey, shift: bool) -> TextKeyOutcome {
+    match key {
+        // Escape always exits text editing, never leaves the Text tool armed for another
+        // placement.
+        TextKey::Escape => return TextKeyOutcome::Cancel,
+        TextKey::Enter => {
+            if shift {
+                insert_at_caret(pt, "\n");
+            } else {
+                return TextKeyOutcome::Commit;
+            }
+        }
+        TextKey::Backspace => {
+            if pt.caret > 0 {
+                let prev = prev_char_boundary(&pt.buffer, pt.caret);
+                pt.buffer.replace_range(prev..pt.caret, "");
+                pt.caret = prev;
+            }
+        }
+        TextKey::Delete => {
+            if pt.caret < pt.buffer.len() {
+                let next = next_char_boundary(&pt.buffer, pt.caret);
+                pt.buffer.replace_range(pt.caret..next, "");
+            }
+        }
+        TextKey::Left => pt.caret = prev_char_boundary(&pt.buffer, pt.caret),
+        TextKey::Right => pt.caret = next_char_boundary(&pt.buffer, pt.caret),
+        TextKey::Home => pt.caret = line_start(&pt.buffer, pt.caret),
+        TextKey::End => pt.caret = line_end(&pt.buffer, pt.caret),
+        TextKey::Up => pt.caret = move_caret_vertically(&pt.buffer, pt.caret, -1),
+        TextKey::Down => pt.caret = move_caret_vertically(&pt.buffer, pt.caret, 1),
+        TextKey::Char(ch) => {
+            let mut buf = [0u8; 4];
+            insert_at_caret(pt, ch.encode_utf8(&mut buf));
+        }
+        TextKey::Other => return TextKeyOutcome::Unhandled,
+    }
+    // Restart the visible portion of the blink cycle so the caret is always shown
+    // immediately after typing — feels more responsive than waiting for the next tick.
+    pt.caret_visible = true;
+    TextKeyOutcome::Handled
+}
+
 /// Apply a single key press to the in-progress text edit. Returns `Stop` whenever the
 /// key was meaningful to the editor (printable insertion, navigation, commit, cancel)
 /// so toolbar accelerators don't double-fire; returns `Proceed` for keys we don't
 /// handle (e.g. Tab, function keys) so they remain available for other controllers.
 fn handle_text_key(canvas: &AnnotationCanvas, keyval: gdk4::Key, shift: bool) -> glib::Propagation {
-    // Single-character editing operations that mutate `pending_text` in place.
-    let mut handled = true;
-    {
+    let outcome = {
         let mut pt_borrow = canvas.imp().pending_text.borrow_mut();
         let Some(pt) = pt_borrow.as_mut() else {
             return glib::Propagation::Proceed;
         };
-        match keyval {
-            gdk4::Key::Escape => {
-                // Cancel the edit (restoring the original layer if re-editing) and return to
-                // Select mode — Escape always exits text editing, never leaves the Text tool
-                // armed for another placement.
-                drop(pt_borrow);
-                cancel_pending_text(canvas);
-                notify_commit(canvas);
-                return glib::Propagation::Stop;
-            }
-            gdk4::Key::Return | gdk4::Key::KP_Enter => {
-                if shift {
-                    insert_at_caret(pt, "\n");
-                } else {
-                    drop(pt_borrow);
-                    commit_pending_text(canvas);
-                    // Explicit "done editing" → return to Select mode (one-shot tool).
-                    notify_commit(canvas);
-                    return glib::Propagation::Stop;
-                }
-            }
-            gdk4::Key::BackSpace => {
-                if pt.caret > 0 {
-                    let prev = prev_char_boundary(&pt.buffer, pt.caret);
-                    pt.buffer.replace_range(prev..pt.caret, "");
-                    pt.caret = prev;
-                }
-            }
-            gdk4::Key::Delete => {
-                if pt.caret < pt.buffer.len() {
-                    let next = next_char_boundary(&pt.buffer, pt.caret);
-                    pt.buffer.replace_range(pt.caret..next, "");
-                }
-            }
-            gdk4::Key::Left => {
-                pt.caret = prev_char_boundary(&pt.buffer, pt.caret);
-            }
-            gdk4::Key::Right => {
-                pt.caret = next_char_boundary(&pt.buffer, pt.caret);
-            }
-            gdk4::Key::Home => {
-                pt.caret = line_start(&pt.buffer, pt.caret);
-            }
-            gdk4::Key::End => {
-                pt.caret = line_end(&pt.buffer, pt.caret);
-            }
-            gdk4::Key::Up => {
-                pt.caret = move_caret_vertically(&pt.buffer, pt.caret, -1);
-            }
-            gdk4::Key::Down => {
-                pt.caret = move_caret_vertically(&pt.buffer, pt.caret, 1);
-            }
-            _ => {
-                // Translate keyval → printable Unicode. `to_unicode` returns the
-                // shifted character when Shift is in the keyval's effective group, so
-                // ASCII typing "just works" without us applying a manual case shift.
-                if let Some(ch) = keyval.to_unicode()
-                    && !ch.is_control()
-                {
-                    let mut buf = [0u8; 4];
-                    let s = ch.encode_utf8(&mut buf);
-                    insert_at_caret(pt, s);
-                } else {
-                    handled = false;
-                }
-            }
+        apply_text_key(pt, text_key_from(keyval), shift)
+    };
+    match outcome {
+        TextKeyOutcome::Handled => {
+            canvas.queue_draw();
+            glib::Propagation::Stop
         }
-        // Restart the visible portion of the blink cycle so the caret is always shown
-        // immediately after typing — feels more responsive than waiting for the next tick.
-        pt.caret_visible = true;
-    }
-    if handled {
-        canvas.queue_draw();
-        glib::Propagation::Stop
-    } else {
-        glib::Propagation::Proceed
+        TextKeyOutcome::Unhandled => glib::Propagation::Proceed,
+        TextKeyOutcome::Cancel => {
+            cancel_pending_text(canvas);
+            // Explicit "done editing" → return to Select mode (one-shot tool).
+            notify_commit(canvas);
+            glib::Propagation::Stop
+        }
+        TextKeyOutcome::Commit => {
+            commit_pending_text(canvas);
+            notify_commit(canvas);
+            glib::Propagation::Stop
+        }
     }
 }
 

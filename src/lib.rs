@@ -12,6 +12,9 @@ pub mod i18n;
 pub mod ipc;
 pub mod output;
 pub mod path;
+// Save-side plumbing for the annotation overlay. Lives outside `ui` because it touches no
+// toolkit type, which keeps it covered by the no-`ui` build.
+pub mod save;
 
 #[cfg(feature = "ui")]
 pub mod bridge;

@@ -45,6 +45,26 @@ impl ClipboardSink {
     pub fn new(kind: ClipboardKind, in_daemon: bool) -> Self {
         Self { kind, in_daemon }
     }
+
+    /// Which publish strategy this sink will use. Split out of `write_png` so the choice is
+    /// assertable — the fork path itself double-forks and cannot be exercised from a test.
+    fn strategy(&self) -> CopyStrategy {
+        if self.in_daemon {
+            CopyStrategy::Inline
+        } else {
+            CopyStrategy::Fork
+        }
+    }
+}
+
+/// How the clipboard offer is published. See the module docs for why the choice matters.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CopyStrategy {
+    /// Publish in-process: the daemon outlives the offer.
+    Inline,
+    /// Fork a detached child: a one-shot CLI process exits immediately, and a selection
+    /// whose owner is gone is a selection that pastes nothing.
+    Fork,
 }
 
 #[async_trait]
@@ -52,13 +72,10 @@ impl OutputSink for ClipboardSink {
     async fn write_png(&self, bytes: &[u8]) -> Result<Option<PathBuf>> {
         let bytes = bytes.to_vec();
         let kind = self.kind;
-        let in_daemon = self.in_daemon;
-        tokio::task::spawn_blocking(move || {
-            if in_daemon {
-                copy_inline(&bytes, kind)
-            } else {
-                copy_forked(&bytes, kind)
-            }
+        let strategy = self.strategy();
+        tokio::task::spawn_blocking(move || match strategy {
+            CopyStrategy::Inline => copy_inline(&bytes, kind),
+            CopyStrategy::Fork => copy_forked(&bytes, kind),
         })
         .await
         .map_err(|e| anyhow!("clipboard task panicked: {e}"))??;

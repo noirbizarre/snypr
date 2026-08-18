@@ -210,48 +210,82 @@ fn capture_blocking(selection: Selection, cursor: bool) -> Result<Vec<CapturedIm
     Ok(results)
 }
 
+/// Fallback name for an output the compositor never named. Kept as a constant so the
+/// `Selection::Output` match and the tests agree on it.
+const UNNAMED_OUTPUT: &str = "unknown";
+
+/// Compositor-aware selection variants must be resolved upstream (see
+/// `cli::screenshot::resolve_selection`). If one reaches capture, that's a bug: capture has
+/// no Hyprland IPC of its own.
+///
+/// Split out of [`resolve_targets`] so the guard is exercised without a Wayland connection.
+fn ensure_resolvable(selection: &Selection) -> Result<()> {
+    match selection {
+        Selection::Focused | Selection::Window | Selection::Interactive => bail!(
+            "internal: capture received an unresolved selection {:?}; resolve it via cli::screenshot::resolve_selection first",
+            selection
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Build an [`Output`] descriptor from the fields sctk reports for a `wl_output`.
+///
+/// Takes primitives rather than an `OutputInfo` so it is constructible in tests without a
+/// live registry. Missing geometry degrades to a zero rect at the origin, which
+/// [`want_output`] then treats as intersecting nothing.
+fn descriptor_from_info(
+    name: Option<&str>,
+    logical_position: Option<(i32, i32)>,
+    logical_size: Option<(i32, i32)>,
+    scale: i32,
+) -> Output {
+    let (x, y) = logical_position.unwrap_or((0, 0));
+    let (w, h) = logical_size.unwrap_or((0, 0));
+    Output {
+        name: name.unwrap_or(UNNAMED_OUTPUT).to_owned(),
+        logical: Rect {
+            x,
+            y,
+            w: w as u32,
+            h: h as u32,
+        },
+        scale,
+    }
+}
+
+/// The selection → output matching policy, in one pure place.
+///
+/// The unresolved variants return `false` rather than panicking: [`ensure_resolvable`] has
+/// already rejected them at the top of [`resolve_targets`], and a defensive `false` beats an
+/// `unreachable!()` that would abort a capture if that ordering ever changed.
+fn want_output(selection: &Selection, descriptor: &Output) -> bool {
+    match selection {
+        Selection::Full | Selection::PerOutput => true,
+        Selection::Output(target) => target == &descriptor.name,
+        Selection::Region(rect) => rect.intersect(&descriptor.logical).is_some(),
+        Selection::Focused | Selection::Window | Selection::Interactive => false,
+    }
+}
+
 fn resolve_targets(
     data: &AppData,
     selection: &Selection,
 ) -> Result<Vec<(wl_output::WlOutput, Output)>> {
-    // Compositor-aware variants must be resolved upstream (see cli::screenshot::resolve_selection).
-    // If one reaches us, that's a bug: capture has no Hyprland IPC of its own.
-    match selection {
-        Selection::Focused | Selection::Window | Selection::Interactive => {
-            bail!(
-                "internal: capture received an unresolved selection {:?}; resolve it via cli::screenshot::resolve_selection first",
-                selection
-            );
-        }
-        _ => {}
-    }
+    ensure_resolvable(selection)?;
 
     let mut out = Vec::new();
     for wl_output in data.output_state.outputs() {
         let Some(info) = data.output_state.info(&wl_output) else {
             continue;
         };
-        let name = info.name.clone().unwrap_or_else(|| "unknown".to_owned());
-        let (x, y) = info.logical_position.unwrap_or((0, 0));
-        let (w, h) = info.logical_size.unwrap_or((0, 0));
-        let descriptor = Output {
-            name: name.clone(),
-            logical: Rect {
-                x,
-                y,
-                w: w as u32,
-                h: h as u32,
-            },
-            scale: info.scale_factor,
-        };
-        let want = match selection {
-            Selection::Full | Selection::PerOutput => true,
-            Selection::Output(target) => target == &name,
-            Selection::Region(rect) => rect.intersect(&descriptor.logical).is_some(),
-            // Already bailed above.
-            Selection::Focused | Selection::Window | Selection::Interactive => unreachable!(),
-        };
-        if want {
+        let descriptor = descriptor_from_info(
+            info.name.as_deref(),
+            info.logical_position,
+            info.logical_size,
+            info.scale_factor,
+        );
+        if want_output(selection, &descriptor) {
             out.push((wl_output, descriptor));
         }
     }
@@ -387,3 +421,4 @@ smithay_client_toolkit::delegate_dispatch2!(AppData);
 // Quiet unused-imports warnings when this module is only stubbed.
 #[allow(dead_code)]
 fn _unused(_: wl_registry::WlRegistry, _: wl_buffer::WlBuffer, _: &dyn AsFd, _: &dyn Write) {}
+
