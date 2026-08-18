@@ -2198,6 +2198,229 @@ mod tests {
         assert_eq!(output_mode_icons(mode), expected);
     }
 
+    use crate::ui::require_gtk;
+
+    /// Selector-shaped toolbar: modes + cursor + delay + the output switcher + Capture.
+    fn selector_toolbar(initial: OutputMode) -> Toolbar {
+        Toolbar::new(ToolbarSpec {
+            modes: SELECTOR_MODES,
+            show_cursor_toggle: true,
+            show_delay_spinner: true,
+            show_capture: true,
+            show_output_switcher: true,
+            initial_mode: Some(ModeKind::Screen),
+            initial_output_mode: initial,
+            ..Default::default()
+        })
+    }
+
+    /// Drain the actions a toolbar emits into a shared vec.
+    fn record(toolbar: &Toolbar) -> Rc<RefCell<Vec<ToolbarAction>>> {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        toolbar.connect(move |action| sink.borrow_mut().push(action));
+        seen
+    }
+
+    #[rstest]
+    #[case(OutputMode::File)]
+    #[case(OutputMode::Clipboard)]
+    #[case(OutputMode::Both)]
+    fn the_switcher_opens_on_the_resolved_destination(#[case] initial: OutputMode) {
+        require_gtk!();
+        let toolbar = selector_toolbar(initial);
+        let ui = toolbar
+            .state
+            .output
+            .as_ref()
+            .expect("switcher was requested");
+
+        assert_eq!(ui.mode.get(), initial);
+        assert_eq!(
+            ui.button.tooltip_text().unwrap(),
+            output_mode_label(initial)
+        );
+    }
+
+    #[test]
+    fn clicking_the_switcher_cycles_and_reports_each_destination() {
+        require_gtk!();
+        let toolbar = selector_toolbar(OutputMode::File);
+        let seen = record(&toolbar);
+        let button = toolbar.state.output.as_ref().unwrap().button.clone();
+
+        for _ in 0..3 {
+            button.emit_clicked();
+        }
+
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                ToolbarAction::OutputModeChanged(OutputMode::Clipboard),
+                ToolbarAction::OutputModeChanged(OutputMode::Both),
+                ToolbarAction::OutputModeChanged(OutputMode::File),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_switcher_reskins_itself_as_it_cycles() {
+        require_gtk!();
+        let toolbar = selector_toolbar(OutputMode::File);
+        let ui = toolbar.state.output.as_ref().unwrap();
+
+        let icon_count = || ui.icons.observe_children().n_items();
+        assert_eq!(icon_count(), 1, "File shows a single icon");
+
+        ui.button.emit_clicked(); // -> Clipboard
+        assert_eq!(icon_count(), 1);
+        assert_eq!(
+            ui.button.tooltip_text().unwrap(),
+            output_mode_label(OutputMode::Clipboard)
+        );
+
+        ui.button.emit_clicked(); // -> Both
+        assert_eq!(
+            icon_count(),
+            2,
+            "Both composes the file and clipboard icons"
+        );
+        assert_eq!(
+            ui.button.tooltip_text().unwrap(),
+            output_mode_label(OutputMode::Both)
+        );
+    }
+
+    #[test]
+    fn set_output_mode_updates_the_button_without_emitting() {
+        require_gtk!();
+        // The draw overlay calls this to mirror a choice made in the selector it popped;
+        // re-emitting would write the value back and could loop.
+        let toolbar = selector_toolbar(OutputMode::File);
+        let seen = record(&toolbar);
+
+        toolbar.set_output_mode(OutputMode::Both);
+
+        let ui = toolbar.state.output.as_ref().unwrap();
+        assert_eq!(ui.mode.get(), OutputMode::Both);
+        assert_eq!(
+            ui.button.tooltip_text().unwrap(),
+            output_mode_label(OutputMode::Both)
+        );
+        assert!(seen.borrow().is_empty(), "setter must stay silent");
+    }
+
+    #[test]
+    fn set_output_mode_is_a_no_op_without_a_switcher() {
+        require_gtk!();
+        // The editor-only presets in some callers omit it; the setter must not panic.
+        let toolbar = Toolbar::new(ToolbarSpec {
+            tools: EDITOR_TOOLS,
+            show_save: true,
+            ..Default::default()
+        });
+        toolbar.set_output_mode(OutputMode::Both);
+        assert!(toolbar.state.output.is_none());
+    }
+
+    #[test]
+    fn holding_shift_dims_the_switcher() {
+        require_gtk!();
+        // Shift turns Capture into Annotate, and the editor that opens carries its own
+        // switcher — so this one must step aside rather than offer a second control.
+        let toolbar = selector_toolbar(OutputMode::File);
+        let capture = toolbar
+            .state
+            .capture
+            .as_ref()
+            .expect("capture was requested");
+        let switcher = toolbar.state.output.as_ref().unwrap().button.clone();
+
+        assert!(switcher.is_sensitive());
+
+        capture.apply_shift(true);
+        assert!(!switcher.is_sensitive(), "dimmed while Shift is held");
+        assert_eq!(
+            capture.button.tooltip_text().unwrap(),
+            fl!("toolbar-annotate-tooltip")
+        );
+
+        capture.apply_shift(false);
+        assert!(switcher.is_sensitive(), "restored on release");
+    }
+
+    #[test]
+    fn the_shift_skin_survives_a_toolbar_without_a_switcher() {
+        require_gtk!();
+        let toolbar = Toolbar::new(ToolbarSpec {
+            modes: SELECTOR_MODES,
+            show_capture: true,
+            ..Default::default()
+        });
+        let capture = toolbar.state.capture.as_ref().unwrap();
+        capture.apply_shift(true);
+        assert!(toolbar.state.output.is_none());
+    }
+
+    #[test]
+    fn ctrl_o_cycles_the_switcher() {
+        require_gtk!();
+        let toolbar = selector_toolbar(OutputMode::File);
+        let seen = record(&toolbar);
+
+        assert!(toolbar.dispatch_shortcut(&ShortcutAction::OutputCycle));
+
+        assert_eq!(
+            *seen.borrow(),
+            vec![ToolbarAction::OutputModeChanged(OutputMode::Clipboard)]
+        );
+        // Routed through the button, so the visuals follow the keyboard too.
+        assert_eq!(
+            toolbar.state.output.as_ref().unwrap().mode.get(),
+            OutputMode::Clipboard
+        );
+    }
+
+    #[test]
+    fn ctrl_o_is_inert_without_a_switcher() {
+        require_gtk!();
+        let toolbar = Toolbar::new(ToolbarSpec {
+            tools: EDITOR_TOOLS,
+            show_save: true,
+            ..Default::default()
+        });
+        assert!(!toolbar.dispatch_shortcut(&ShortcutAction::OutputCycle));
+    }
+
+    #[test]
+    fn the_switcher_registers_ctrl_o_and_sits_before_capture() {
+        require_gtk!();
+        let toolbar = selector_toolbar(OutputMode::File);
+
+        let shortcut = toolbar
+            .state
+            .shortcuts
+            .iter()
+            .find(|s| matches!(s.action, ShortcutAction::OutputCycle))
+            .expect("Ctrl+O must be registered");
+        assert_eq!(shortcut.key, gdk4::Key::o);
+        assert_eq!(shortcut.modifiers, gdk4::ModifierType::CONTROL_MASK);
+
+        // Reading order is "where it goes" then "send it there".
+        let switcher = toolbar.state.output.as_ref().unwrap().button.clone();
+        let capture = toolbar.state.capture.as_ref().unwrap().button.clone();
+        let mut child = switcher.next_sibling();
+        let mut found = false;
+        while let Some(w) = child {
+            if w == capture.clone().upcast::<gtk4::Widget>() {
+                found = true;
+                break;
+            }
+            child = w.next_sibling();
+        }
+        assert!(found, "Capture must follow the output switcher");
+    }
+
     #[test]
     fn rgba_to_hex_drops_alpha_when_opaque() {
         let c = gdk4::RGBA::new(1.0, 0.0, 0.5, 1.0);
