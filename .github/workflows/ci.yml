@@ -4,6 +4,12 @@ on:
     branches: [main]
   pull_request:
 
+# A superseded run has nothing left to tell us, and a job wedged on a slow apt
+# mirror will otherwise sit on a runner until the 6h default timeout.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
@@ -12,9 +18,13 @@ jobs:
   test:
     name: 🧪 Tests (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
+
+      - name: Prefer the official Ubuntu mirrors
+        uses: ./.github/actions/apt-mirrors
 
       - name: Install system dependencies
         uses: ./.github/actions/install-gtk4-layer-shell
@@ -52,8 +62,11 @@ jobs:
   lint:
     name: 🧹 Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - name: Prefer the official Ubuntu mirrors
+        uses: ./.github/actions/apt-mirrors
       - name: Install system dependencies
         uses: ./.github/actions/install-gtk4-layer-shell
       - uses: dtolnay/rust-toolchain@stable
@@ -70,6 +83,7 @@ jobs:
   ship:
     name: 🚢 Ship setup
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
