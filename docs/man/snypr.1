@@ -70,6 +70,10 @@ Add an output sink. May be passed multiple times. Recognised forms:
 When running outside the daemon, the clipboard sink forks a short detached child
 process that keeps serving the selection after \fBsnypr\fR exits so paste
 keeps working until another client overtakes the selection.
+In the interactive selector, the annotation editor, and the draw overlay, the resolved
+sinks only seed the toolbar's output-destination switcher: the user can cycle it (button
+click or \fBCtrl+O\fR) between file, clipboard, and both before capturing or saving. An explicit \fIPATH\fR or \fI=KIND\fR is
+remembered across the cycle.
 .TP
 .BR \-\-clipboard\-type " " \fIKIND\fR
 Default clipboard selection (\fBregular\fR, \fBprimary\fR, or \fBboth\fR) used for every
@@ -94,7 +98,8 @@ Launch the live draw-on-screen overlay. Tool keys: \fBR\fR rectangle, \fBO\fR el
 \fBA\fR arrow, \fBL\fR line (no arrowhead), \fBH\fR highlight, \fBF\fR freehand, \fBN\fR
 numbered marker, \fBT\fR text, \fBB\fR blur, \fBX\fR redact (press the active tool's key
 again, or click its button, to deactivate it). Other keys: \fBCtrl+Z\fR undo, \fBCtrl+L\fR
-clear all layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBP\fR toggle
+clear all layers, \fBCtrl+S\fR / \fBEnter\fR save via the zone selector, \fBCtrl+O\fR cycle
+the output destination (file \(-> clipboard \(-> both), \fBP\fR toggle
 pointer passthrough, \fBEsc\fR quit. \fBCrop\fR is editor-only and is not available in the
 live overlay; \fBBlur\fR is available, and grabs the underlying desktop the first time it
 is used. With no tool active the overlay is in \fBSelect\fR mode:
@@ -136,13 +141,16 @@ top-level subcommand.
 Shown by \fBscreenshot\fR without an explicit selection flag (or with
 \fB\-\-interactive\fR). A single floating toolbar \(em shown on the focused monitor and
 following keyboard focus as it changes \(em offers Full / Screen / Window / Region modes,
-a cursor toggle, a delay spinner, and a single action button:
+a cursor toggle, a delay spinner, an output-destination switcher (\fBCtrl+O\fR cycles
+file \(-> clipboard \(-> both), and a single action button:
 .RS
 .IP \(bu 2
 \fBCapture\fR (\fBEnter\fR) commits the selection and writes the result to sinks. Holding
 \fBShift\fR while clicking (or pressing \fBShift+Enter\fR / \fBShift+KP_Enter\fR) instead
 captures and then opens the in-place annotation editor before writing. The button's icon
-and tooltip swap live while Shift is held.
+and tooltip swap live while Shift is held, and the output-destination switcher greys out
+for as long as it is \(em the editor that opens carries its own, seeded with whatever the
+selector's switcher was set to.
 .RE
 The Shift modifier ORs into the CLI \fB\-\-edit\fR flag: Shift-click on a plain
 \fBscreenshot\fR opens the editor, and \fB\-\-edit\fR still opens the editor even on a
@@ -154,7 +162,8 @@ selector's Capture button. Tool keys: \fBR\fR rectangle, \fBO\fR ellipse, \fBA\f
 \fBL\fR line, \fBH\fR highlight, \fBF\fR freehand, \fBN\fR numbered marker, \fBT\fR text,
 \fBB\fR blur, \fBX\fR redact, \fBC\fR crop (press the active tool's key again, or click its
 button, to deactivate it). Other keys: \fBCtrl+Z\fR undo, \fBCtrl+S\fR / \fBEnter\fR save,
-\fBEsc\fR quit. With no tool active the editor is in \fBSelect\fR mode and edits existing
+\fBCtrl+O\fR cycle the output destination (file \(-> clipboard \(-> both), \fBEsc\fR quit.
+With no tool active the editor is in \fBSelect\fR mode and edits existing
 shapes: click to select, drag the body to move, drag a handle to resize (box shapes get
 eight handles; Arrow/Line expose their endpoints; a numbered marker exposes a radius grip;
 text corner handles scale the font while side handles set a wrap width), double-click text
