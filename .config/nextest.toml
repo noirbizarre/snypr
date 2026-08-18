@@ -4,3 +4,12 @@ fail-fast = false
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# The core (no-`ui`) CI job. Same semantics as `ci`, but a distinct profile so its
+# junit.xml lands in `target/nextest/ci-core/` and does not overwrite the GTK job's
+# report when both are uploaded to Codecov.
+[profile.ci-core]
+fail-fast = false
+
+[profile.ci-core.junit]
+path = "junit.xml"
