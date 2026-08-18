@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/noirbizarre/snypr/compare/0.3.0..0.3.1) - 2026-08-18
+
+### 🐛 Bug Fixes
+
+- **daemon** Gate the draw overlay behind the ui feature - ([7ee419f](https://github.com/noirbizarre/snypr/commit/7ee419f389fe45067cea18d717044812d4531397))
+
+### 🔨 Refactor
+
+- Split the pure decision cores out of the widgets - ([a3b955e](https://github.com/noirbizarre/snypr/commit/a3b955e260368e143d5dee64290cc1f5142dde38))
+
+### 📚 Documentation
+
+- **readme** Add links to release and license ([#28](https://github.com/noirbizarre/snypr/issues/28)) - ([5fbca9e](https://github.com/noirbizarre/snypr/commit/5fbca9eaf924eac64136b8ad7986a0eadecebd55))
+
+### 🧪 Tests
+
+- Cover the extracted logic and the untested ui modules - ([72f5706](https://github.com/noirbizarre/snypr/commit/72f570626909d8611dd658b6fe935dea8a9cda26))
+
+### 🏗️ Build
+
+- Stop requiring system glib and xkbcommon for the no-ui build - ([51da1bd](https://github.com/noirbizarre/snypr/commit/51da1bd7c34451c2924c91f035721bb924d7214b))
+
+### 🔧 CI
+
+- Report coverage under separate core and gtk flags - ([dcd8093](https://github.com/noirbizarre/snypr/commit/dcd8093101a9d0a5e5504ebac4c55a4feab4519a))
+
 ## [0.3.0](https://github.com/noirbizarre/snypr/compare/0.2.0..0.3.0) - 2026-08-18
 
 ### 💫 Features

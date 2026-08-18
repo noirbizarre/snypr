@@ -1,7 +1,7 @@
 [package]
 name = "snypr"
 edition = "2024"
-version = "0.3.0"
+version = "0.3.1"
 description = "A GTK4-based screenshot, annotation, and live-drawing tool for Hyprland"
 readme = "README.md"
 repository = "https://github.com/noirbizarre/snypr"
