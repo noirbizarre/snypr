@@ -1,5 +1,8 @@
 //! Save-side helpers shared by the in-place annotation overlay.
 //!
+//! Deliberately outside `ui`: it imports no toolkit type, so it compiles and is tested in
+//! the no-`ui` build too.
+//!
 //! The capture-edit flow (`screenshot --edit`, Shift-click / Shift+Enter on the selector's
 //! Capture button, and the tray "Annotate region…" entry) composes the annotated canvas
 //! into a [`CapturedImage`], then routes the bytes through the configured [`Outputs`]

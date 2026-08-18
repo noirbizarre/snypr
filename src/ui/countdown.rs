@@ -198,3 +198,49 @@ window.snypr-countdown label.snypr-countdown-number {{
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::require_gtk;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(3, 72)]
+    #[case(0, 12)]
+    #[case(60, 200)]
+    fn set_label_value_renders_the_seconds_at_the_requested_size(
+        #[case] secs: u32,
+        #[case] pt: i32,
+    ) {
+        require_gtk!();
+        let label = gtk4::Label::new(None);
+        set_label_value(&label, secs, pt);
+        // `set_markup` strips the tags, so the plain text is the numeral alone.
+        assert_eq!(label.text().as_str(), secs.to_string());
+        assert!(label.uses_markup());
+    }
+
+    #[test]
+    fn install_countdown_css_accepts_the_default_palette() {
+        require_gtk!();
+        // The colors are interpolated into a CSS string, so a formatting change in
+        // `to_css_rgba` would produce a stylesheet that silently fails to parse.
+        let style = SelectorStyleConfig::default();
+        let css = format!(
+            "window.snypr-countdown {{ background: {}; }}",
+            style.countdown_bg.to_css_rgba()
+        );
+        let provider = gtk4::CssProvider::new();
+        let errors = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        provider.connect_parsing_error({
+            let errors = errors.clone();
+            move |_, _, err| errors.borrow_mut().push(err.to_string())
+        });
+        provider.load_from_string(&css);
+        assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+
+        install_countdown_css(&style);
+    }
+}

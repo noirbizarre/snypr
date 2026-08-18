@@ -5,7 +5,6 @@
 pub mod canvas;
 pub mod countdown;
 pub mod overlay;
-pub mod save;
 pub mod selector;
 pub mod style;
 pub mod toolbar;
@@ -74,8 +73,10 @@ pub(crate) fn install_icon_resources() {
 /// headless one; a developer's machine usually has a real session. When neither is present
 /// the caller skips, so `cargo test` still works over SSH or in a bare container.
 ///
-/// Set `SNYPR_REQUIRE_GTK=1` to turn "no display" into a hard failure instead — CI does this
-/// so a broken compositor step surfaces as a red build rather than as silently skipped tests.
+/// Set `SNYPR_REQUIRE_GTK` to a truthy value (`1`, `true`, `yes`) to turn "no display" into a
+/// hard failure instead — CI does this so a broken compositor step surfaces as a red build
+/// rather than as silently skipped tests. `0`, `false`, `no` and the empty string disable the
+/// requirement, so `SNYPR_REQUIRE_GTK=0` can be used to opt out locally without unsetting it.
 #[cfg(test)]
 pub(crate) fn try_init_gtk() -> bool {
     // `gtk4::init` is idempotent, but nextest runs each test in its own process anyway, so
@@ -85,7 +86,7 @@ pub(crate) fn try_init_gtk() -> bool {
         return true;
     }
     assert!(
-        std::env::var_os("SNYPR_REQUIRE_GTK").is_none(),
+        !gtk_is_required(),
         "SNYPR_REQUIRE_GTK is set but GTK could not connect to a display; \
          the headless compositor is not running"
     );
@@ -93,7 +94,26 @@ pub(crate) fn try_init_gtk() -> bool {
     false
 }
 
+/// Whether `SNYPR_REQUIRE_GTK` demands a working display.
+///
+/// Gated on the *value*, not mere presence: an exported-but-empty or explicitly disabled
+/// variable used to hard-fail, which made `SNYPR_REQUIRE_GTK=0` mean the opposite of what it
+/// reads.
+#[cfg(test)]
+pub(crate) fn gtk_is_required() -> bool {
+    match std::env::var("SNYPR_REQUIRE_GTK") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no"
+        ),
+        Err(_) => false,
+    }
+}
+
 /// Skip the enclosing test when no display is available. See [`try_init_gtk`].
+///
+/// Expands to a bare `return`, so it only works in tests returning `()`. A test that returns
+/// `Result` must call [`try_init_gtk`] directly.
 #[cfg(test)]
 macro_rules! require_gtk {
     () => {

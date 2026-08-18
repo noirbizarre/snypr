@@ -27,13 +27,26 @@ depends = ["fmt", "lint", "lint:actions", "spell", "build", "test"]
 [tasks.test]
 description = "Run tests with selectors"
 raw_args = true
-run = 'cargo nextest run'
+# `--all-features` matches the `test-gtk` CI job. Without it a local run builds
+# default features only, which is NOT what CI gates on.
+run = 'cargo nextest run --all-features'
+
+[tasks."test:core"]
+description = "Run the toolkit-free (no `ui`) test suite"
+raw_args = true
+# Mirrors the `test-core` CI job. Needs no compositor.
+run = 'cargo nextest run --no-default-features --features notify'
 
 [tasks.cover]
-description = "Run tests with coverage"
-# `--all-features` mirrors the CI invocation so local numbers match what
-# Codecov gates on.
-run = "cargo llvm-cov nextest --all-features"
+description = "Run tests with coverage (GTK build)"
+# Mirrors the `test-gtk` CI invocation so local numbers match what Codecov gates
+# on, `--profile ci` included (otherwise fail-fast hides later failures).
+run = "cargo llvm-cov nextest --profile ci --all-features"
+
+[tasks."cover:core"]
+description = "Run tests with coverage (toolkit-free build)"
+# Mirrors the `test-core` CI invocation — the `core` Codecov flag.
+run = "cargo llvm-cov nextest --profile ci-core --no-default-features --features notify"
 
 [tasks.build]
 description = "Build the binaries"
@@ -55,6 +68,12 @@ run = "cargo fmt --all"
 [tasks.lint]
 description = "Lint the code"
 run = "cargo clippy --all-targets --all-features -- -Dclippy::all"
+
+[tasks."lint:core"]
+description = "Lint the toolkit-free (no `ui`) build"
+# `--all-features` cannot see the dead code and unused imports that only exist
+# when `ui` is off. CI runs both.
+run = "cargo clippy --all-targets --no-default-features --features notify -- -Dclippy::all"
 
 [tasks."lint:actions"]
 description = "Lint the GitHub Actions workflows"

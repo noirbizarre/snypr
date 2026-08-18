@@ -1,3 +1,14 @@
+# Coverage is uploaded from two CI jobs, under two flags:
+#
+#   core — `--no-default-features --features notify`, no compositor. Everything that
+#          must work without a display. A drop here means the toolkit-free build
+#          regressed, which is otherwise invisible.
+#   gtk  — `--all-features` under the headless Weston, with SNYPR_REQUIRE_GTK=1.
+#          The superset; the only run that exercises src/ui/.
+#
+# Components slice the same data by module so the per-area picture does not depend
+# on which job produced the lines.
+
 coverage:
   status:
     project:
@@ -7,3 +18,61 @@ coverage:
       default:
         target: auto
         threshold: 10%
+
+# Carryforward so a job that is skipped (or whose upload fails) does not read as a
+# collapse to 0% for its flag.
+flag_management:
+  default_rules:
+    carryforward: true
+
+flags:
+  core:
+    paths:
+      - src/
+    carryforward: true
+  gtk:
+    paths:
+      - src/
+    carryforward: true
+
+component_management:
+  individual_components:
+    - component_id: annotate
+      name: annotate (document model)
+      paths:
+        - src/annotate/**
+    - component_id: capture
+      name: capture
+      paths:
+        - src/capture/**
+    - component_id: cli
+      name: cli
+      paths:
+        - src/cli/**
+    - component_id: config
+      name: config
+      paths:
+        - src/config.rs
+        - src/path.rs
+    - component_id: ipc
+      name: ipc & daemon
+      paths:
+        - src/ipc.rs
+        - src/daemon.rs
+        - src/hypr.rs
+    - component_id: output
+      name: output sinks
+      paths:
+        - src/output/**
+        - src/save.rs
+    - component_id: ui
+      name: ui (GTK)
+      paths:
+        - src/ui/**
+        - src/bridge.rs
+
+# `main.rs` is argument plumbing around `cli::run` and cannot be exercised without
+# spawning the binary; the build script is generated glue.
+ignore:
+  - src/main.rs
+  - build.rs

@@ -6,7 +6,10 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
+// Only the overlay lifecycle uses a oneshot, and that whole path is `ui`-gated.
+#[cfg(feature = "ui")]
+use tokio::sync::oneshot;
 
 use crate::capture::Selection;
 use crate::capture::region::Rect;
@@ -17,6 +20,9 @@ use crate::ipc::{Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
 /// Handle to a daemon-spawned draw overlay. Holds the channels needed to drive it from
 /// outside the GTK thread: a oneshot to tear it down, and an mpsc to inject runtime
 /// commands (passthrough toggles, future tool changes, …).
+///
+/// Only exists in `ui` builds: without the feature there is no overlay to hold a handle to.
+#[cfg(feature = "ui")]
 struct OverlayHandle {
     shutdown: oneshot::Sender<()>,
     commands: tokio::sync::mpsc::UnboundedSender<crate::ui::overlay::OverlayCommand>,
@@ -35,6 +41,7 @@ struct DaemonState {
     /// `Some(handle)` while a daemon-managed draw overlay is alive. A `DrawToggle` request
     /// flips this: present → fire `shutdown` to tear it down; absent → spawn a fresh overlay.
     /// A `PassthroughToggle` request reads the `commands` channel instead.
+    #[cfg(feature = "ui")]
     overlay: Mutex<Option<OverlayHandle>>,
 }
 
@@ -237,6 +244,7 @@ async fn dispatch(ctx: Ctx, state: Arc<DaemonState>, req: Request) -> Response {
 /// Send a [`crate::ui::overlay::OverlayCommand::TogglePassthrough`] to a live daemon-managed
 /// overlay. Errors when no overlay is alive — the user is expected to wire this to a
 /// Hyprland global keybind that's only meaningful when an overlay is up.
+#[cfg(feature = "ui")]
 async fn toggle_overlay_passthrough(state: &Arc<DaemonState>) -> Result<()> {
     let guard = state.overlay.lock().await;
     let handle = guard
@@ -247,6 +255,12 @@ async fn toggle_overlay_passthrough(state: &Arc<DaemonState>) -> Result<()> {
         .send(crate::ui::overlay::OverlayCommand::TogglePassthrough)
         .map_err(|_| anyhow::anyhow!("{}", crate::i18n::fl!("error-overlay-channel-closed")))?;
     Ok(())
+}
+
+/// Without the `ui` feature there is no overlay to toggle passthrough on.
+#[cfg(not(feature = "ui"))]
+async fn toggle_overlay_passthrough(_state: &Arc<DaemonState>) -> Result<()> {
+    anyhow::bail!("{}", crate::i18n::fl!("error-draw-requires-ui-feature"))
 }
 
 /// Acquire `state.editor` with `try_lock` (only when `edit` is true) so a second editor request
@@ -277,6 +291,7 @@ async fn run_screenshot_with_optional_lock(
 /// spawn a fresh one. The `oneshot::Sender` stored in `state.overlay` is the shutdown signal
 /// the overlay's GTK task awaits via `attach_shutdown`; a spawned task clears the slot when
 /// the overlay actually exits so a follow-up toggle starts a new one.
+#[cfg(feature = "ui")]
 async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response> {
     let mut guard = state.overlay.lock().await;
     if let Some(handle) = guard.take() {
@@ -316,6 +331,13 @@ async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response>
         *guard = None;
     });
     Ok(Response::Ok)
+}
+
+/// Without the `ui` feature the draw overlay cannot be built, so the toggle is a hard error
+/// rather than a silent no-op — the caller asked for something this binary cannot do.
+#[cfg(not(feature = "ui"))]
+async fn toggle_overlay(_ctx: &Ctx, _state: &Arc<DaemonState>) -> Result<Response> {
+    anyhow::bail!("{}", crate::i18n::fl!("error-draw-requires-ui-feature"))
 }
 
 async fn run_screenshot(
@@ -449,5 +471,126 @@ mod tests {
             })
             .collect();
         assert_eq!(cli, back);
+    }
+
+    // --- dispatch ---------------------------------------------------------
+    //
+    // `dispatch` flattens every helper error into a `Response::Error` so a client always
+    // gets a structured frame back instead of a torn connection. These assert that
+    // contract without touching a socket.
+
+    use crate::testing::test_ctx;
+
+    fn state() -> Arc<DaemonState> {
+        Arc::new(DaemonState::default())
+    }
+
+    #[tokio::test]
+    async fn ping_is_answered_ok() {
+        let ctx = test_ctx().await;
+        assert!(matches!(
+            dispatch(ctx, state(), Request::Ping).await,
+            Response::Ok
+        ));
+    }
+
+    #[tokio::test]
+    async fn toggling_passthrough_without_an_overlay_is_a_structured_error() {
+        let ctx = test_ctx().await;
+        // The client binds this to a global keybind, so pressing it with no overlay up must
+        // produce a readable message rather than dropping the connection.
+        match dispatch(ctx, state(), Request::PassthroughToggle).await {
+            Response::Error { message } => assert!(!message.is_empty(), "empty error message"),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(feature = "ui"))]
+    #[tokio::test]
+    async fn draw_toggle_reports_the_missing_ui_feature() {
+        let ctx = test_ctx().await;
+        // Without `ui` there is no overlay to spawn; the daemon must say so rather than
+        // silently answering Ok and leaving the user waiting for a window.
+        match dispatch(ctx, state(), Request::DrawToggle).await {
+            Response::Error { message } => assert!(!message.is_empty()),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_editor_request_cannot_run_twice_concurrently() {
+        let state = state();
+        // Hold the editor lock the way an open editor window does.
+        let _guard = state.editor.try_lock().expect("uncontended");
+        let ctx = test_ctx().await;
+        let err = run_screenshot_with_optional_lock(
+            &ctx,
+            &state,
+            Selection::Full,
+            false,
+            vec![],
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        // GTK's Application::run is per-process, so the second client is refused immediately
+        // rather than queued behind a window that may sit open for minutes.
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn sinks_from_specs_applies_the_daemon_default_kind_to_a_bare_clipboard_entry() {
+        use crate::cli::ClipboardKind;
+        // A client that never passed `--clipboard-type` sends `clipboard_kind: None`; the
+        // daemon's own `[clipboard].default_kind` must fill it in.
+        let specs = vec![SinkSpec::Clipboard {
+            clipboard_kind: None,
+        }];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = rt.block_on(test_ctx());
+        let out = sinks_from_specs(specs, &ctx);
+        assert_eq!(
+            out,
+            vec![CliSinkSpec::Clipboard(Some(
+                ctx.config.clipboard.default_kind
+            ))]
+        );
+        // Sanity: the default really is a concrete kind, not a placeholder.
+        assert!(matches!(
+            ctx.config.clipboard.default_kind,
+            ClipboardKind::Regular | ClipboardKind::Primary | ClipboardKind::Both
+        ));
+    }
+
+    #[test]
+    fn an_empty_sink_list_falls_back_to_the_configured_defaults() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = rt.block_on(test_ctx());
+        assert_eq!(sinks_from_specs(vec![], &ctx), ctx.config.default_sinks());
+    }
+
+    #[test]
+    fn the_default_socket_path_follows_xdg_runtime_dir() {
+        // Not parallel-safe against other env-mutating tests, but nextest runs each test in
+        // its own process.
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        assert_eq!(default_socket_path(), dir.path().join("snypr.sock"));
+    }
+
+    #[test]
+    fn the_socket_path_falls_back_to_the_temp_dir() {
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        assert_eq!(
+            default_socket_path(),
+            std::env::temp_dir().join("snypr.sock")
+        );
     }
 }
