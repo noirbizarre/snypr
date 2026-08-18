@@ -37,6 +37,7 @@ use crate::capture::region::Rect;
 use crate::context::Ctx;
 use crate::hypr::{self, HyprWindow};
 use crate::i18n::fl;
+use crate::output::OutputMode;
 use crate::ui::toolbar::{
     ModeKind, SELECTOR_MODES, Toolbar, ToolbarAction, ToolbarHost, ToolbarSpec,
 };
@@ -72,6 +73,10 @@ pub struct SelectorOutcome {
     /// choice wins, so Capture always reports `false` here regardless of how the selector was
     /// invoked.
     pub edit: bool,
+    /// Destination picked on the toolbar's output switcher. Overrides the sinks the CLI /
+    /// config resolved to for this capture, and seeds the annotation editor's own switcher
+    /// when `edit` is true.
+    pub output_mode: OutputMode,
 }
 
 /// Show the selector and return the chosen selection + cursor toggle. The toolbar's cursor
@@ -92,6 +97,7 @@ pub async fn pick_region(
     initial_cursor: bool,
     initial_delay: std::time::Duration,
     allow_annotate: bool,
+    initial_output_mode: OutputMode,
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let clients = fetch_clients_or_warn().await;
@@ -110,6 +116,7 @@ pub async fn pick_region(
             allow_annotate,
             style,
             initial_mode,
+            initial_output_mode,
         )
     })
     .await
@@ -145,6 +152,7 @@ pub async fn pick_region_in_app(
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
     initial_mode: ModeKind,
+    initial_output_mode: OutputMode,
 ) -> Result<SelectorOutcome> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<SelectorOutcome>>();
     let tx: Sender = Arc::new(Mutex::new(Some(tx)));
@@ -171,6 +179,7 @@ pub async fn pick_region_in_app(
         allow_annotate,
         style,
         initial_mode,
+        initial_output_mode,
         handle,
     ) {
         send_once(&tx, Err(err));
@@ -280,6 +289,9 @@ struct SharedSelection {
     /// Pre-capture delay (whole seconds, internally stored as `Duration`) from the floating
     /// toolbar's spinner; final value reported in `SelectorOutcome`.
     delay: std::time::Duration,
+    /// Output destination from the floating toolbar's switcher; final value reported in
+    /// `SelectorOutcome`.
+    output_mode: OutputMode,
     /// Monitor currently under the pointer (Screen mode highlight).
     hover_monitor: Option<usize>,
     /// Monitor explicitly picked by clicking (Screen mode). `None` until the user clicks; then
@@ -455,6 +467,7 @@ fn run_gtk(
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
     initial_mode: ModeKind,
+    initial_output_mode: OutputMode,
 ) -> Result<()> {
     let app = gtk4::Application::builder()
         .application_id(crate::ui::APP_ID)
@@ -492,6 +505,7 @@ fn run_gtk(
                 allow_annotate,
                 (*style).clone(),
                 initial_mode,
+                initial_output_mode,
                 handle.clone(),
             ) {
                 send_once(&tx, Err(err));
@@ -519,6 +533,7 @@ fn build_overlays(
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
     initial_mode: ModeKind,
+    initial_output_mode: OutputMode,
     handle: tokio::runtime::Handle,
 ) -> Result<()> {
     crate::ui::style::install();
@@ -569,9 +584,11 @@ fn build_overlays(
         show_delay_spinner: true,
         show_capture: true,
         capture_shift_annotates: allow_annotate,
+        show_output_switcher: true,
         initial_mode: Some(initial_mode),
         initial_cursor,
         initial_delay_secs,
+        initial_output_mode,
         ..Default::default()
     });
     let host = ToolbarHost::new(toolbar);
@@ -580,6 +597,7 @@ fn build_overlays(
         selection: Rc::new(RefCell::new(SharedSelection {
             cursor: initial_cursor,
             delay: initial_delay,
+            output_mode: initial_output_mode,
             selected_monitor,
             selected_window,
             mode: initial_mode,
@@ -763,6 +781,9 @@ fn wire_toolbar(shared: &SharedState) {
         }
         ToolbarAction::DelayChanged(secs) => {
             selection.borrow_mut().delay = std::time::Duration::from_secs(secs as u64);
+        }
+        ToolbarAction::OutputModeChanged(mode) => {
+            selection.borrow_mut().output_mode = mode;
         }
         ToolbarAction::Capture => {
             commit(
@@ -1356,6 +1377,7 @@ fn commit(
         cursor: state.cursor,
         delay: std::time::Duration::ZERO,
         edit,
+        output_mode: state.output_mode,
     };
 
     let total_secs = state.delay.as_secs().min(u32::MAX as u64) as u32;

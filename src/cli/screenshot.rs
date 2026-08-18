@@ -8,7 +8,7 @@ use crate::capture::{Capturer, Selection, wlr::WlrCapturer};
 use crate::config::Config;
 use crate::context::Context;
 use crate::i18n::fl;
-use crate::output::Outputs;
+use crate::output::{OutputMode, Outputs};
 
 #[derive(Debug, Default, ClapArgs)]
 pub struct Args {
@@ -146,9 +146,22 @@ pub async fn execute(
     // interactive selector can also override `cursor` and `delay` via its toolbar, and can
     // request the annotation editor via its "Annotate" button (Shift+Enter). The button choice
     // wins: if the selector explicitly opted in, we OR it into `edit`.
-    let (selection, cursor, selector_edit, delay) =
-        resolve_selection(selection, cursor, delay, &ctx).await?;
-    let edit = edit || selector_edit;
+    let resolved = resolve_selection(selection, cursor, delay, &sinks, &ctx).await?;
+    let (selection, cursor, delay) = (resolved.selection, resolved.cursor, resolved.delay);
+    let edit = edit || resolved.edit;
+
+    // The selector's output switcher wins over `--to` / `[output].default_sinks`, keeping the
+    // explicit path and clipboard kind those resolved to. Applied before every write branch
+    // below, so `--per-output`, the editor hand-off, and the plain path all honor it — and the
+    // editor receives sinks that already reflect the choice, seeding its own switcher.
+    let sinks = match resolved.output_mode {
+        Some(mode) => {
+            let mut selection = crate::output::SinkSelection::from_sinks(&sinks);
+            selection.set_mode(mode);
+            selection.to_sinks()
+        }
+        None => sinks,
+    };
 
     if edit && matches!(selection, Selection::PerOutput) {
         bail!("{}", fl!("error-edit-incompatible-per-output"));
@@ -297,14 +310,43 @@ pub(crate) fn selection_label(s: &Selection) -> &'static str {
     }
 }
 
+/// What [`resolve_selection`] produced. Every field but `selection` is an *override* the
+/// interactive selector's toolbar may have applied on top of the CLI/config values.
+struct ResolvedSelection {
+    selection: Selection,
+    cursor: bool,
+    edit: bool,
+    delay: Option<u32>,
+    /// Destination picked on the selector's output switcher. `None` whenever the selector
+    /// did not run, which leaves `sinks` exactly as the CLI/config resolved them — that
+    /// preserves multi-file fan-out (`--to file=A --to file=B`) for every non-interactive
+    /// path, including the daemon.
+    output_mode: Option<OutputMode>,
+}
+
+impl ResolvedSelection {
+    /// Pass-through result for a selection that needed no user interaction.
+    fn passthrough(selection: Selection, cursor: bool, delay: Option<u32>) -> Self {
+        Self {
+            selection,
+            cursor,
+            edit: false,
+            delay,
+            output_mode: None,
+        }
+    }
+}
+
 /// Resolve compositor-aware selections (`Interactive`, `Window`, `Focused`) into concrete ones
 /// that the capture pipeline can act on directly. Also returns the (potentially updated)
-/// cursor flag, an `edit` flag, and the final pre-capture delay. The interactive selector's
-/// toolbar can override every one of these — its delay spinner, cursor toggle, and Annotate
-/// button take precedence over the values threaded in from the CLI.
+/// cursor flag, an `edit` flag, the final pre-capture delay, and the chosen output
+/// destination. The interactive selector's toolbar can override every one of these — its
+/// delay spinner, cursor toggle, output switcher, and Annotate button take precedence over
+/// the values threaded in from the CLI.
 ///
-/// - `Interactive` opens the GTK overlay; the resulting selection + cursor + edit flag + delay
-///   come from the user's toolbar choices (initial delay seeded from `initial_delay`).
+/// - `Interactive` opens the GTK overlay; the resulting selection + cursor + edit flag +
+///   delay + destination come from the user's toolbar choices (the delay spinner is seeded
+///   from `initial_delay`, the output switcher from `sinks`).
 /// - `Window` reads the currently active window from Hyprland and is replaced with `Region(rect)`.
 /// - `Focused` reads the currently focused monitor from Hyprland and is replaced with
 ///   `Output(name)`.
@@ -314,8 +356,9 @@ async fn resolve_selection(
     selection: Selection,
     cursor: bool,
     initial_delay: Option<u32>,
+    _sinks: &[SinkSpec],
     _ctx: &std::sync::Arc<crate::context::Context>,
-) -> Result<(Selection, bool, bool, Option<u32>)> {
+) -> Result<ResolvedSelection> {
     match selection {
         Selection::Interactive => {
             #[cfg(feature = "ui")]
@@ -324,14 +367,20 @@ async fn resolve_selection(
                 // `Duration`; convert at the boundary so the rest of the screenshot
                 // pipeline stays in plain integer seconds.
                 let seed = std::time::Duration::from_secs(initial_delay.unwrap_or(0) as u64);
-                let outcome = crate::ui::selector::pick_region(_ctx.clone(), cursor, seed, true)
-                    .await
-                    .context("interactive region selection")?;
+                // Seed the toolbar's output switcher from whatever `--to` /
+                // `[output].default_sinks` resolved to, so it opens on the destination the
+                // user would have gotten had they not touched it.
+                let seed_output = crate::output::SinkSelection::from_sinks(_sinks).mode();
+                let outcome =
+                    crate::ui::selector::pick_region(_ctx.clone(), cursor, seed, true, seed_output)
+                        .await
+                        .context("interactive region selection")?;
                 tracing::info!(
                     ?outcome.selection,
                     cursor = outcome.cursor,
                     edit = outcome.edit,
                     delay_secs = outcome.delay.as_secs(),
+                    output_mode = ?outcome.output_mode,
                     "selector outcome",
                 );
                 // The selector counts down internally and returns `Duration::ZERO`, so
@@ -346,16 +395,19 @@ async fn resolve_selection(
                     Some(secs).filter(|n| *n > 0)
                 };
                 // Resolve any compositor-aware variants the user picked (Window) by recursing.
-                let (resolved, cursor_after, edit_after, delay_after) = Box::pin(
-                    resolve_selection(outcome.selection, outcome.cursor, chosen_delay, _ctx),
-                )
-                .await?;
-                Ok((
-                    resolved,
-                    cursor_after,
-                    outcome.edit || edit_after,
-                    delay_after,
+                let inner = Box::pin(resolve_selection(
+                    outcome.selection,
+                    outcome.cursor,
+                    chosen_delay,
+                    _sinks,
+                    _ctx,
                 ))
+                .await?;
+                Ok(ResolvedSelection {
+                    edit: outcome.edit || inner.edit,
+                    output_mode: Some(outcome.output_mode),
+                    ..inner
+                })
             }
             #[cfg(not(feature = "ui"))]
             {
@@ -378,16 +430,24 @@ async fn resolve_selection(
                 h = rect.h,
                 "active window resolved"
             );
-            Ok((Selection::Region(rect), cursor, false, initial_delay))
+            Ok(ResolvedSelection::passthrough(
+                Selection::Region(rect),
+                cursor,
+                initial_delay,
+            ))
         }
         Selection::Focused => {
             let name = crate::hypr::focused_monitor()
                 .await
                 .context("querying focused monitor from Hyprland")?;
             tracing::info!(monitor = %name, "focused monitor resolved");
-            Ok((Selection::Output(name), cursor, false, initial_delay))
+            Ok(ResolvedSelection::passthrough(
+                Selection::Output(name),
+                cursor,
+                initial_delay,
+            ))
         }
-        other => Ok((other, cursor, false, initial_delay)),
+        other => Ok(ResolvedSelection::passthrough(other, cursor, initial_delay)),
     }
 }
 

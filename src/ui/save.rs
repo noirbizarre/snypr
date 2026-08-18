@@ -14,7 +14,7 @@ use crate::capture::CapturedImage;
 use crate::cli::SinkSpec;
 use crate::config::FilenameContext;
 use crate::context::Ctx;
-use crate::output::Outputs;
+use crate::output::{Outputs, SharedSinks};
 
 /// Save action invoked when the user hits Ctrl+S / clicks Save. Returns the paths that were
 /// written (clipboard sinks return none) so they can be echoed on stdout.
@@ -54,26 +54,24 @@ pub async fn encode_and_write(
     Ok(paths)
 }
 
-/// Build a save closure that routes the composed PNG through the configured `Outputs` sinks
-/// and records the written paths into `collected` so the caller can return them over IPC.
+/// Build a save closure that routes the composed PNG through the currently selected
+/// [`SinkSelection`] and records the written paths into `collected` so the caller can return
+/// them over IPC. The selection is read at save time, so a mid-session flip of the toolbar's
+/// output switcher is honored by the very next save.
 /// We capture the tokio runtime handle so the GTK thread (inside `spawn_blocking`) can
 /// `block_on` the async clipboard/file writes without spinning up a second runtime.
 pub fn sinks_save_fn(
     app_ctx: Ctx,
-    sinks: Vec<SinkSpec>,
+    sinks: SharedSinks,
     selection_label: &'static str,
     collected: Arc<Mutex<Vec<PathBuf>>>,
 ) -> SaveFn {
     let handle = tokio::runtime::Handle::current();
-    let sinks = if sinks.is_empty() {
-        app_ctx.config.default_sinks()
-    } else {
-        sinks
-    };
     Arc::new(move |img: &CapturedImage| {
+        let specs = sinks.lock().unwrap_or_else(|e| e.into_inner()).to_sinks();
         handle.block_on(encode_and_write(
             &app_ctx,
-            &sinks,
+            &specs,
             img,
             selection_label,
             &collected,
@@ -87,6 +85,7 @@ mod tests {
     use crate::capture::Output;
     use crate::config::Config;
     use crate::context::Context;
+    use crate::output::{OutputMode, SinkSelection};
     use pretty_assertions::assert_eq;
 
     /// 2x2 BGRA image with a padded stride, optionally attributed to an output so the
@@ -189,13 +188,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sinks_save_fn_falls_back_to_the_configured_default_sinks() {
+    async fn sinks_save_fn_reads_the_selection_at_save_time() {
         let dir = tempfile::tempdir().unwrap();
         let app_ctx = ctx(dir.path()).await;
         let collected = Arc::new(Mutex::new(Vec::new()));
 
-        // An empty sink list means "use `[output].default_sinks`", which defaults to `file`.
-        let save = sinks_save_fn(app_ctx, Vec::new(), "region", collected.clone());
+        let sinks = Arc::new(Mutex::new(SinkSelection::from_sinks(&[SinkSpec::File(
+            None,
+        )])));
+        let save = sinks_save_fn(app_ctx, sinks.clone(), "region", collected.clone());
+
+        // Flip the switcher after the closure was built: the next save must honor it.
+        sinks.lock().unwrap().set_mode(OutputMode::File);
         let paths = tokio::task::spawn_blocking(move || save(&image(None)))
             .await
             .unwrap()
