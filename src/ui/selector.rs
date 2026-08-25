@@ -2008,4 +2008,134 @@ mod tests {
         assert_eq!(region_cursor_at(r, 60.0, 60.0), Some("move"));
         assert_eq!(region_cursor_at(r, 500.0, 500.0), None);
     }
+
+    #[tokio::test]
+    async fn fetch_helpers_degrade_gracefully_without_a_detected_backend() {
+        crate::testing::set_compositor_env(None, None);
+        assert!(fetch_clients_or_warn().await.is_empty());
+        assert_eq!(fetch_focused_monitor_or_log().await, None);
+        assert!(fetch_active_window_or_log().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_helpers_degrade_gracefully_when_the_backend_is_unreachable() {
+        // A detected-but-unreachable backend (nothing listening on $SWAYSOCK) exercises the
+        // `Err` / log branch of each helper, as opposed to the "no backend at all" case above.
+        let dir = tempfile::tempdir().unwrap();
+        crate::testing::set_compositor_env(None, Some(&dir.path().join("nothing-here.sock")));
+        assert!(fetch_clients_or_warn().await.is_empty());
+        assert_eq!(fetch_focused_monitor_or_log().await, None);
+        assert!(fetch_active_window_or_log().await.is_none());
+    }
+
+    #[test]
+    fn picked_window_from_copies_rect_title_and_class() {
+        let w = WmWindow {
+            id: "1".into(),
+            title: "term".into(),
+            class: "kitty".into(),
+            at: (5, 6),
+            size: (7, 8),
+            monitor: "eDP-1".into(),
+            workspace_id: 1,
+            mapped: true,
+            hidden: false,
+        };
+        let picked = PickedWindow::from(&w);
+        assert_eq!(picked.rect, w.rect());
+        assert_eq!(picked.title, "term");
+        assert_eq!(picked.class, "kitty");
+    }
+
+    #[tokio::test]
+    async fn fetch_clients_or_warn_returns_the_backends_client_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let tree = serde_json::json!({
+            "type": "root",
+            "nodes": [{
+                "type": "output",
+                "name": "eDP-1",
+                "nodes": [{
+                    "type": "workspace",
+                    "id": 1,
+                    "nodes": [{
+                        "type": "con",
+                        "id": 1,
+                        "pid": 111,
+                        "app_id": "kitty",
+                        "name": "term",
+                        "focused": true,
+                        "visible": true,
+                        "rect": {"x": 0, "y": 0, "width": 100, "height": 100}
+                    }]
+                }]
+            }]
+        });
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_TREE, &tree).await;
+        });
+
+        let clients = fetch_clients_or_warn().await;
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].title, "term");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_focused_monitor_or_log_returns_the_backends_focused_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let outputs = serde_json::json!([{"name": "DP-1", "focused": true}]);
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_OUTPUTS, &outputs)
+                .await;
+        });
+
+        assert_eq!(
+            fetch_focused_monitor_or_log().await,
+            Some("DP-1".to_owned())
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_active_window_or_log_returns_the_backends_active_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let tree = serde_json::json!({
+            "type": "root",
+            "nodes": [{
+                "type": "output",
+                "name": "eDP-1",
+                "nodes": [{
+                    "type": "workspace",
+                    "id": 1,
+                    "nodes": [{
+                        "type": "con",
+                        "id": 1,
+                        "pid": 111,
+                        "app_id": "kitty",
+                        "name": "term",
+                        "focused": true,
+                        "visible": true,
+                        "rect": {"x": 0, "y": 0, "width": 100, "height": 100}
+                    }]
+                }]
+            }]
+        });
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_TREE, &tree).await;
+        });
+
+        let win = fetch_active_window_or_log().await.expect("active window");
+        assert_eq!(win.title, "term");
+        server.await.unwrap();
+    }
 }

@@ -157,3 +157,69 @@ pub fn subscribe_focus(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::set_compositor_env;
+
+    #[test]
+    fn detect_picks_hyprland_when_its_signature_is_set() {
+        set_compositor_env(Some("deadbeef"), None);
+        let backend = detect().expect("a backend");
+        assert_eq!(backend.name(), "Hyprland");
+    }
+
+    #[test]
+    fn detect_picks_sway_when_hyprland_is_not_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        set_compositor_env(None, Some(&sock));
+        let backend = detect().expect("a backend");
+        assert_eq!(backend.name(), "Sway");
+    }
+
+    #[test]
+    fn detect_prefers_hyprland_when_both_are_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        set_compositor_env(Some("deadbeef"), Some(&sock));
+        let backend = detect().expect("a backend");
+        assert_eq!(backend.name(), "Hyprland");
+    }
+
+    #[test]
+    fn detect_returns_none_on_other_compositors() {
+        set_compositor_env(None, None);
+        assert!(detect().is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_focus_is_idle_without_a_backend() {
+        set_compositor_env(None, None);
+        let handle = tokio::runtime::Handle::current();
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut rx = subscribe_focus(&handle, shutdown_rx);
+        // No backend, no sender kept alive elsewhere: the channel closes immediately and
+        // `changed()` reports that rather than hanging forever.
+        assert!(rx.changed().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn subscribe_focus_delegates_to_the_detected_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let server = tokio::spawn(async move {
+            // The Sway backend's `subscribe_focus` opens a SUBSCRIBE session; accepting the
+            // connection and dropping it immediately is enough to prove `subscribe_focus`
+            // reached the backend at all (as opposed to the idle, no-backend path above).
+            let _ = listener.accept().await;
+        });
+        let handle = tokio::runtime::Handle::current();
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let _rx = subscribe_focus(&handle, shutdown_rx);
+        server.await.unwrap();
+    }
+}

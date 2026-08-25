@@ -61,9 +61,9 @@ impl WmBackend for Sway {
 const MAGIC: &[u8; 6] = b"i3-ipc";
 const HEADER_LEN: usize = 6 + 4 + 4;
 
-const SUBSCRIBE: u32 = 2;
-const GET_OUTPUTS: u32 = 3;
-const GET_TREE: u32 = 4;
+pub(crate) const SUBSCRIBE: u32 = 2;
+pub(crate) const GET_OUTPUTS: u32 = 3;
+pub(crate) const GET_TREE: u32 = 4;
 
 /// Read one framed i3ipc message (`(type, payload)`) from `stream`.
 async fn read_message(stream: &mut UnixStream) -> Result<(u32, Vec<u8>)> {
@@ -583,6 +583,208 @@ mod tests {
         assert_eq!(win.title, "term");
         assert_eq!(win.class, "kitty");
         assert_eq!(win.monitor, "eDP-1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clients_parses_get_tree_reply_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        set_env(Some(&sock));
+
+        let tree = sample_tree();
+        let server = tokio::spawn(async move { serve_once(listener, GET_TREE, &tree).await });
+
+        let list = clients().await.unwrap();
+        assert_eq!(list.len(), 2);
+        // Floating before tiled (see module doc); IDs and geometry survive the round-trip.
+        assert_eq!(list[0].title, "Mozilla Firefox");
+        assert_eq!(list[0].id, "2");
+        assert_eq!(list[0].at, (100, 100));
+        assert_eq!(list[0].size, (400, 300));
+        assert_eq!(list[1].title, "term");
+        assert_eq!(list[1].id, "1");
+        assert_eq!(list[1].workspace_id, 42);
+        assert!(list.iter().all(|w| w.mapped && !w.hidden));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn find_focused_returns_none_when_nothing_is_focused() {
+        let tree = json!({
+            "type": "root",
+            "nodes": [{
+                "type": "output",
+                "name": "eDP-1",
+                "nodes": [{
+                    "type": "workspace",
+                    "id": 1,
+                    "nodes": [{
+                        "type": "con",
+                        "id": 1,
+                        "pid": 1,
+                        "name": "unfocused",
+                        "focused": false
+                    }]
+                }]
+            }]
+        });
+        assert!(find_focused(&tree, "", 0).is_none());
+    }
+
+    #[test]
+    fn collect_windows_recurses_into_nested_split_containers() {
+        // Both `nodes` and `floating_nodes` can themselves contain plain split containers
+        // (no `pid`) that wrap further windows, not just direct leaves.
+        let tree = json!({
+            "type": "root",
+            "nodes": [{
+                "type": "output",
+                "name": "eDP-1",
+                "nodes": [{
+                    "type": "workspace",
+                    "id": 7,
+                    "nodes": [{
+                        // Tiled split container wrapping two windows.
+                        "type": "con",
+                        "nodes": [
+                            {"type": "con", "id": 10, "pid": 1, "name": "left"},
+                            {"type": "con", "id": 11, "pid": 2, "name": "right"}
+                        ]
+                    }],
+                    "floating_nodes": [{
+                        // Floating split container (rare in practice, but the tree schema
+                        // allows it) wrapping one window.
+                        "type": "floating_con",
+                        "floating_nodes": [
+                            {"type": "floating_con", "id": 20, "pid": 3, "name": "nested-float"}
+                        ]
+                    }]
+                }]
+            }]
+        });
+        let mut found = Vec::new();
+        collect_windows(&tree, "", 0, &mut found);
+        let titles: Vec<String> = found.iter().map(|f| window_fields(f.node).0).collect();
+        assert_eq!(titles, vec!["nested-float", "left", "right"]);
+        assert!(
+            found
+                .iter()
+                .all(|f| f.output == "eDP-1" && f.workspace_id == 7)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_message_rejects_a_bad_magic() {
+        let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        // 6 bytes of garbage instead of `i3-ipc`, plus a zeroed length+type so the header is
+        // still 14 bytes (read_message must reject on the magic check, not a short read).
+        client.write_all(b"XXXXXX\0\0\0\0\0\0\0\0").await.unwrap();
+        let err = read_message(&mut server).await.unwrap_err();
+        assert!(err.to_string().contains("i3-ipc magic"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn sway_backend_name_and_socket_path_delegate() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        // socket_path() only reads $SWAYSOCK; no listener needed for this one.
+        std::fs::write(&sock, b"").unwrap();
+        set_env(Some(&sock));
+
+        let backend: &dyn WmBackend = &Sway;
+        assert_eq!(backend.name(), "Sway");
+        assert_eq!(backend.socket_path().unwrap(), sock);
+    }
+
+    #[tokio::test]
+    async fn sway_backend_active_window_delegates_to_the_free_function() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        set_env(Some(&sock));
+
+        let tree = sample_tree();
+        let server = tokio::spawn(async move { serve_once(listener, GET_TREE, &tree).await });
+
+        let backend: &dyn WmBackend = &Sway;
+        let win = backend.active_window().await.unwrap();
+        assert_eq!(win.title, "term");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sway_backend_clients_delegates_to_the_free_function() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        set_env(Some(&sock));
+
+        let tree = sample_tree();
+        let server = tokio::spawn(async move { serve_once(listener, GET_TREE, &tree).await });
+
+        let backend: &dyn WmBackend = &Sway;
+        let list = backend.clients().await.unwrap();
+        assert_eq!(list.len(), 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sway_backend_focused_output_delegates_to_the_free_function() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        set_env(Some(&sock));
+
+        let response = json!([{"name": "eDP-1", "focused": true}]);
+        let server =
+            tokio::spawn(async move { serve_once(listener, GET_OUTPUTS, &response).await });
+
+        let backend: &dyn WmBackend = &Sway;
+        assert_eq!(backend.focused_output().await.unwrap(), "eDP-1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn subscribe_focus_publishes_the_focused_output_after_a_workspace_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        set_env(Some(&sock));
+
+        let server = tokio::spawn(async move {
+            // First connection: the SUBSCRIBE session pump_focus_events opens and keeps open.
+            let (mut sub_conn, _) = listener.accept().await.unwrap();
+            let (msg_type, payload) = read_message(&mut sub_conn).await.unwrap();
+            assert_eq!(msg_type, SUBSCRIBE);
+            assert_eq!(payload, br#"["workspace"]"#);
+            // Ack the SUBSCRIBE request, then push one fake event to trigger a re-query.
+            write_message(&mut sub_conn, SUBSCRIBE, br#"{"success":true}"#)
+                .await
+                .unwrap();
+            write_message(&mut sub_conn, 0x8000_0000, b"{}")
+                .await
+                .unwrap();
+
+            // Second connection: the fresh `focused_output()` query triggered by that event.
+            let (mut query_conn, _) = listener.accept().await.unwrap();
+            let (msg_type, _payload) = read_message(&mut query_conn).await.unwrap();
+            assert_eq!(msg_type, GET_OUTPUTS);
+            let outputs = json!([{"name": "DP-3", "focused": true}]);
+            let body = serde_json::to_vec(&outputs).unwrap();
+            write_message(&mut query_conn, GET_OUTPUTS, &body)
+                .await
+                .unwrap();
+            // Dropping both connections here lets pump_focus_events' next read see EOF and
+            // stop the task cleanly once the test is done observing the update.
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut rx = subscribe_focus(&handle, shutdown_rx);
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), Some("DP-3".to_string()));
         server.await.unwrap();
     }
 }

@@ -657,4 +657,36 @@ mod tests {
         assert_eq!(yes_no(true), "yes");
         assert_eq!(yes_no(false), "no");
     }
+
+    /// `collect()`'s compositor probe must be `None` when no backend is detected — exercised
+    /// against the *real* async collector (not just `render`'s pure formatting) so a future
+    /// regression in the `crate::wm::detect()` wiring itself would fail this test too.
+    #[tokio::test]
+    async fn collect_reports_no_compositor_without_a_detected_backend() {
+        crate::testing::set_compositor_env(None, None);
+        let state = collect(None).await;
+        assert!(state.compositor.is_none());
+    }
+
+    /// Same, but with a fake Sway IPC server standing in for a live session: `collect()`
+    /// should report the backend's name and a successful socket/ping probe.
+    #[tokio::test]
+    async fn collect_reports_a_detected_sway_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let outputs = serde_json::json!([{"name": "eDP-1", "focused": true}]);
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_OUTPUTS, &outputs)
+                .await;
+        });
+
+        let state = collect(None).await;
+        let probe = state.compositor.expect("a Sway backend was detected");
+        assert_eq!(probe.name, "Sway");
+        assert_eq!(probe.socket.unwrap(), sock);
+        assert_eq!(probe.ping.unwrap(), "eDP-1");
+        server.await.unwrap();
+    }
 }

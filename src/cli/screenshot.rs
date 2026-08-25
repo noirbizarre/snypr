@@ -305,6 +305,7 @@ pub(crate) fn selection_label(s: &Selection) -> &'static str {
 
 /// What [`resolve_selection`] produced. Every field but `selection` is an *override* the
 /// interactive selector's toolbar may have applied on top of the CLI/config values.
+#[derive(Debug)]
 struct ResolvedSelection {
     selection: Selection,
     cursor: bool,
@@ -599,6 +600,98 @@ mod tests {
             resolved.output_mode, None,
             "no selector ran, so the CLI sinks must be left alone"
         );
+    }
+
+    #[rstest]
+    #[case::window(Selection::Window)]
+    #[case::focused(Selection::Focused)]
+    #[tokio::test]
+    async fn resolve_selection_fails_clearly_without_a_detected_backend(
+        #[case] selection: Selection,
+    ) {
+        crate::testing::set_compositor_env(None, None);
+        let ctx = test_ctx().await;
+        let err = resolve_selection(selection, false, None, &[], &ctx)
+            .await
+            .unwrap_err();
+        // The `error-unsupported-compositor` i18n key, not a raw Hyprland/Sway IPC error —
+        // there's no backend to even attempt a connection with.
+        assert!(
+            format!("{err:#}").contains("no supported window manager IPC was detected"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_selection_window_resolves_via_the_detected_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let tree = serde_json::json!({
+            "type": "root",
+            "nodes": [{
+                "type": "output",
+                "name": "eDP-1",
+                "nodes": [{
+                    "type": "workspace",
+                    "id": 1,
+                    "nodes": [{
+                        "type": "con",
+                        "id": 1,
+                        "pid": 111,
+                        "app_id": "kitty",
+                        "name": "term",
+                        "focused": true,
+                        "visible": true,
+                        "rect": {"x": 10, "y": 20, "width": 300, "height": 200}
+                    }]
+                }]
+            }]
+        });
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_TREE, &tree).await;
+        });
+
+        let ctx = test_ctx().await;
+        let resolved = resolve_selection(Selection::Window, true, None, &[], &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.selection,
+            Selection::Region(crate::capture::region::Rect {
+                x: 10,
+                y: 20,
+                w: 300,
+                h: 200
+            })
+        );
+        assert!(resolved.cursor);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolve_selection_focused_resolves_via_the_detected_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let outputs = serde_json::json!([
+            {"name": "eDP-1", "focused": false},
+            {"name": "DP-2", "focused": true},
+        ]);
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_OUTPUTS, &outputs)
+                .await;
+        });
+
+        let ctx = test_ctx().await;
+        let resolved = resolve_selection(Selection::Focused, false, Some(5), &[], &ctx)
+            .await
+            .unwrap();
+        assert_eq!(resolved.selection, Selection::Output("DP-2".to_owned()));
+        assert_eq!(resolved.delay, Some(5));
+        server.await.unwrap();
     }
 
     #[rstest]

@@ -104,12 +104,8 @@ pub async fn run(
     let collected = written.clone();
     // Resolve the focused monitor up front (one-shot IPC) so the toolbar can be parented onto it
     // before the windows are presented; live follow-focus is wired separately inside the GTK
-    // thread. Silent fallback to `None` (→ first monitor) when no window-manager backend is
-    // detected (see `crate::wm`).
-    let focused = match crate::wm::detect() {
-        Some(backend) => backend.focused_output().await.ok(),
-        None => None,
-    };
+    // thread.
+    let focused = detect_focused_output().await;
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         run_gtk(
@@ -126,6 +122,17 @@ pub async fn run(
     Ok(std::mem::take(
         &mut written.lock().unwrap_or_else(|e| e.into_inner()),
     ))
+}
+
+/// One-shot, best-effort focused-output lookup: `None` (→ first monitor) when no
+/// window-manager backend is detected (see `crate::wm`) or the query fails. Split out of
+/// [`run`] so it's unit-testable without a live GTK display — `run` itself always ends by
+/// spawning a blocking GTK thread and cannot run headless.
+async fn detect_focused_output() -> Option<String> {
+    match crate::wm::detect() {
+        Some(backend) => backend.focused_output().await.ok(),
+        None => None,
+    }
 }
 
 type CanvasRegistry = Rc<RefCell<Vec<MonitorCanvas>>>;
@@ -1649,6 +1656,28 @@ mod tests {
         let ctx = test_ctx(default_sinks).await;
         let shared = resolve_sinks(&ctx, Vec::new());
         assert_eq!(shared.lock().unwrap().mode(), expected);
+    }
+
+    #[tokio::test]
+    async fn detect_focused_output_is_none_without_a_detected_backend() {
+        crate::testing::set_compositor_env(None, None);
+        assert_eq!(detect_focused_output().await, None);
+    }
+
+    #[tokio::test]
+    async fn detect_focused_output_returns_the_backends_focused_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let outputs = serde_json::json!([{"name": "DP-1", "focused": true}]);
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_OUTPUTS, &outputs)
+                .await;
+        });
+
+        assert_eq!(detect_focused_output().await, Some("DP-1".to_owned()));
+        server.await.unwrap();
     }
 
     #[tokio::test]

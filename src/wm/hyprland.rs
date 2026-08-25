@@ -441,4 +441,110 @@ mod tests {
         assert!(msg.contains(sig), "unexpected error: {msg}");
         assert!(msg.contains("/tmp/hypr/"), "unexpected error: {msg}");
     }
+
+    /// Prepare a hermetic `$XDG_RUNTIME_DIR/hypr/$sig/` directory and point the env at it.
+    /// Returns the directory the two sockets live in.
+    fn fake_instance_dir(sig: &str) -> (tempfile::TempDir, PathBuf) {
+        let runtime = tempfile::tempdir().unwrap();
+        let dir = runtime.path().join("hypr").join(sig);
+        std::fs::create_dir_all(&dir).unwrap();
+        set_env(Some(sig), Some(runtime.path()));
+        (runtime, dir)
+    }
+
+    /// Accept one connection on the fake `.socket.sock`, read the command to EOF (ignoring
+    /// its content — every query is a fixed literal like `j/activewindow`), and reply with
+    /// `response`. Mirrors Hyprland's plain-text (unframed) command socket protocol.
+    async fn serve_command(mut stream: UnixStream, response: &str) {
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_name_and_socket_path_delegate() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        // socket_path() only needs the file to exist; no listener required for this one.
+        std::fs::write(dir.join(".socket.sock"), b"").unwrap();
+
+        let backend: &dyn WmBackend = &Hyprland;
+        assert_eq!(backend.name(), "Hyprland");
+        assert_eq!(backend.socket_path().unwrap(), dir.join(".socket.sock"));
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_active_window_delegates_to_the_free_function() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        let listener = tokio::net::UnixListener::bind(dir.join(".socket.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_command(
+                stream,
+                r#"{"title":"term","class":"kitty","at":[1,2],"size":[3,4],"monitor":0}"#,
+            )
+            .await;
+        });
+
+        let backend: &dyn WmBackend = &Hyprland;
+        let win = backend.active_window().await.unwrap();
+        assert_eq!(win.title, "term");
+        assert_eq!(win.class, "kitty");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_clients_delegates_to_the_free_function() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        let listener = tokio::net::UnixListener::bind(dir.join(".socket.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_command(
+                stream,
+                r#"[{"address":"0x1","title":"t","class":"c","at":[0,0],"size":[10,10],"monitor":0,"workspace":{"id":1},"mapped":true,"hidden":false}]"#,
+            )
+            .await;
+        });
+
+        let backend: &dyn WmBackend = &Hyprland;
+        let list = backend.clients().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "0x1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_focused_output_delegates_to_the_free_function() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        let listener = tokio::net::UnixListener::bind(dir.join(".socket.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_command(
+                stream,
+                r#"[{"name":"DP-1","focused":false},{"name":"HDMI-A-1","focused":true}]"#,
+            )
+            .await;
+        });
+
+        let backend: &dyn WmBackend = &Hyprland;
+        assert_eq!(backend.focused_output().await.unwrap(), "HDMI-A-1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_subscribe_focus_publishes_events_from_the_event_socket() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        let listener = tokio::net::UnixListener::bind(dir.join(".socket2.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"focusedmon>>DP-1,1\n").await.unwrap();
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let backend: &dyn WmBackend = &Hyprland;
+        let mut rx = backend.subscribe_focus(&handle, shutdown_rx);
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), Some("DP-1".to_string()));
+        server.await.unwrap();
+    }
 }
