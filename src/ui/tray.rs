@@ -140,7 +140,7 @@ fn decode_logo() -> Result<ksni::Icon> {
     let rgba = img.into_raw();
     // ARGB32 in network byte order = byte sequence A, R, G, B.
     let mut argb = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         argb.push(px[3]); // A
         argb.push(px[0]); // R
         argb.push(px[1]); // G
@@ -186,7 +186,9 @@ mod tests {
         let icon = decode_logo().unwrap();
         let expected: Vec<u8> = rgba
             .as_raw()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|px| [px[3], px[0], px[1], px[2]])
             .collect();
         assert_eq!(icon.data, expected);
