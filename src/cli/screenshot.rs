@@ -18,13 +18,13 @@ pub struct Args {
     /// Capture each connected output to a separate file.
     #[arg(long, group = "selection", conflicts_with = "edit")]
     pub per_output: bool,
-    /// Capture only the currently focused monitor.
+    /// Capture only the currently focused monitor (via Hyprland or Sway IPC).
     #[arg(long, group = "selection")]
     pub focused: bool,
     /// Capture a specific output by name (e.g. `DP-1`).
     #[arg(long, value_name = "NAME", group = "selection")]
     pub output: Option<String>,
-    /// Capture the currently active window (via Hyprland IPC).
+    /// Capture the currently active window (via Hyprland or Sway IPC).
     #[arg(long, group = "selection")]
     pub window: bool,
     /// Capture an explicit region as `X,Y,WxH`.
@@ -141,7 +141,7 @@ pub async fn execute(
     edit: bool,
     delay: Option<u32>,
 ) -> Result<Vec<std::path::PathBuf>> {
-    // Resolve compositor-aware selections up front (Hyprland IPC + interactive overlay) so the
+    // Resolve compositor-aware selections up front (window-manager IPC + interactive overlay) so the
     // rest of the pipeline only ever sees concrete Region/Output/Full/PerOutput variants. The
     // interactive selector can also override `cursor` and `delay` via its toolbar, and can
     // request the annotation editor via its "Annotate" button (Shift+Enter). The button choice
@@ -372,8 +372,9 @@ impl ResolvedSelection {
 /// - `Interactive` opens the GTK overlay; the resulting selection + cursor + edit flag +
 ///   delay + destination come from the user's toolbar choices (the delay spinner is seeded
 ///   from `initial_delay`, the output switcher from `sinks`).
-/// - `Window` reads the currently active window from Hyprland and is replaced with `Region(rect)`.
-/// - `Focused` reads the currently focused monitor from Hyprland and is replaced with
+/// - `Window` reads the currently active window (via `crate::wm`) and is replaced with
+///   `Region(rect)`.
+/// - `Focused` reads the currently focused monitor (via `crate::wm`) and is replaced with
 ///   `Output(name)`.
 ///
 /// All other variants pass through unchanged (with `edit = false`, `cursor`/`delay` unchanged).
@@ -436,9 +437,12 @@ async fn resolve_selection(
             }
         }
         Selection::Window => {
-            let win = crate::hypr::active_window()
+            let backend = crate::wm::detect()
+                .ok_or_else(|| anyhow::anyhow!("{}", fl!("error-unsupported-compositor")))?;
+            let win = backend
+                .active_window()
                 .await
-                .context("querying active window from Hyprland")?;
+                .with_context(|| format!("querying active window from {}", backend.name()))?;
             let rect = win.rect();
             tracing::info!(
                 class = %win.class,
@@ -457,9 +461,12 @@ async fn resolve_selection(
             ))
         }
         Selection::Focused => {
-            let name = crate::hypr::focused_monitor()
+            let backend = crate::wm::detect()
+                .ok_or_else(|| anyhow::anyhow!("{}", fl!("error-unsupported-compositor")))?;
+            let name = backend
+                .focused_output()
                 .await
-                .context("querying focused monitor from Hyprland")?;
+                .with_context(|| format!("querying focused output from {}", backend.name()))?;
             tracing::info!(monitor = %name, "focused monitor resolved");
             Ok(ResolvedSelection::passthrough(
                 Selection::Output(name),
@@ -577,7 +584,8 @@ mod tests {
     #[case::output(Selection::Output("DP-1".to_owned()))]
     #[tokio::test]
     async fn non_interactive_selections_pass_through_untouched(#[case] selection: Selection) {
-        // No compositor is queried for these, so they resolve without Hyprland running.
+        // No compositor is queried for these, so they resolve without any window-manager
+        // backend running.
         let ctx = test_ctx().await;
         let resolved = resolve_selection(selection.clone(), true, Some(5), &[], &ctx)
             .await

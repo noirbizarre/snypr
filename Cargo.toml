@@ -103,8 +103,9 @@ wl-clipboard-rs = "0.9"
 libc = "0.2"
 os_pipe = "1"
 
-# Hyprland IPC: implemented directly against the command socket (see src/hypr.rs) to avoid
-# the upstream `hyprland` crate's hard-coded /tmp/hypr path and panic-on-error semantics.
+# Window-manager IPC (Hyprland, Sway): implemented directly against each compositor's own
+# socket (see src/wm/) to avoid the upstream `hyprland` crate's hard-coded /tmp/hypr path and
+# panic-on-error semantics, and to keep the toolkit-free build free of extra dependencies.
 
 # GTK stack (optional via `ui` feature)
 gtk4 = { version = "0.11", features = ["v4_14"], optional = true }

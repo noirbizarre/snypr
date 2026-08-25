@@ -59,7 +59,6 @@ component_management:
       paths:
         - src/ipc.rs
         - src/daemon.rs
-        - src/hypr.rs
     - component_id: output
       name: output sinks
       paths:
@@ -70,6 +69,10 @@ component_management:
       paths:
         - src/ui/**
         - src/bridge.rs
+    - component_id: wm
+      name: window-manager IPC (Hyprland, Sway)
+      paths:
+        - src/wm/**
 
 # `main.rs` is argument plumbing around `cli::run` and cannot be exercised without
 # spawning the binary; the build script is generated glue.

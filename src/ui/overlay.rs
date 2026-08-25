@@ -5,10 +5,10 @@
 //! Spawns one `gtk4_layer_shell` window per monitor at `Layer::Overlay`. Each hosts an
 //! [`AnnotationCanvas`] sized to its monitor. A **single** floating bottom-center
 //! [`crate::ui::Toolbar`] is shared across every monitor and reparented onto the focused
-//! monitor's window as Hyprland focus changes (see [`crate::ui::toolbar::ToolbarHost`] and
-//! [`attach_focus`]). The keyboard is grabbed exclusively while the overlay is alive so the
-//! user's tool shortcuts always reach us, even when input passthrough lets pointer events fall
-//! through to whatever app is underneath.
+//! monitor's window as window-manager focus changes (see [`crate::wm`],
+//! [`crate::ui::toolbar::ToolbarHost`] and [`attach_focus`]). The keyboard is grabbed
+//! exclusively while the overlay is alive so the user's tool shortcuts always reach us, even
+//! when input passthrough lets pointer events fall through to whatever app is underneath.
 //!
 //! Two modes are supported via [`OverlayMode`]:
 //!
@@ -104,8 +104,12 @@ pub async fn run(
     let collected = written.clone();
     // Resolve the focused monitor up front (one-shot IPC) so the toolbar can be parented onto it
     // before the windows are presented; live follow-focus is wired separately inside the GTK
-    // thread. Silent fallback to `None` (→ first monitor) when not under Hyprland.
-    let focused = crate::hypr::focused_monitor().await.ok();
+    // thread. Silent fallback to `None` (→ first monitor) when no window-manager backend is
+    // detected (see `crate::wm`).
+    let focused = match crate::wm::detect() {
+        Some(backend) => backend.focused_output().await.ok(),
+        None => None,
+    };
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         run_gtk(
@@ -250,10 +254,11 @@ fn attach_commands(shared: &Shared, mut rx: OverlayCommandRx) {
     });
 }
 
-/// Wire the Hyprland focus subscription into the GTK main context: each focused-monitor change
-/// reparents the single shared toolbar onto the newly focused monitor's window. Runs on the GLib
-/// main thread (the toolbar widget is `!Send`); only connector `String`s cross from the tokio
-/// reader task. Stops when the `watch` sender is dropped (the focus task shuts down on teardown).
+/// Wire the window-manager focus subscription into the GTK main context: each focused-monitor
+/// change reparents the single shared toolbar onto the newly focused monitor's window. Runs on
+/// the GLib main thread (the toolbar widget is `!Send`); only connector `String`s cross from
+/// the tokio reader task. Stops when the `watch` sender is dropped (the focus task shuts down on
+/// teardown).
 fn attach_focus(shared: &Shared, mut rx: tokio::sync::watch::Receiver<Option<String>>) {
     let host = shared.host.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -459,12 +464,13 @@ fn build_overlays(
         w.present();
     }
 
-    // Live follow-focus: subscribe to Hyprland focus events and reparent the toolbar as the
-    // focused monitor changes. Best-effort — a non-Hyprland host simply leaves the toolbar on
-    // its initial monitor. The `oneshot` lets `tear_down` stop the reader task cleanly.
+    // Live follow-focus: subscribe to window-manager focus events and reparent the toolbar as
+    // the focused monitor changes. Best-effort — a host with no detected backend (see
+    // `crate::wm`) simply leaves the toolbar on its initial monitor. The `oneshot` lets
+    // `tear_down` stop the reader task cleanly.
     let (focus_tx, focus_rx) = tokio::sync::oneshot::channel();
     *shared.focus_shutdown.borrow_mut() = Some(focus_tx);
-    let focus_watch = crate::hypr::subscribe_focus(handle, focus_rx);
+    let focus_watch = crate::wm::subscribe_focus(handle, focus_rx);
     attach_focus(&shared, focus_watch);
 
     Ok(shared)
@@ -505,7 +511,8 @@ struct Shared {
     /// The single shared toolbar plus the per-monitor overlay registry it's reparented between
     /// as focus changes.
     host: Rc<ToolbarHost>,
-    /// Fires on `tear_down` to stop the Hyprland focus-event reader task (see [`attach_focus`]).
+    /// Fires on `tear_down` to stop the window-manager focus-event reader task (see
+    /// [`attach_focus`]).
     /// `Rc` so the teardown closures (Esc handler, Save, daemon shutdown) can each reach it.
     focus_shutdown: FocusShutdown,
     app_weak: glib::WeakRef<gtk4::Application>,
@@ -1509,8 +1516,8 @@ fn tear_down(
     focus_shutdown: &FocusShutdown,
     app_weak: &glib::WeakRef<gtk4::Application>,
 ) {
-    // Stop the Hyprland focus-event reader so its `.socket2.sock` connection closes promptly
-    // (otherwise it lingers until the watch receiver is dropped with the GTK app).
+    // Stop the window-manager focus-event reader so its connection closes promptly (otherwise
+    // it lingers until the watch receiver is dropped with the GTK app).
     if let Some(tx) = focus_shutdown.borrow_mut().take() {
         let _ = tx.send(());
     }

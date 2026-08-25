@@ -120,7 +120,7 @@ pub enum InitialMode {
     /// Focused monitor highlighted (historical default).
     #[default]
     Screen,
-    /// Click-to-pick a window from the Hyprland client list.
+    /// Click-to-pick a window from the window manager's client list.
     Window,
     /// Drag-to-pick a rectangle.
     Region,

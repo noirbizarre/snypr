@@ -227,8 +227,8 @@ async fn capture_then_stitch_crops_to_the_requested_region() {
 async fn unresolved_selections_are_rejected_by_the_capture_backend() {
     let (cap, _outputs) = require_capture!();
     // These must be resolved by `cli::screenshot::resolve_selection` before reaching capture;
-    // capture has no Hyprland IPC of its own. Reaching here is a wiring bug, and the error
-    // message says so.
+    // capture has no window-manager IPC of its own (see `crate::wm`). Reaching here is a
+    // wiring bug, and the error message says so.
     for selection in [
         Selection::Focused,
         Selection::Window,

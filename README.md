@@ -36,7 +36,7 @@ existing shape to move it, resize it via drag handles, re-edit text, or delete i
 | `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the in-place annotation overlay before sinks |
 | `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools; Ctrl+S saves via the zone selector |
 | `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`, `PassthroughToggle`; tray (StatusNotifierItem) with `--systray` |
-| `doctor`      | Markdown diagnostic report covering version, environment, configuration and live capability probes (Hyprland IPC, wlr-screencopy, daemon socket) |
+| `doctor`      | Markdown diagnostic report covering version, environment, configuration and live capability probes (window-manager IPC, wlr-screencopy, daemon socket) |
 
 ## Build
 
@@ -68,6 +68,9 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
 - A wlroots-based Wayland compositor exposing the
   `zwlr_screencopy_manager_v1` protocol — Hyprland is the primary target;
   sway, river, and other wlroots compositors should also work.
+  `--window`, `--focused`, and the interactive selector's Window mode
+  additionally need Hyprland or Sway's own IPC (see below); they're
+  unavailable on other wlroots compositors.
 - GTK4 stack at runtime.
   - Arch Linux:
     ```sh
@@ -84,12 +87,13 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
   toasts (default): a notification daemon implementing
   `org.freedesktop.Notifications`, e.g. `mako`, `dunst`, or `swaync`.
 
-No external CLI helpers are invoked: `hyprctl`, `grim`, `slurp`, and
-`wl-copy` are **not** required. Hyprland IPC is spoken directly over the
-command socket, Wayland capture goes through `zwlr_screencopy_manager_v1`,
-and clipboard writes use `wl-clipboard-rs`. One-shot invocations briefly fork a
-detached child to keep serving the Wayland selection after the CLI exits — the
-daemon publishes in-process and skips that fork.
+No external CLI helpers are invoked: `hyprctl`, `swaymsg`, `grim`, `slurp`, and
+`wl-copy` are **not** required. Hyprland and Sway IPC are spoken directly over
+their respective command sockets, Wayland capture goes through
+`zwlr_screencopy_manager_v1`, and clipboard writes use `wl-clipboard-rs`.
+One-shot invocations briefly fork a detached child to keep serving the
+Wayland selection after the CLI exits — the daemon publishes in-process and
+skips that fork.
 
 ## Install
 
@@ -178,10 +182,10 @@ snypr screenshot --output DP-1 --to clipboard
 # selection (middle-click paste). Per-sink form: --to clipboard=primary.
 snypr screenshot --full --to clipboard --clipboard-type both
 
-# Focused monitor, queried over Hyprland IPC.
+# Focused monitor, queried over Hyprland or Sway IPC.
 snypr screenshot --focused
 
-# Currently active window, queried over Hyprland IPC.
+# Currently active window, queried over Hyprland or Sway IPC.
 snypr screenshot --window
 
 # Explicit region (logical pixels): X,Y,WxH.
@@ -344,6 +348,31 @@ hl.on("hyprland.start", function()
 end)
 ```
 
+### Sway keybindings
+
+The same flags work on Sway via its own IPC (`$SWAYSOCK`) — no `swaymsg`
+wrapper needed. Drop the following into `~/.config/sway/config`:
+
+```
+# Default screenshot (uses the configured defaults from ~/.config/snypr/config.toml).
+bindsym $mod+Print exec snypr screenshot
+
+# Full desktop, stitched across every output, written to the configured directory.
+bindsym $mod+Shift+Print exec snypr screenshot --full --to file
+
+# Currently focused monitor, copied to the clipboard.
+bindsym $mod+Ctrl+Print exec snypr screenshot --focused --to clipboard
+
+# Currently active window, copied to the clipboard.
+bindsym $mod+Ctrl+Shift+Print exec snypr screenshot --window --to clipboard
+
+# Live draw-on-screen overlay — ideal for presentations / Google Meet.
+bindsym $mod+Alt+Print exec snypr draw
+
+# Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
+exec snypr daemon --systray
+```
+
 ### Troubleshooting
 
 **Pressing the keybind does nothing?**
@@ -466,7 +495,7 @@ src/
 ├── ui/          # GTK4 windows + AnnotationCanvas (gated behind `ui` feature)
 ├── bridge.rs    # async <-> GTK glue (gated behind `ui` feature)
 ├── context.rs   # shared Ctx = Arc<Context>
-├── hypr.rs      # Hyprland IPC
+├── wm/          # window-manager IPC (Hyprland, Sway): active window, focused output
 ├── i18n.rs      # Fluent catalogs + the `fl!` macro
 ├── ipc.rs       # daemon protocol
 ├── daemon.rs    # Unix-socket IPC server
