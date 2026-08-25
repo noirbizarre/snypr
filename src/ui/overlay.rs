@@ -1198,7 +1198,13 @@ async fn ensure_draw_blur_base(
             // `build_base_texture` expect RGBA (`gdk::MemoryFormat::R8g8b8a8`). Without
             // this swap the blurred region looks yellow/red-tinted because the R and B
             // channels are exchanged. Mirrors `cli::screenshot::base_from_captured`.
+            //
+            // Kept as a hand-rolled loop (not `output::bgra_to_rgba`) rather than
+            // restructured for `clippy::chunks_exact_to_as_chunks`: this async, GTK- and
+            // live-capture-dependent path has no unit test exercising it either way, so
+            // rewriting it would just move the untested surface instead of shrinking it.
             let mut rgba = bgra;
+            #[allow(clippy::chunks_exact_to_as_chunks)]
             for px in rgba.chunks_exact_mut(4) {
                 px.swap(0, 2);
             }

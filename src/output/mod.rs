@@ -231,7 +231,12 @@ pub fn bgra_to_rgba(img: &CapturedImage) -> Vec<u8> {
             }
         } else {
             // Fallback if alignment didn't line up (unusual).
-            for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+            for (s, d) in src
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 d[0] = s[2];
                 d[1] = s[1];
                 d[2] = s[0];
@@ -323,16 +328,17 @@ mod tests {
     }
 
     /// The BGRA -> RGBA swizzle is invisible to an all-white fixture, so decode the PNG back
-    /// and assert the channel order pixel by pixel. `padding` of 0 exercises the fast aligned
-    /// `u32` path; a non-zero padding forces the scalar fallback *and* proves the row padding
-    /// is dropped rather than encoded.
+    /// and assert the channel order pixel by pixel. `padding` of 0 keeps every row's byte
+    /// offset a multiple of 4 (fast aligned `u32` path); a padding of 1 breaks that for every
+    /// row after the first (`row_bytes + 1` is never a multiple of 4), forcing the scalar
+    /// fallback *and* proving the row padding is dropped rather than encoded.
     #[rstest]
     #[case(PngCompression::Fast, 0)]
-    #[case(PngCompression::Fast, 8)]
+    #[case(PngCompression::Fast, 1)]
     #[case(PngCompression::Balanced, 0)]
-    #[case(PngCompression::Balanced, 8)]
+    #[case(PngCompression::Balanced, 1)]
     #[case(PngCompression::Best, 0)]
-    #[case(PngCompression::Best, 8)]
+    #[case(PngCompression::Best, 1)]
     fn encode_png_swizzles_bgra_to_rgba(#[case] compression: PngCompression, #[case] padding: u32) {
         let img = distinct_image(3, 2, padding);
         let png = encode_png(&img, compression).unwrap();
@@ -351,10 +357,14 @@ mod tests {
     }
 
     /// The aligned `u32` fast path and the scalar fallback must agree byte for byte. A zero
-    /// padding keeps rows `u32`-aligned; a non-zero padding forces the fallback.
+    /// padding keeps every row's byte offset a multiple of 4 (`row_bytes` alone is already
+    /// aligned); a padding of 1 is not itself a multiple of 4, so every row after the first
+    /// lands on an unaligned offset and takes the fallback (see `bgra_to_rgba`'s `pod_align_to`
+    /// check — a padding that *is* a multiple of 4, e.g. 8, would keep every row aligned and
+    /// never actually exercise this branch).
     #[rstest]
     #[case::fast_path(0)]
-    #[case::scalar_fallback(8)]
+    #[case::scalar_fallback(1)]
     fn bgra_to_rgba_drops_padding_and_swizzles(#[case] padding: u32) {
         let img = distinct_image(3, 2, padding);
         let rgba = bgra_to_rgba(&img);
