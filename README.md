@@ -69,8 +69,8 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
   `zwlr_screencopy_manager_v1` protocol — Hyprland is the primary target;
   sway, river, and other wlroots compositors should also work.
   `--window`, `--focused`, and the interactive selector's Window mode
-  additionally need Hyprland or Sway's own IPC (see below); they're
-  unavailable on other wlroots compositors.
+  additionally need Hyprland's, Sway's, or Niri's own IPC (see below);
+  they're unavailable on other wlroots compositors.
 - GTK4 stack at runtime.
   - Arch Linux:
     ```sh
@@ -87,9 +87,9 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
   toasts (default): a notification daemon implementing
   `org.freedesktop.Notifications`, e.g. `mako`, `dunst`, or `swaync`.
 
-No external CLI helpers are invoked: `hyprctl`, `swaymsg`, `grim`, `slurp`, and
-`wl-copy` are **not** required. Hyprland and Sway IPC are spoken directly over
-their respective command sockets, Wayland capture goes through
+No external CLI helpers are invoked: `hyprctl`, `swaymsg`, `niri msg`, `grim`,
+`slurp`, and `wl-copy` are **not** required. Hyprland, Sway, and Niri IPC are
+spoken directly over their respective command sockets, Wayland capture goes through
 `zwlr_screencopy_manager_v1`, and clipboard writes use `wl-clipboard-rs`.
 One-shot invocations briefly fork a detached child to keep serving the
 Wayland selection after the CLI exits — the daemon publishes in-process and
@@ -182,10 +182,10 @@ snypr screenshot --output DP-1 --to clipboard
 # selection (middle-click paste). Per-sink form: --to clipboard=primary.
 snypr screenshot --full --to clipboard --clipboard-type both
 
-# Focused monitor, queried over Hyprland or Sway IPC.
+# Focused monitor, queried over Hyprland, Sway, or Niri IPC.
 snypr screenshot --focused
 
-# Currently active window, queried over Hyprland or Sway IPC.
+# Currently active window, queried over Hyprland, Sway, or Niri IPC.
 snypr screenshot --window
 
 # Explicit region (logical pixels): X,Y,WxH.
@@ -373,6 +373,24 @@ bindsym $mod+Alt+Print exec snypr draw
 exec snypr daemon --systray
 ```
 
+### Niri keybindings
+
+The same flags work on Niri via its own IPC (`$NIRI_SOCKET`, set by Niri
+itself) — no `niri msg` wrapper needed. Drop the following into
+`~/.config/niri/config.kdl`:
+
+```kdl
+binds {
+    Mod+Print { spawn "snypr" "screenshot"; }
+    Mod+Shift+Print { spawn "snypr" "screenshot" "--full" "--to" "file"; }
+    Mod+Ctrl+Print { spawn "snypr" "screenshot" "--focused" "--to" "clipboard"; }
+    Mod+Ctrl+Shift+Print { spawn "snypr" "screenshot" "--window" "--to" "clipboard"; }
+    Mod+Alt+Print { spawn "snypr" "draw"; }
+}
+
+spawn-at-startup "snypr" "daemon" "--systray"
+```
+
 ### Troubleshooting
 
 **Pressing the keybind does nothing?**
@@ -495,7 +513,7 @@ src/
 ├── ui/          # GTK4 windows + AnnotationCanvas (gated behind `ui` feature)
 ├── bridge.rs    # async <-> GTK glue (gated behind `ui` feature)
 ├── context.rs   # shared Ctx = Arc<Context>
-├── wm/          # window-manager IPC (Hyprland, Sway): active window, focused output
+├── wm/          # window-manager IPC (Hyprland, Sway, Niri): active window, focused output
 ├── i18n.rs      # Fluent catalogs + the `fl!` macro
 ├── ipc.rs       # daemon protocol
 ├── daemon.rs    # Unix-socket IPC server

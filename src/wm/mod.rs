@@ -12,11 +12,13 @@
 //! Backends:
 //! - [`hyprland`] — Hyprland's command/event sockets.
 //! - [`sway`] — Sway's i3ipc socket.
+//! - [`niri`] — Niri's JSON-line IPC socket.
 //!
 //! Other wlroots compositors (river, wayfire, …) have no backend today; [`detect`] returns
 //! `None` for them and callers degrade gracefully (see each call site for its fallback).
 
 pub mod hyprland;
+pub mod niri;
 pub mod sway;
 
 use anyhow::Result;
@@ -121,18 +123,22 @@ pub trait WmBackend: Send + Sync {
 
 /// Detect which window-manager backend is available in the current environment.
 ///
-/// Checks, in order: `HYPRLAND_INSTANCE_SIGNATURE` (Hyprland), then `SWAYSOCK` (Sway). Returns
-/// `None` on any other compositor (river, wayfire, …) or outside a Wayland session entirely —
-/// callers must treat that as "no window-manager IPC available", not an error in itself.
+/// Checks, in order: `HYPRLAND_INSTANCE_SIGNATURE` (Hyprland), then `SWAYSOCK` (Sway), then
+/// `NIRI_SOCKET` (Niri). Returns `None` on any other compositor (river, wayfire, …) or outside
+/// a Wayland session entirely — callers must treat that as "no window-manager IPC available",
+/// not an error in itself.
 ///
 /// Stateless by design (mirrors the previous `crate::hypr` free-function style): detection is
-/// just two environment variable checks, so there is no benefit to caching it on [`crate::context::Context`].
+/// just a few environment variable checks, so there is no benefit to caching it on [`crate::context::Context`].
 pub fn detect() -> Option<Box<dyn WmBackend>> {
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         return Some(Box::new(hyprland::Hyprland));
     }
     if std::env::var_os("SWAYSOCK").is_some() {
         return Some(Box::new(sway::Sway));
+    }
+    if std::env::var_os("NIRI_SOCKET").is_some() {
+        return Some(Box::new(niri::Niri));
     }
     None
 }
@@ -165,7 +171,7 @@ mod tests {
 
     #[test]
     fn detect_picks_hyprland_when_its_signature_is_set() {
-        set_compositor_env(Some("deadbeef"), None);
+        set_compositor_env(Some("deadbeef"), None, None);
         let backend = detect().expect("a backend");
         assert_eq!(backend.name(), "Hyprland");
     }
@@ -174,29 +180,57 @@ mod tests {
     fn detect_picks_sway_when_hyprland_is_not_set() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        set_compositor_env(None, Some(&sock));
+        set_compositor_env(None, Some(&sock), None);
         let backend = detect().expect("a backend");
         assert_eq!(backend.name(), "Sway");
+    }
+
+    #[test]
+    fn detect_picks_niri_when_only_its_socket_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("niri.sock");
+        set_compositor_env(None, None, Some(&sock));
+        let backend = detect().expect("a backend");
+        assert_eq!(backend.name(), "Niri");
     }
 
     #[test]
     fn detect_prefers_hyprland_when_both_are_set() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        set_compositor_env(Some("deadbeef"), Some(&sock));
+        set_compositor_env(Some("deadbeef"), Some(&sock), None);
         let backend = detect().expect("a backend");
         assert_eq!(backend.name(), "Hyprland");
     }
 
     #[test]
+    fn detect_prefers_hyprland_over_niri() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("niri.sock");
+        set_compositor_env(Some("deadbeef"), None, Some(&sock));
+        let backend = detect().expect("a backend");
+        assert_eq!(backend.name(), "Hyprland");
+    }
+
+    #[test]
+    fn detect_prefers_sway_over_niri() {
+        let dir = tempfile::tempdir().unwrap();
+        let sway_sock = dir.path().join("sway.sock");
+        let niri_sock = dir.path().join("niri.sock");
+        set_compositor_env(None, Some(&sway_sock), Some(&niri_sock));
+        let backend = detect().expect("a backend");
+        assert_eq!(backend.name(), "Sway");
+    }
+
+    #[test]
     fn detect_returns_none_on_other_compositors() {
-        set_compositor_env(None, None);
+        set_compositor_env(None, None, None);
         assert!(detect().is_none());
     }
 
     #[tokio::test]
     async fn subscribe_focus_is_idle_without_a_backend() {
-        set_compositor_env(None, None);
+        set_compositor_env(None, None, None);
         let handle = tokio::runtime::Handle::current();
         let (_shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut rx = subscribe_focus(&handle, shutdown_rx);
@@ -209,7 +243,7 @@ mod tests {
     async fn subscribe_focus_delegates_to_the_detected_backend() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        set_compositor_env(None, Some(&sock));
+        set_compositor_env(None, Some(&sock), None);
         let listener = crate::testing::bind_fake_sway_socket(&sock);
         let server = tokio::spawn(async move {
             // The Sway backend's `subscribe_focus` opens a SUBSCRIBE session; accepting the

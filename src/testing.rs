@@ -73,10 +73,15 @@ pub async fn serve_fake_sway_reply(
         .expect("writing fake Sway response");
 }
 
-/// Force a hermetic compositor-detection environment for a test. Removes both env vars by
-/// default; pass `Some(sock)` for `sway_sock` to make `crate::wm::detect()` pick the Sway
-/// backend. Safe because nextest runs every test in its own process.
-pub fn set_compositor_env(hyprland_sig: Option<&str>, sway_sock: Option<&std::path::Path>) {
+/// Force a hermetic compositor-detection environment for a test. Removes all three env vars
+/// by default; pass `Some(sock)` for `sway_sock`/`niri_sock` to make `crate::wm::detect()` pick
+/// the Sway/Niri backend respectively. Safe because nextest runs every test in its own
+/// process.
+pub fn set_compositor_env(
+    hyprland_sig: Option<&str>,
+    sway_sock: Option<&std::path::Path>,
+    niri_sock: Option<&std::path::Path>,
+) {
     unsafe {
         match hyprland_sig {
             Some(v) => std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", v),
@@ -85,6 +90,10 @@ pub fn set_compositor_env(hyprland_sig: Option<&str>, sway_sock: Option<&std::pa
         match sway_sock {
             Some(v) => std::env::set_var("SWAYSOCK", v),
             None => std::env::remove_var("SWAYSOCK"),
+        }
+        match niri_sock {
+            Some(v) => std::env::set_var("NIRI_SOCKET", v),
+            None => std::env::remove_var("NIRI_SOCKET"),
         }
     }
 }

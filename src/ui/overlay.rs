@@ -1660,7 +1660,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_focused_output_is_none_without_a_detected_backend() {
-        crate::testing::set_compositor_env(None, None);
+        crate::testing::set_compositor_env(None, None, None);
         assert_eq!(detect_focused_output().await, None);
     }
 
@@ -1668,7 +1668,7 @@ mod tests {
     async fn detect_focused_output_returns_the_backends_focused_output() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        crate::testing::set_compositor_env(None, Some(&sock));
+        crate::testing::set_compositor_env(None, Some(&sock), None);
         let listener = crate::testing::bind_fake_sway_socket(&sock);
         let outputs = serde_json::json!([{"name": "DP-1", "focused": true}]);
         let server = tokio::spawn(async move {

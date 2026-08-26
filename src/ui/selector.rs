@@ -2011,7 +2011,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_helpers_degrade_gracefully_without_a_detected_backend() {
-        crate::testing::set_compositor_env(None, None);
+        crate::testing::set_compositor_env(None, None, None);
         assert!(fetch_clients_or_warn().await.is_empty());
         assert_eq!(fetch_focused_monitor_or_log().await, None);
         assert!(fetch_active_window_or_log().await.is_none());
@@ -2022,7 +2022,7 @@ mod tests {
         // A detected-but-unreachable backend (nothing listening on $SWAYSOCK) exercises the
         // `Err` / log branch of each helper, as opposed to the "no backend at all" case above.
         let dir = tempfile::tempdir().unwrap();
-        crate::testing::set_compositor_env(None, Some(&dir.path().join("nothing-here.sock")));
+        crate::testing::set_compositor_env(None, Some(&dir.path().join("nothing-here.sock")), None);
         assert!(fetch_clients_or_warn().await.is_empty());
         assert_eq!(fetch_focused_monitor_or_log().await, None);
         assert!(fetch_active_window_or_log().await.is_none());
@@ -2051,7 +2051,7 @@ mod tests {
     async fn fetch_clients_or_warn_returns_the_backends_client_list() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        crate::testing::set_compositor_env(None, Some(&sock));
+        crate::testing::set_compositor_env(None, Some(&sock), None);
         let listener = crate::testing::bind_fake_sway_socket(&sock);
         let tree = serde_json::json!({
             "type": "root",
@@ -2088,7 +2088,7 @@ mod tests {
     async fn fetch_focused_monitor_or_log_returns_the_backends_focused_output() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        crate::testing::set_compositor_env(None, Some(&sock));
+        crate::testing::set_compositor_env(None, Some(&sock), None);
         let listener = crate::testing::bind_fake_sway_socket(&sock);
         let outputs = serde_json::json!([{"name": "DP-1", "focused": true}]);
         let server = tokio::spawn(async move {
@@ -2107,7 +2107,7 @@ mod tests {
     async fn fetch_active_window_or_log_returns_the_backends_active_window() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        crate::testing::set_compositor_env(None, Some(&sock));
+        crate::testing::set_compositor_env(None, Some(&sock), None);
         let listener = crate::testing::bind_fake_sway_socket(&sock);
         let tree = serde_json::json!({
             "type": "root",

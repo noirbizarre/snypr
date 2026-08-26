@@ -41,12 +41,12 @@ automatically when the template does not already contain it, so the files cannot
 onto one another. Incompatible with \fB\-\-edit\fR.
 .TP
 .BR \-\-focused
-Capture the currently focused monitor, queried over Hyprland's or Sway's IPC. Unavailable on
-other wlroots compositors.
+Capture the currently focused monitor, queried over Hyprland's, Sway's, or Niri's IPC.
+Unavailable on other wlroots compositors.
 .TP
 .BR \-\-window
-Capture the currently active window, queried over Hyprland's or Sway's IPC. Unavailable on
-other wlroots compositors.
+Capture the currently active window, queried over Hyprland's, Sway's, or Niri's IPC.
+Unavailable on other wlroots compositors.
 .TP
 .BR \-\-output " " \fINAME\fR
 Capture a single output (\fIDP-1\fR, \fIeDP-1\fR, ...).
@@ -132,7 +132,7 @@ Listen on \fIPATH\fR instead of \fI$XDG_RUNTIME_DIR/snypr.sock\fR.
 Also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
 .SS doctor
 Print a copy-pasteable Markdown diagnostic report covering version, runtime
-environment, parsed configuration, and live capability probes (Hyprland/Sway
+environment, parsed configuration, and live capability probes (Hyprland/Sway/Niri
 IPC, wlr-screencopy outputs, daemon socket \fBPing\fR). All headings are level 3 so the
 output drops cleanly under a user-supplied level-2 heading. Always exits with status
 \fB0\fR; failed probes surface as \fBWARN\fR / \fBFAIL\fR lines in the report.
@@ -237,6 +237,7 @@ Scalable application icon, preferred by consumers that render at arbitrary sizes
 .BR grim (1),
 .BR slurp (1),
 .BR Hyprland (1),
-.BR sway (5)
+.BR sway (5),
+.BR niri (1)
 .SH AUTHORS
 Snypr contributors. Source: https://github.com/noirbizarre/snypr
