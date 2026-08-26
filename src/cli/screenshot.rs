@@ -18,7 +18,8 @@ pub struct Args {
     /// Capture each connected output to a separate file.
     #[arg(long, group = "selection", conflicts_with = "edit")]
     pub per_output: bool,
-    /// Capture only the currently focused monitor (via Hyprland or Sway IPC).
+    /// Capture only the currently focused monitor (via Hyprland/Sway IPC, or the generic
+    /// wlr-foreign-toplevel protocol on other compositors that advertise it).
     #[arg(long, group = "selection")]
     pub focused: bool,
     /// Capture a specific output by name (e.g. `DP-1`).
@@ -439,12 +440,15 @@ async fn resolve_selection(
         }
         Selection::Window => {
             let backend = crate::wm::detect()
+                .await
                 .ok_or_else(|| anyhow::anyhow!("{}", fl!("error-unsupported-compositor")))?;
             let win = backend
                 .active_window()
                 .await
                 .with_context(|| format!("querying active window from {}", backend.name()))?;
-            let rect = win.rect();
+            let rect = win
+                .rect()
+                .ok_or_else(|| anyhow::anyhow!("{}", fl!("error-active-window-no-geometry")))?;
             tracing::info!(
                 class = %win.class,
                 title = %win.title,
@@ -463,6 +467,7 @@ async fn resolve_selection(
         }
         Selection::Focused => {
             let backend = crate::wm::detect()
+                .await
                 .ok_or_else(|| anyhow::anyhow!("{}", fl!("error-unsupported-compositor")))?;
             let name = backend
                 .focused_output()

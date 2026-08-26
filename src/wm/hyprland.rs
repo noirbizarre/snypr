@@ -77,8 +77,8 @@ async fn active_window() -> Result<ActiveWindow> {
     Ok(ActiveWindow {
         title: raw.title,
         class: raw.class,
-        at: (raw.at[0], raw.at[1]),
-        size: (raw.size[0].max(0) as u32, raw.size[1].max(0) as u32),
+        at: Some((raw.at[0], raw.at[1])),
+        size: Some((raw.size[0].max(0) as u32, raw.size[1].max(0) as u32)),
         monitor: raw.monitor.to_string(),
     })
 }
@@ -113,8 +113,8 @@ async fn clients() -> Result<Vec<WmWindow>> {
             id: r.address,
             title: r.title,
             class: r.class,
-            at: (r.at[0], r.at[1]),
-            size: (r.size[0].max(0) as u32, r.size[1].max(0) as u32),
+            at: Some((r.at[0], r.at[1])),
+            size: Some((r.size[0].max(0) as u32, r.size[1].max(0) as u32)),
             monitor: r.monitor.to_string(),
             workspace_id: r.workspace.id,
             mapped: r.mapped,
@@ -309,8 +309,8 @@ mod tests {
             id: id.into(),
             title: "t".into(),
             class: "c".into(),
-            at: (x, y),
-            size: (w, h),
+            at: Some((x, y)),
+            size: Some((w, h)),
             monitor: "0".into(),
             workspace_id: 1,
             mapped,
@@ -374,18 +374,18 @@ mod tests {
         let w = ActiveWindow {
             title: "term".into(),
             class: "kitty".into(),
-            at: (-10, 25),
-            size: (800, 600),
+            at: Some((-10, 25)),
+            size: Some((800, 600)),
             monitor: "1".into(),
         };
         assert_eq!(
             w.rect(),
-            crate::capture::region::Rect {
+            Some(crate::capture::region::Rect {
                 x: -10,
                 y: 25,
                 w: 800,
                 h: 600
-            }
+            })
         );
     }
 

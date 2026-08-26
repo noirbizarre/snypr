@@ -10,8 +10,8 @@
 //! (`layout.tile_pos_in_workspace_view`) and a tile size (`layout.tile_size`). Resolving an
 //! absolute logical-pixel rect requires combining three requests: the window's `workspace_id`
 //! (`Windows`/`FocusedWindow`) → that workspace's `output` name (`Workspaces`) → that output's
-//! logical position (`Outputs`). [`resolve_rect`] does this; it returns a zero-sized rect when
-//! any piece is missing (e.g. the window isn't currently in its workspace's view).
+//! logical position (`Outputs`). [`resolve_rect`] does this; it returns `None` for the position
+//! when any piece is missing (e.g. the window isn't currently in its workspace's view).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -200,27 +200,31 @@ fn workspace_outputs(workspaces: &[WorkspaceRaw]) -> HashMap<u64, String> {
         .collect()
 }
 
-/// Resolve a window's absolute logical-pixel rect from its tile layout and its workspace's
-/// output. Returns a zero-sized rect at `(0, 0)` when any piece is missing (the window isn't
+/// `(at, size)`, matching [`WmWindow`]/[`ActiveWindow`]'s own geometry fields.
+type ResolvedGeometry = (Option<(i32, i32)>, Option<(u32, u32)>);
+
+/// Resolve a window's absolute logical-pixel position from its tile layout and its workspace's
+/// output. The tile size is always known (Niri reports it unconditionally), but the position
+/// is `None` when either piece needed to place it absolutely is missing: the window isn't
 /// currently in its workspace's view, its workspace has no output, or the output has no
-/// logical geometry) — callers treat a zero-sized rect as "position unavailable".
+/// logical geometry.
 fn resolve_rect(
     layout: &WindowLayoutRaw,
     output_name: Option<&str>,
     outputs: &HashMap<String, OutputRaw>,
-) -> ((i32, i32), (u32, u32)) {
-    let size = (
+) -> ResolvedGeometry {
+    let size = Some((
         layout.tile_size.0.round().max(0.0) as u32,
         layout.tile_size.1.round().max(0.0) as u32,
-    );
+    ));
     let (Some((vx, vy)), Some(name)) = (layout.tile_pos_in_workspace_view, output_name) else {
-        return ((0, 0), (0, 0));
+        return (None, size);
     };
     let Some(logical) = outputs.get(name).and_then(|o| o.logical.as_ref()) else {
-        return ((0, 0), (0, 0));
+        return (None, size);
     };
     (
-        (vx.round() as i32 + logical.x, vy.round() as i32 + logical.y),
+        Some((vx.round() as i32 + logical.x, vy.round() as i32 + logical.y)),
         size,
     )
 }
@@ -268,9 +272,9 @@ async fn clients() -> Result<Vec<WmWindow>> {
                 workspace_id: w.workspace_id.map(|id| id as i64).unwrap_or(-1),
                 mapped: true,
                 // Unresolved geometry means we can't place this window; hide it from
-                // hit-testing rather than reporting a bogus origin-anchored zero rect as
+                // hit-testing rather than reporting a window with an unknown location as
                 // clickable.
-                hidden: size.0 == 0 || size.1 == 0,
+                hidden: at.is_none(),
             }
         })
         .collect())
@@ -436,30 +440,31 @@ mod tests {
             serde_json::from_value(sample_window()["layout"].clone()).unwrap();
         let outputs: HashMap<String, OutputRaw> = serde_json::from_value(sample_outputs()).unwrap();
         let (at, size) = resolve_rect(&layout, Some("eDP-1"), &outputs);
-        assert_eq!(at, (1930, 20));
-        assert_eq!(size, (800, 600));
+        assert_eq!(at, Some((1930, 20)));
+        assert_eq!(size, Some((800, 600)));
     }
 
     #[test]
-    fn resolve_rect_is_zero_sized_when_tile_pos_is_unset() {
+    fn resolve_rect_position_is_none_when_tile_pos_is_unset() {
         let layout = WindowLayoutRaw {
             tile_size: (800.0, 600.0),
             tile_pos_in_workspace_view: None,
         };
         let outputs: HashMap<String, OutputRaw> = serde_json::from_value(sample_outputs()).unwrap();
         let (at, size) = resolve_rect(&layout, Some("eDP-1"), &outputs);
-        assert_eq!(at, (0, 0));
-        assert_eq!(size, (0, 0));
+        // The tile size is still reported even when the position can't be resolved.
+        assert_eq!(at, None);
+        assert_eq!(size, Some((800, 600)));
     }
 
     #[test]
-    fn resolve_rect_is_zero_sized_when_output_is_unknown() {
+    fn resolve_rect_position_is_none_when_output_is_unknown() {
         let layout: WindowLayoutRaw =
             serde_json::from_value(sample_window()["layout"].clone()).unwrap();
         let outputs: HashMap<String, OutputRaw> = HashMap::new();
         let (at, size) = resolve_rect(&layout, Some("eDP-1"), &outputs);
-        assert_eq!(at, (0, 0));
-        assert_eq!(size, (0, 0));
+        assert_eq!(at, None);
+        assert_eq!(size, Some((800, 600)));
     }
 
     #[test]
@@ -523,8 +528,8 @@ mod tests {
         assert_eq!(win.title, "term");
         assert_eq!(win.class, "kitty");
         assert_eq!(win.monitor, "eDP-1");
-        assert_eq!(win.at, (1930, 20));
-        assert_eq!(win.size, (800, 600));
+        assert_eq!(win.at, Some((1930, 20)));
+        assert_eq!(win.size, Some((800, 600)));
         server.await.unwrap();
     }
 
@@ -556,11 +561,12 @@ mod tests {
         let list = clients().await.unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "7");
-        assert_eq!(list[0].at, (1930, 20));
-        assert_eq!(list[0].size, (800, 600));
+        assert_eq!(list[0].at, Some((1930, 20)));
+        assert_eq!(list[0].size, Some((800, 600)));
         assert!(!list[0].hidden);
         assert_eq!(list[1].id, "9");
-        assert_eq!(list[1].size, (0, 0));
+        assert_eq!(list[1].at, None);
+        assert_eq!(list[1].size, Some((100, 100)));
         assert!(list[1].hidden);
         assert!(list.iter().all(|w| w.mapped));
         server.await.unwrap();

@@ -78,7 +78,7 @@ struct DoctorState {
     invalid_sinks: Vec<String>,
     config_toml: Option<String>,
 
-    // Window-manager IPC (Hyprland / Sway / Niri)
+    // Window-manager IPC (Hyprland / Sway / Niri / generic wlr-foreign-toplevel)
     compositor: Option<CompositorProbe>,
 
     // wlr-screencopy
@@ -190,8 +190,8 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
 
     let config_toml = toml::to_string_pretty(&config).ok();
 
-    // ---- Compositor (Hyprland / Sway / Niri) IPC -------------------------------------
-    let compositor = match crate::wm::detect() {
+    // ---- Compositor (Hyprland / Sway / Niri / generic wlr-foreign-toplevel) IPC ----------
+    let compositor = match crate::wm::detect().await {
         Some(backend) => {
             let socket = backend.socket_path().map_err(|e| format!("{e:#}"));
             let ping = backend.focused_output().await.map_err(|e| format!("{e:#}"));

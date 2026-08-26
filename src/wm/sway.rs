@@ -303,8 +303,8 @@ async fn active_window() -> Result<ActiveWindow> {
     Ok(ActiveWindow {
         title,
         class,
-        at,
-        size,
+        at: Some(at),
+        size: Some(size),
         monitor: found.output,
     })
 }
@@ -332,8 +332,8 @@ async fn clients() -> Result<Vec<WmWindow>> {
                 id,
                 title,
                 class,
-                at,
-                size,
+                at: Some(at),
+                size: Some(size),
                 monitor: f.output,
                 workspace_id: f.workspace_id,
                 mapped: true,
@@ -601,8 +601,8 @@ mod tests {
         // Floating before tiled (see module doc); IDs and geometry survive the round-trip.
         assert_eq!(list[0].title, "Mozilla Firefox");
         assert_eq!(list[0].id, "2");
-        assert_eq!(list[0].at, (100, 100));
-        assert_eq!(list[0].size, (400, 300));
+        assert_eq!(list[0].at, Some((100, 100)));
+        assert_eq!(list[0].size, Some((400, 300)));
         assert_eq!(list[1].title, "term");
         assert_eq!(list[1].id, "1");
         assert_eq!(list[1].workspace_id, 42);

@@ -69,8 +69,11 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
   `zwlr_screencopy_manager_v1` protocol — Hyprland is the primary target;
   sway, river, and other wlroots compositors should also work.
   `--window`, `--focused`, and the interactive selector's Window mode
-  additionally need Hyprland's, Sway's, or Niri's own IPC (see below);
-  they're unavailable on other wlroots compositors.
+  additionally need window-manager IPC (see below): Hyprland's, Sway's, or
+  Niri's own socket, or — best-effort, on any other compositor advertising
+  `zwlr_foreign_toplevel_manager_v1` (river, labwc, …) — `--focused` and
+  follow-focus only. That generic protocol never reports window geometry, so
+  `--window` and Window mode's click-to-pick stay Hyprland/Sway/Niri-only.
 - GTK4 stack at runtime.
   - Arch Linux:
     ```sh
@@ -89,7 +92,9 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
 
 No external CLI helpers are invoked: `hyprctl`, `swaymsg`, `niri msg`, `grim`,
 `slurp`, and `wl-copy` are **not** required. Hyprland, Sway, and Niri IPC are
-spoken directly over their respective command sockets, Wayland capture goes through
+spoken directly over their respective command sockets (with
+`zwlr_foreign_toplevel_manager_v1` as a generic fallback on other wlroots
+compositors), Wayland capture goes through
 `zwlr_screencopy_manager_v1`, and clipboard writes use `wl-clipboard-rs`.
 One-shot invocations briefly fork a detached child to keep serving the
 Wayland selection after the CLI exits — the daemon publishes in-process and
@@ -182,10 +187,12 @@ snypr screenshot --output DP-1 --to clipboard
 # selection (middle-click paste). Per-sink form: --to clipboard=primary.
 snypr screenshot --full --to clipboard --clipboard-type both
 
-# Focused monitor, queried over Hyprland, Sway, or Niri IPC.
+# Focused monitor, queried over Hyprland/Sway/Niri IPC, or generic
+# wlr-foreign-toplevel on other compositors that advertise it.
 snypr screenshot --focused
 
-# Currently active window, queried over Hyprland, Sway, or Niri IPC.
+# Currently active window, queried over Hyprland, Sway, or Niri IPC (needs
+# real geometry, so unavailable on the generic wlr-foreign-toplevel backend).
 snypr screenshot --window
 
 # Explicit region (logical pixels): X,Y,WxH.

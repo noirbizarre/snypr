@@ -107,7 +107,10 @@ os_pipe = "1"
 # own socket (see src/wm/) to avoid the upstream `hyprland` crate's hard-coded /tmp/hypr path
 # and panic-on-error semantics (and, for Niri, to avoid the `niri-ipc` dependency for a handful
 # of hand-rolled request/response types), and to keep the toolkit-free build free of extra
-# dependencies.
+# dependencies. A fourth backend, src/wm/foreign_toplevel.rs, covers any other wlroots
+# compositor (river, labwc, …) that advertises the generic
+# `zwlr_foreign_toplevel_manager_v1` protocol instead — reusing the same Wayland deps as the
+# capture backend above, no extra dependency either.
 
 # GTK stack (optional via `ui` feature)
 gtk4 = { version = "0.11", features = ["v4_14"], optional = true }
