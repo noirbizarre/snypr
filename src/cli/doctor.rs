@@ -78,7 +78,7 @@ struct DoctorState {
     invalid_sinks: Vec<String>,
     config_toml: Option<String>,
 
-    // Window-manager IPC (Hyprland / Sway)
+    // Window-manager IPC (Hyprland / Sway / Niri)
     compositor: Option<CompositorProbe>,
 
     // wlr-screencopy
@@ -136,14 +136,15 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
             false,
         ),
         (
-            // Neither this nor SWAYSOCK is universally required: exactly one is set when
-            // running under its respective compositor, and both are absent on other wlroots
+            // None of these three is universally required: exactly one is set when running
+            // under its respective compositor, and all three are absent on other wlroots
             // compositors (river, wayfire, …), which is a supported (if more limited) state.
             "HYPRLAND_INSTANCE_SIGNATURE",
             std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok(),
             false,
         ),
         ("SWAYSOCK", std::env::var("SWAYSOCK").ok(), false),
+        ("NIRI_SOCKET", std::env::var("NIRI_SOCKET").ok(), false),
         ("SNYPR_CONFIG", std::env::var("SNYPR_CONFIG").ok(), false),
     ];
 
@@ -189,7 +190,7 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
 
     let config_toml = toml::to_string_pretty(&config).ok();
 
-    // ---- Compositor (Hyprland / Sway) IPC -------------------------------------
+    // ---- Compositor (Hyprland / Sway / Niri) IPC -------------------------------------
     let compositor = match crate::wm::detect() {
         Some(backend) => {
             let socket = backend.socket_path().map_err(|e| format!("{e:#}"));
@@ -432,7 +433,7 @@ fn render(state: &DoctorState) -> String {
     }
     out.push('\n');
 
-    // ---- Compositor (Hyprland / Sway) IPC -------------------------------------
+    // ---- Compositor (Hyprland / Sway / Niri) IPC -------------------------------------
     let _ = writeln!(out, "### Compositor");
     match &state.compositor {
         Some(probe) => {
@@ -466,7 +467,7 @@ fn render(state: &DoctorState) -> String {
             bump(Status::Warn);
             let _ = writeln!(
                 out,
-                "- Backend: none detected (HYPRLAND_INSTANCE_SIGNATURE / SWAYSOCK not set) [WARN]"
+                "- Backend: none detected (HYPRLAND_INSTANCE_SIGNATURE / SWAYSOCK / NIRI_SOCKET not set) [WARN]"
             );
             let _ = writeln!(
                 out,
@@ -552,6 +553,7 @@ mod tests {
                 ("WAYLAND_DISPLAY", Some("wayland-1".to_owned()), false),
                 ("HYPRLAND_INSTANCE_SIGNATURE", None, false),
                 ("SWAYSOCK", None, false),
+                ("NIRI_SOCKET", None, false),
             ],
             config_source: Some(PathBuf::from("/home/u/.config/snypr/config.toml")),
             config_source_exists: false,
@@ -663,7 +665,7 @@ mod tests {
     /// regression in the `crate::wm::detect()` wiring itself would fail this test too.
     #[tokio::test]
     async fn collect_reports_no_compositor_without_a_detected_backend() {
-        crate::testing::set_compositor_env(None, None);
+        crate::testing::set_compositor_env(None, None, None);
         let state = collect(None).await;
         assert!(state.compositor.is_none());
     }
@@ -674,7 +676,7 @@ mod tests {
     async fn collect_reports_a_detected_sway_backend() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        crate::testing::set_compositor_env(None, Some(&sock));
+        crate::testing::set_compositor_env(None, Some(&sock), None);
         let listener = crate::testing::bind_fake_sway_socket(&sock);
         let outputs = serde_json::json!([{"name": "eDP-1", "focused": true}]);
         let server = tokio::spawn(async move {
@@ -685,6 +687,38 @@ mod tests {
         let state = collect(None).await;
         let probe = state.compositor.expect("a Sway backend was detected");
         assert_eq!(probe.name, "Sway");
+        assert_eq!(probe.socket.unwrap(), sock);
+        assert_eq!(probe.ping.unwrap(), "eDP-1");
+        server.await.unwrap();
+    }
+
+    /// Same, but with a fake Niri IPC server standing in for a live session: `collect()`
+    /// should report the backend's name and a successful socket/ping probe.
+    #[tokio::test]
+    async fn collect_reports_a_detected_niri_backend() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("niri.sock");
+        crate::testing::set_compositor_env(None, None, Some(&sock));
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).await.unwrap();
+            assert_eq!(request_line.trim_end(), "\"FocusedOutput\"");
+            let mut stream = reader.into_inner();
+            stream
+                .write_all(br#"{"Ok":{"FocusedOutput":{"name":"eDP-1","logical":{"x":0,"y":0}}}}"#)
+                .await
+                .unwrap();
+            stream.write_all(b"\n").await.unwrap();
+        });
+
+        let state = collect(None).await;
+        let probe = state.compositor.expect("a Niri backend was detected");
+        assert_eq!(probe.name, "Niri");
         assert_eq!(probe.socket.unwrap(), sock);
         assert_eq!(probe.ping.unwrap(), "eDP-1");
         server.await.unwrap();

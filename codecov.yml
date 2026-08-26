@@ -70,7 +70,7 @@ component_management:
         - src/ui/**
         - src/bridge.rs
     - component_id: wm
-      name: window-manager IPC (Hyprland, Sway)
+      name: window-manager IPC (Hyprland, Sway, Niri)
       paths:
         - src/wm/**
 

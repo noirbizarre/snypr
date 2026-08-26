@@ -609,7 +609,7 @@ mod tests {
     async fn resolve_selection_fails_clearly_without_a_detected_backend(
         #[case] selection: Selection,
     ) {
-        crate::testing::set_compositor_env(None, None);
+        crate::testing::set_compositor_env(None, None, None);
         let ctx = test_ctx().await;
         let err = resolve_selection(selection, false, None, &[], &ctx)
             .await
@@ -626,7 +626,7 @@ mod tests {
     async fn resolve_selection_window_resolves_via_the_detected_backend() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        crate::testing::set_compositor_env(None, Some(&sock));
+        crate::testing::set_compositor_env(None, Some(&sock), None);
         let listener = crate::testing::bind_fake_sway_socket(&sock);
         let tree = serde_json::json!({
             "type": "root",
@@ -674,7 +674,7 @@ mod tests {
     async fn resolve_selection_focused_resolves_via_the_detected_backend() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("sway.sock");
-        crate::testing::set_compositor_env(None, Some(&sock));
+        crate::testing::set_compositor_env(None, Some(&sock), None);
         let listener = crate::testing::bind_fake_sway_socket(&sock);
         let outputs = serde_json::json!([
             {"name": "eDP-1", "focused": false},
