@@ -26,3 +26,65 @@ pub async fn test_ctx_with_sinks(default_sinks: &[&str]) -> Ctx {
 pub async fn test_ctx() -> Ctx {
     test_ctx_with_sinks(&[]).await
 }
+
+/// Bind a Unix socket at `sock` for a fake Sway IPC server. Must be called (and the returned
+/// listener handed to [`serve_fake_sway_reply`]) *before* the code under test connects, so the
+/// socket file exists by the time it tries — mirrors the pattern in `crate::wm::sway`'s own
+/// tests.
+pub fn bind_fake_sway_socket(sock: &std::path::Path) -> tokio::net::UnixListener {
+    tokio::net::UnixListener::bind(sock).expect("binding fake Sway socket")
+}
+
+/// Accept one connection on `listener` and reply once with `response`, framed as an i3ipc
+/// message of `msg_type`. Mirrors the wire format in `crate::wm::sway` (`i3-ipc` magic + `u32`
+/// little-endian length + `u32` little-endian type + JSON payload) so callers can exercise
+/// Sway-backed code paths (`crate::wm::detect()` and beyond) end-to-end without a live Sway
+/// session. `msg_type` should be one of `crate::wm::sway::{GET_TREE, GET_OUTPUTS}`.
+pub async fn serve_fake_sway_reply(
+    listener: tokio::net::UnixListener,
+    msg_type: u32,
+    response: &serde_json::Value,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .expect("accepting fake Sway connection");
+    let mut header = [0u8; 14];
+    stream
+        .read_exact(&mut header)
+        .await
+        .expect("reading fake Sway request header");
+    let len = u32::from_le_bytes(header[6..10].try_into().unwrap()) as usize;
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("reading fake Sway request payload");
+    let body = serde_json::to_vec(response).expect("encoding fake Sway response");
+    let mut out = Vec::with_capacity(14 + body.len());
+    out.extend_from_slice(b"i3-ipc");
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&msg_type.to_le_bytes());
+    out.extend_from_slice(&body);
+    stream
+        .write_all(&out)
+        .await
+        .expect("writing fake Sway response");
+}
+
+/// Force a hermetic compositor-detection environment for a test. Removes both env vars by
+/// default; pass `Some(sock)` for `sway_sock` to make `crate::wm::detect()` pick the Sway
+/// backend. Safe because nextest runs every test in its own process.
+pub fn set_compositor_env(hyprland_sig: Option<&str>, sway_sock: Option<&std::path::Path>) {
+    unsafe {
+        match hyprland_sig {
+            Some(v) => std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", v),
+            None => std::env::remove_var("HYPRLAND_INSTANCE_SIGNATURE"),
+        }
+        match sway_sock {
+            Some(v) => std::env::set_var("SWAYSOCK", v),
+            None => std::env::remove_var("SWAYSOCK"),
+        }
+    }
+}

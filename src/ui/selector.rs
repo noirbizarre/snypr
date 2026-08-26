@@ -7,7 +7,8 @@
 //!
 //! A **single** floating bottom-center [`crate::ui::Toolbar`] (mode toggles, cursor toggle, delay
 //! spinner, `Capture` action) is shared across monitors and reparented onto the focused monitor's
-//! window as Hyprland focus changes (see [`crate::ui::toolbar::ToolbarHost`] and [`attach_focus`]).
+//! window as window-manager focus changes (see [`crate::wm`], [`crate::ui::toolbar::ToolbarHost`]
+//! and [`attach_focus`]).
 //! Every monitor still shows the dimming / HUD layer; only the toolbar follows focus.
 //!
 //! Workflow per mode:
@@ -35,12 +36,12 @@ use crate::annotate::select;
 use crate::capture::Selection;
 use crate::capture::region::Rect;
 use crate::context::Ctx;
-use crate::hypr::{self, HyprWindow};
 use crate::i18n::fl;
 use crate::output::OutputMode;
 use crate::ui::toolbar::{
     ModeKind, SELECTOR_MODES, Toolbar, ToolbarAction, ToolbarHost, ToolbarSpec,
 };
+use crate::wm::{self, WmWindow};
 
 /// Marker error indicating the user dismissed the interactive selector
 /// (e.g. pressing Escape). Detected in `main` to exit 0 without logging
@@ -219,9 +220,9 @@ struct MonitorInfo {
     connector: Option<String>,
 }
 
-/// A window picked from the cached Hyprland clients list, carried as the "selected" zone in
-/// Window mode. Stored in compositor logical coordinates so painting can translate to each
-/// per-monitor widget-local space without re-querying Hyprland.
+/// A window picked from the cached window-manager clients list, carried as the "selected" zone
+/// in Window mode. Stored in compositor logical coordinates so painting can translate to each
+/// per-monitor widget-local space without re-querying the backend.
 #[derive(Clone, Debug)]
 struct PickedWindow {
     rect: Rect,
@@ -229,8 +230,8 @@ struct PickedWindow {
     class: String,
 }
 
-impl From<&HyprWindow> for PickedWindow {
-    fn from(w: &HyprWindow) -> Self {
+impl From<&WmWindow> for PickedWindow {
+    fn from(w: &WmWindow) -> Self {
         Self {
             rect: w.rect(),
             title: w.title.clone(),
@@ -361,8 +362,8 @@ type Sender = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<SelectorOutco
 type AreaRegistry = Rc<RefCell<Vec<SelectorOverlay>>>;
 type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 type MonitorList = Rc<RefCell<Vec<MonitorInfo>>>;
-type ClientList = Rc<RefCell<Vec<HyprWindow>>>;
-/// Shared handle to the Hyprland focus-event reader's shutdown channel. Fired on dismiss.
+type ClientList = Rc<RefCell<Vec<WmWindow>>>;
+/// Shared handle to the window-manager focus-event reader's shutdown channel. Fired on dismiss.
 type FocusShutdown = Rc<RefCell<Option<tokio::sync::oneshot::Sender<()>>>>;
 
 fn send_once(tx: &Sender, msg: Result<SelectorOutcome>) {
@@ -409,47 +410,55 @@ fn logical_to_local(monitor_index: usize, rect: &Rect) -> Option<(f32, f32, f32,
     ))
 }
 
-/// Try to snapshot Hyprland's client list. On failure (host isn't Hyprland, socket
+/// Try to snapshot the window manager's client list. On failure (no backend detected, socket
 /// missing, IPC error) we log a warning and return an empty list — Window mode then falls
 /// back to its legacy "capture focused window" behavior via `Selection::Window`.
-async fn fetch_clients_or_warn() -> Vec<HyprWindow> {
-    match hypr::clients().await {
+async fn fetch_clients_or_warn() -> Vec<WmWindow> {
+    let Some(backend) = wm::detect() else {
+        return Vec::new();
+    };
+    match backend.clients().await {
         Ok(list) => list,
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                "could not fetch Hyprland clients; Window mode will fall back to focused-window capture"
+                backend = backend.name(),
+                "could not fetch window list; Window mode will fall back to focused-window capture"
             );
             Vec::new()
         }
     }
 }
 
-/// Try to read Hyprland's focused monitor name. Used to pre-select the current monitor
-/// in Screen mode. Failure (non-Hyprland host, IPC error, no focused monitor) is silently
-/// dropped so the selector still opens with the legacy "click to pick" UX.
+/// Try to read the window manager's focused output name. Used to pre-select the current
+/// monitor in Screen mode. Failure (no backend detected, IPC error, no focused output) is
+/// silently dropped so the selector still opens with the legacy "click to pick" UX.
 async fn fetch_focused_monitor_or_log() -> Option<String> {
-    match hypr::focused_monitor().await {
+    let backend = wm::detect()?;
+    match backend.focused_output().await {
         Ok(name) => Some(name),
         Err(err) => {
             tracing::debug!(
                 error = %err,
-                "could not determine focused Hyprland monitor; selector will open with no monitor pre-selected"
+                backend = backend.name(),
+                "could not determine focused output; selector will open with no monitor pre-selected"
             );
             None
         }
     }
 }
 
-/// Try to read Hyprland's active window. Used to pre-select the current window in Window
-/// mode. Failure (non-Hyprland host, IPC error, no focused client) is silently dropped.
-async fn fetch_active_window_or_log() -> Option<hypr::ActiveWindow> {
-    match hypr::active_window().await {
+/// Try to read the window manager's active window. Used to pre-select the current window in
+/// Window mode. Failure (no backend detected, IPC error, no focused client) is silently dropped.
+async fn fetch_active_window_or_log() -> Option<wm::ActiveWindow> {
+    let backend = wm::detect()?;
+    match backend.active_window().await {
         Ok(aw) => Some(aw),
         Err(err) => {
             tracing::debug!(
                 error = %err,
-                "could not determine active Hyprland window; selector will open with no window pre-selected"
+                backend = backend.name(),
+                "could not determine active window; selector will open with no window pre-selected"
             );
             None
         }
@@ -461,9 +470,9 @@ fn run_gtk(
     tx: tokio::sync::oneshot::Sender<Result<SelectorOutcome>>,
     initial_cursor: bool,
     initial_delay: std::time::Duration,
-    clients: Vec<HyprWindow>,
+    clients: Vec<WmWindow>,
     focused_monitor: Option<String>,
-    focused_window: Option<hypr::ActiveWindow>,
+    focused_window: Option<wm::ActiveWindow>,
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
     initial_mode: ModeKind,
@@ -527,9 +536,9 @@ fn build_overlays(
     initial_cursor: bool,
     initial_delay: std::time::Duration,
     quit_target: glib::WeakRef<gtk4::Application>,
-    clients: Vec<HyprWindow>,
+    clients: Vec<WmWindow>,
     focused_monitor: Option<String>,
-    focused_window: Option<hypr::ActiveWindow>,
+    focused_window: Option<wm::ActiveWindow>,
     allow_annotate: bool,
     style: crate::config::SelectorStyleConfig,
     initial_mode: ModeKind,
@@ -558,8 +567,8 @@ fn build_overlays(
     }
 
     // Pre-select the focused monitor (Screen mode default) so users can hit Enter without
-    // an extra click. Silent fallback to `None` if Hyprland didn't report a focused
-    // monitor or the connector doesn't match any GDK monitor.
+    // an extra click. Silent fallback to `None` if the window manager didn't report a
+    // focused monitor or the connector doesn't match any GDK monitor.
     let selected_monitor = focused_monitor.as_deref().and_then(|name| {
         monitor_infos
             .iter()
@@ -644,19 +653,21 @@ fn build_overlays(
         w.present();
     }
 
-    // Live follow-focus: subscribe to Hyprland focus events and reparent the toolbar as the
-    // focused monitor changes. Best-effort — a non-Hyprland host leaves the toolbar in place.
+    // Live follow-focus: subscribe to window-manager focus events and reparent the toolbar as
+    // the focused monitor changes. Best-effort — a host with no detected backend leaves the
+    // toolbar in place.
     let (focus_tx, focus_rx) = tokio::sync::oneshot::channel();
     *shared.focus_shutdown.borrow_mut() = Some(focus_tx);
-    let focus_watch = crate::hypr::subscribe_focus(&handle, focus_rx);
+    let focus_watch = crate::wm::subscribe_focus(&handle, focus_rx);
     attach_focus(&shared, focus_watch);
 
     Ok(())
 }
 
-/// Wire the Hyprland focus subscription into the GTK main context: reparent the single shared
-/// toolbar onto the newly focused monitor's window on each focus change. Runs on the GLib main
-/// thread (the toolbar is `!Send`); only connector `String`s cross from the tokio reader task.
+/// Wire the window-manager focus subscription into the GTK main context: reparent the single
+/// shared toolbar onto the newly focused monitor's window on each focus change. Runs on the
+/// GLib main thread (the toolbar is `!Send`); only connector `String`s cross from the tokio
+/// reader task.
 fn attach_focus(shared: &SharedState, mut rx: tokio::sync::watch::Receiver<Option<String>>) {
     let host = shared.host.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -841,10 +852,10 @@ struct SharedState {
     /// (`pick_region_in_app`) so the caller's app keeps running after the selector resolves.
     app_weak: glib::WeakRef<gtk4::Application>,
     /// The single shared toolbar plus the per-monitor overlay registry it's reparented between
-    /// as Hyprland focus changes. Only the focused monitor shows the toolbar; every monitor
-    /// still shows the dim veil / HUD.
+    /// as window-manager focus changes. Only the focused monitor shows the toolbar; every
+    /// monitor still shows the dim veil / HUD.
     host: Rc<ToolbarHost>,
-    /// Fires on dismiss to stop the Hyprland focus-event reader task.
+    /// Fires on dismiss to stop the window-manager focus-event reader task.
     focus_shutdown: FocusShutdown,
     /// `glib::SourceId` of the in-flight 1-second countdown timer, if any. Held so that
     /// pressing Escape during a pre-capture delay cancels both the timer and the eventual
@@ -856,9 +867,9 @@ struct SharedState {
     /// Save flow so Shift+click / Shift+Enter just save the snapshot instead of redundantly
     /// opening another annotation editor.
     allow_annotate: bool,
-    /// Snapshot of Hyprland's client list at selector start, used by Window mode for
-    /// cursor-based hit-testing. Empty when the query failed or the host isn't Hyprland — in
-    /// that case Window mode falls back to the legacy "capture focused window" behavior.
+    /// Snapshot of the window manager's client list at selector start, used by Window mode
+    /// for cursor-based hit-testing. Empty when the query failed or no backend was detected —
+    /// in that case Window mode falls back to the legacy "capture focused window" behavior.
     clients: ClientList,
 }
 
@@ -1023,8 +1034,8 @@ fn install_drag(
 ///
 /// - `Screen`: `MotionController::enter/leave` updates `hover_monitor`. A click sets
 ///   `selected_monitor` so the picked screen stays outlined after the pointer moves.
-/// - `Window`: `MotionController::motion` hit-tests the cached Hyprland clients list to update
-///   `hover_window`. A click promotes the hovered window into `selected_window`.
+/// - `Window`: `MotionController::motion` hit-tests the cached window-manager clients list to
+///   update `hover_window`. A click promotes the hovered window into `selected_window`.
 /// - `Full`: clicking simply triggers a redraw — `Full` is implicitly the whole desktop, so
 ///   there's nothing to "select"; validation still goes through Enter / Capture / Shift+Enter
 ///   / Shift+click on the Capture button.
@@ -1092,7 +1103,7 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
                     let Some((lx, ly)) = local_to_logical(monitor_index, x, y) else {
                         return;
                     };
-                    let next = hypr::window_at(&clients.borrow(), lx, ly).map(PickedWindow::from);
+                    let next = wm::window_at(&clients.borrow(), lx, ly).map(PickedWindow::from);
                     let mut s = selection.borrow_mut();
                     let changed = match (&s.hover_window, &next) {
                         (Some(a), Some(b)) => a.rect != b.rect,
@@ -1130,7 +1141,7 @@ fn install_hover_and_click(area: &SelectorOverlay, monitor_index: usize, shared:
                 }
                 ModeKind::Window => {
                     let picked = local_to_logical(monitor_index, x, y).and_then(|(lx, ly)| {
-                        hypr::window_at(&clients.borrow(), lx, ly).map(PickedWindow::from)
+                        wm::window_at(&clients.borrow(), lx, ly).map(PickedWindow::from)
                     });
                     if picked.is_some() {
                         s.selected_window = picked;
@@ -1304,9 +1315,10 @@ fn blank_and_dismiss(
 ///   (the monitor that hosted the Enter / Capture button) when nothing was clicked yet so
 ///   keyboard-only use keeps working.
 /// - `Window`: prefers the explicitly-clicked `selected_window` (resolved locally via the
-///   cached Hyprland clients list → `Selection::Region(rect)`). Falls back to
+///   cached window-manager clients list → `Selection::Region(rect)`). Falls back to
 ///   `Selection::Window` (focused window) so users that never moved the mouse still get a
-///   sensible capture — and so we degrade gracefully when the Hyprland client query failed.
+///   sensible capture — and so we degrade gracefully when the client query failed or no
+///   backend was detected.
 /// - `Full`: returns `Selection::Full`.
 fn resolve_selection(
     state: &SharedSelection,
@@ -1466,9 +1478,9 @@ fn cancel(
     }
 }
 
-/// Stop the Hyprland focus-event reader so its `.socket2.sock` connection closes promptly
-/// (important for the embedded `pick_region_in_app` draw→save loop, which would otherwise leak a
-/// connection per cycle). Idempotent: the sender is taken on first call.
+/// Stop the window-manager focus-event reader so its connection closes promptly (important for
+/// the embedded `pick_region_in_app` draw→save loop, which would otherwise leak a connection per
+/// cycle). Idempotent: the sender is taken on first call.
 fn stop_focus(focus_shutdown: &FocusShutdown) {
     if let Some(tx) = focus_shutdown.borrow_mut().take() {
         let _ = tx.send(());
@@ -1995,5 +2007,135 @@ mod tests {
         let r = rect();
         assert_eq!(region_cursor_at(r, 60.0, 60.0), Some("move"));
         assert_eq!(region_cursor_at(r, 500.0, 500.0), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_helpers_degrade_gracefully_without_a_detected_backend() {
+        crate::testing::set_compositor_env(None, None);
+        assert!(fetch_clients_or_warn().await.is_empty());
+        assert_eq!(fetch_focused_monitor_or_log().await, None);
+        assert!(fetch_active_window_or_log().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_helpers_degrade_gracefully_when_the_backend_is_unreachable() {
+        // A detected-but-unreachable backend (nothing listening on $SWAYSOCK) exercises the
+        // `Err` / log branch of each helper, as opposed to the "no backend at all" case above.
+        let dir = tempfile::tempdir().unwrap();
+        crate::testing::set_compositor_env(None, Some(&dir.path().join("nothing-here.sock")));
+        assert!(fetch_clients_or_warn().await.is_empty());
+        assert_eq!(fetch_focused_monitor_or_log().await, None);
+        assert!(fetch_active_window_or_log().await.is_none());
+    }
+
+    #[test]
+    fn picked_window_from_copies_rect_title_and_class() {
+        let w = WmWindow {
+            id: "1".into(),
+            title: "term".into(),
+            class: "kitty".into(),
+            at: (5, 6),
+            size: (7, 8),
+            monitor: "eDP-1".into(),
+            workspace_id: 1,
+            mapped: true,
+            hidden: false,
+        };
+        let picked = PickedWindow::from(&w);
+        assert_eq!(picked.rect, w.rect());
+        assert_eq!(picked.title, "term");
+        assert_eq!(picked.class, "kitty");
+    }
+
+    #[tokio::test]
+    async fn fetch_clients_or_warn_returns_the_backends_client_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let tree = serde_json::json!({
+            "type": "root",
+            "nodes": [{
+                "type": "output",
+                "name": "eDP-1",
+                "nodes": [{
+                    "type": "workspace",
+                    "id": 1,
+                    "nodes": [{
+                        "type": "con",
+                        "id": 1,
+                        "pid": 111,
+                        "app_id": "kitty",
+                        "name": "term",
+                        "focused": true,
+                        "visible": true,
+                        "rect": {"x": 0, "y": 0, "width": 100, "height": 100}
+                    }]
+                }]
+            }]
+        });
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_TREE, &tree).await;
+        });
+
+        let clients = fetch_clients_or_warn().await;
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].title, "term");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_focused_monitor_or_log_returns_the_backends_focused_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let outputs = serde_json::json!([{"name": "DP-1", "focused": true}]);
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_OUTPUTS, &outputs)
+                .await;
+        });
+
+        assert_eq!(
+            fetch_focused_monitor_or_log().await,
+            Some("DP-1".to_owned())
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_active_window_or_log_returns_the_backends_active_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let tree = serde_json::json!({
+            "type": "root",
+            "nodes": [{
+                "type": "output",
+                "name": "eDP-1",
+                "nodes": [{
+                    "type": "workspace",
+                    "id": 1,
+                    "nodes": [{
+                        "type": "con",
+                        "id": 1,
+                        "pid": 111,
+                        "app_id": "kitty",
+                        "name": "term",
+                        "focused": true,
+                        "visible": true,
+                        "rect": {"x": 0, "y": 0, "width": 100, "height": 100}
+                    }]
+                }]
+            }]
+        });
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_TREE, &tree).await;
+        });
+
+        let win = fetch_active_window_or_log().await.expect("active window");
+        assert_eq!(win.title, "term");
+        server.await.unwrap();
     }
 }

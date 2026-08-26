@@ -1956,19 +1956,20 @@ fn refit_color_dialog(dlg: &gtk4::Window) {
 }
 
 /// One per-monitor host slot: the overlay (and its window) that can parent the single shared
-/// toolbar, plus the identity needed to target it from a Hyprland focus event.
+/// toolbar, plus the identity needed to target it from a window-manager focus event.
 struct ToolbarSlot {
     /// GDK monitor index (`display.monitors()` position). Surface code maps this back to its own
     /// per-monitor registries (selector `MonitorInfo`, overlay `MonitorCanvas`).
     index: usize,
-    /// GDK `Monitor::connector()` (e.g. `DP-1`), matched against Hyprland's focused-monitor name.
+    /// GDK `Monitor::connector()` (e.g. `DP-1`), matched against the window manager's
+    /// focused-output name (see `crate::wm`).
     connector: Option<String>,
     overlay: gtk4::Overlay,
     window: gtk4::ApplicationWindow,
 }
 
 /// Tracks which per-monitor window currently hosts the **single** shared [`Toolbar`] and moves
-/// it between monitors as Hyprland focus changes.
+/// it between monitors as window-manager focus changes.
 ///
 /// Snypr keeps one fullscreen layer-shell window per monitor (for dimming / canvas / capture),
 /// but only one toolbar — on the focused monitor. Reparenting a GTK widget means
@@ -2037,7 +2038,7 @@ impl ToolbarHost {
         self.move_to_slot(&slots, target);
     }
 
-    /// Move the toolbar to the slot matching Hyprland connector `name`.
+    /// Move the toolbar to the slot matching connector `name`.
     ///
     /// Live (focus-driven) behavior is best-effort: a name with no matching slot leaves the
     /// toolbar where it is, rather than yanking it to an arbitrary monitor (e.g. when focus lands

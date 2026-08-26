@@ -1,9 +1,9 @@
 //! `doctor` subcommand — print a copy-pasteable Markdown diagnostic report.
 //!
 //! Collects version info, runtime environment, configuration state and live capability
-//! probes (Hyprland IPC, wlr-screencopy outputs, daemon socket Ping), then writes a single
-//! Markdown blob to stdout. All headings are level 3 (`###`) so the output drops cleanly
-//! under a user-supplied level-2 heading in issues and PRs.
+//! probes (window-manager IPC, wlr-screencopy outputs, daemon socket Ping), then writes a
+//! single Markdown blob to stdout. All headings are level 3 (`###`) so the output drops
+//! cleanly under a user-supplied level-2 heading in issues and PRs.
 //!
 //! Live probes are best-effort: failures become `FAIL` / `WARN` lines in the report.
 //! `doctor` always exits with status `0`, even when checks fail — its purpose is
@@ -43,6 +43,13 @@ impl Status {
     }
 }
 
+/// Live probe results for whichever [`crate::wm::WmBackend`] `crate::wm::detect()` found.
+struct CompositorProbe {
+    name: &'static str,
+    socket: Result<PathBuf, String>,
+    ping: Result<String, String>,
+}
+
 /// Snapshot of everything `render` needs. Built by the async collector; passed to a pure
 /// formatter so the rendering logic can be unit-tested without touching the system.
 struct DoctorState {
@@ -71,9 +78,8 @@ struct DoctorState {
     invalid_sinks: Vec<String>,
     config_toml: Option<String>,
 
-    // Hyprland
-    hypr_socket: Result<PathBuf, String>,
-    hypr_ping: Result<String, String>,
+    // Window-manager IPC (Hyprland / Sway)
+    compositor: Option<CompositorProbe>,
 
     // wlr-screencopy
     wlr_init: Result<(), String>,
@@ -130,10 +136,14 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
             false,
         ),
         (
+            // Neither this nor SWAYSOCK is universally required: exactly one is set when
+            // running under its respective compositor, and both are absent on other wlroots
+            // compositors (river, wayfire, …), which is a supported (if more limited) state.
             "HYPRLAND_INSTANCE_SIGNATURE",
             std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok(),
-            true,
+            false,
         ),
+        ("SWAYSOCK", std::env::var("SWAYSOCK").ok(), false),
         ("SNYPR_CONFIG", std::env::var("SNYPR_CONFIG").ok(), false),
     ];
 
@@ -179,11 +189,19 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
 
     let config_toml = toml::to_string_pretty(&config).ok();
 
-    // ---- Hyprland ------------------------------------------------------------
-    let hypr_socket = crate::hypr::socket_path().map_err(|e| format!("{e:#}"));
-    let hypr_ping = crate::hypr::focused_monitor()
-        .await
-        .map_err(|e| format!("{e:#}"));
+    // ---- Compositor (Hyprland / Sway) IPC -------------------------------------
+    let compositor = match crate::wm::detect() {
+        Some(backend) => {
+            let socket = backend.socket_path().map_err(|e| format!("{e:#}"));
+            let ping = backend.focused_output().await.map_err(|e| format!("{e:#}"));
+            Some(CompositorProbe {
+                name: backend.name(),
+                socket,
+                ping,
+            })
+        }
+        None => None,
+    };
 
     // ---- wlr-screencopy ------------------------------------------------------
     let (wlr_init, wlr_outputs) = match crate::capture::wlr::WlrCapturer::new() {
@@ -230,8 +248,7 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
         parsed_sinks,
         invalid_sinks,
         config_toml,
-        hypr_socket,
-        hypr_ping,
+        compositor,
         wlr_init,
         wlr_outputs,
         daemon_socket,
@@ -415,26 +432,46 @@ fn render(state: &DoctorState) -> String {
     }
     out.push('\n');
 
-    // ---- Hyprland ------------------------------------------------------------
-    let _ = writeln!(out, "### Hyprland");
-    match &state.hypr_socket {
-        Ok(p) => {
-            bump(Status::Ok);
-            let _ = writeln!(out, "- Socket path: {} [OK]", tilde(p));
+    // ---- Compositor (Hyprland / Sway) IPC -------------------------------------
+    let _ = writeln!(out, "### Compositor");
+    match &state.compositor {
+        Some(probe) => {
+            let _ = writeln!(out, "- Backend: {}", probe.name);
+            match &probe.socket {
+                Ok(p) => {
+                    bump(Status::Ok);
+                    let _ = writeln!(out, "- Socket path: {} [OK]", tilde(p));
+                }
+                Err(e) => {
+                    bump(Status::Fail);
+                    let _ = writeln!(out, "- Socket path: FAIL: {e} [FAIL]");
+                }
+            }
+            match &probe.ping {
+                Ok(name) => {
+                    bump(Status::Ok);
+                    let _ = writeln!(out, "- IPC ping (`focused_output`): OK ({name}) [OK]");
+                }
+                Err(e) => {
+                    bump(Status::Fail);
+                    let _ = writeln!(out, "- IPC ping (`focused_output`): FAIL: {e} [FAIL]");
+                }
+            }
         }
-        Err(e) => {
-            bump(Status::Fail);
-            let _ = writeln!(out, "- Socket path: FAIL: {e} [FAIL]");
-        }
-    }
-    match &state.hypr_ping {
-        Ok(name) => {
-            bump(Status::Ok);
-            let _ = writeln!(out, "- IPC ping (`focused_monitor`): OK ({name}) [OK]");
-        }
-        Err(e) => {
-            bump(Status::Fail);
-            let _ = writeln!(out, "- IPC ping (`focused_monitor`): FAIL: {e} [FAIL]");
+        None => {
+            // No backend detected is the common case on river, wayfire, and other wlroots
+            // compositors without a window-manager IPC integration — report as WARN, not
+            // FAIL: `--window`/`--focused`/selector Window-mode won't work, but the install
+            // isn't broken.
+            bump(Status::Warn);
+            let _ = writeln!(
+                out,
+                "- Backend: none detected (HYPRLAND_INSTANCE_SIGNATURE / SWAYSOCK not set) [WARN]"
+            );
+            let _ = writeln!(
+                out,
+                "  `--window`, `--focused`, and the selector's Window mode click-to-pick will not work."
+            );
         }
     }
     out.push('\n');
@@ -513,7 +550,8 @@ mod tests {
             arch: "x86_64",
             env: vec![
                 ("WAYLAND_DISPLAY", Some("wayland-1".to_owned()), false),
-                ("HYPRLAND_INSTANCE_SIGNATURE", None, true),
+                ("HYPRLAND_INSTANCE_SIGNATURE", None, false),
+                ("SWAYSOCK", None, false),
             ],
             config_source: Some(PathBuf::from("/home/u/.config/snypr/config.toml")),
             config_source_exists: false,
@@ -527,8 +565,11 @@ mod tests {
             parsed_sinks: vec!["File(None)".to_owned()],
             invalid_sinks: vec![],
             config_toml: toml::to_string_pretty(&config).ok(),
-            hypr_socket: Err("HYPRLAND_INSTANCE_SIGNATURE is not set".to_owned()),
-            hypr_ping: Err("no compositor".to_owned()),
+            compositor: Some(CompositorProbe {
+                name: "Hyprland",
+                socket: Err("HYPRLAND_INSTANCE_SIGNATURE is not set".to_owned()),
+                ping: Err("no compositor".to_owned()),
+            }),
             wlr_init: Ok(()),
             wlr_outputs: Ok(vec![("DP-1".to_owned(), 2560, 1440)]),
             daemon_socket: PathBuf::from("/run/user/1000/snypr.sock"),
@@ -543,7 +584,7 @@ mod tests {
             "### Version",
             "### Environment",
             "### Configuration",
-            "### Hyprland",
+            "### Compositor",
             "### Wayland capture (wlr-screencopy)",
             "### Daemon",
             "### Summary",
@@ -578,7 +619,7 @@ mod tests {
     #[test]
     fn report_summary_counts_statuses() {
         let report = render(&sample_state());
-        // Sample has at least one FAIL (hypr socket + ping) and one WARN (daemon).
+        // Sample has at least one FAIL (compositor socket + ping) and one WARN (daemon).
         // Just check the line shape, not exact counts (other lines may move around).
         let last = report.lines().last().unwrap();
         assert!(last.contains("OK,"));
@@ -594,9 +635,58 @@ mod tests {
         assert_eq!(status.tag(), expected);
     }
 
+    /// No window-manager backend detected (e.g. river, wayfire) must report `WARN`, not
+    /// `FAIL` — it's an expected, non-broken state, mirroring the daemon-not-running case.
+    #[test]
+    fn missing_compositor_backend_is_a_warning_not_a_failure() {
+        let mut state = sample_state();
+        state.compositor = None;
+        let report = render(&state);
+        assert!(report.contains("Backend: none detected"));
+        assert!(report.contains("[WARN]"));
+        // The `- Backend: none detected ...` line itself must not carry a `[FAIL]` tag.
+        for line in report.lines() {
+            if line.contains("Backend: none detected") {
+                assert!(!line.contains("[FAIL]"), "unexpected FAIL line: {line:?}");
+            }
+        }
+    }
+
     #[test]
     fn yes_no_renders_booleans() {
         assert_eq!(yes_no(true), "yes");
         assert_eq!(yes_no(false), "no");
+    }
+
+    /// `collect()`'s compositor probe must be `None` when no backend is detected — exercised
+    /// against the *real* async collector (not just `render`'s pure formatting) so a future
+    /// regression in the `crate::wm::detect()` wiring itself would fail this test too.
+    #[tokio::test]
+    async fn collect_reports_no_compositor_without_a_detected_backend() {
+        crate::testing::set_compositor_env(None, None);
+        let state = collect(None).await;
+        assert!(state.compositor.is_none());
+    }
+
+    /// Same, but with a fake Sway IPC server standing in for a live session: `collect()`
+    /// should report the backend's name and a successful socket/ping probe.
+    #[tokio::test]
+    async fn collect_reports_a_detected_sway_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sway.sock");
+        crate::testing::set_compositor_env(None, Some(&sock));
+        let listener = crate::testing::bind_fake_sway_socket(&sock);
+        let outputs = serde_json::json!([{"name": "eDP-1", "focused": true}]);
+        let server = tokio::spawn(async move {
+            crate::testing::serve_fake_sway_reply(listener, crate::wm::sway::GET_OUTPUTS, &outputs)
+                .await;
+        });
+
+        let state = collect(None).await;
+        let probe = state.compositor.expect("a Sway backend was detected");
+        assert_eq!(probe.name, "Sway");
+        assert_eq!(probe.socket.unwrap(), sock);
+        assert_eq!(probe.ping.unwrap(), "eDP-1");
+        server.await.unwrap();
     }
 }

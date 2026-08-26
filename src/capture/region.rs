@@ -90,11 +90,11 @@ pub enum Selection {
     Full,
     /// Return one image per output.
     PerOutput,
-    /// The currently focused monitor (Hyprland).
+    /// The currently focused monitor (Hyprland/Sway).
     Focused,
     /// A specific output by name.
     Output(String),
-    /// The currently active window (Hyprland).
+    /// The currently active window (Hyprland/Sway).
     Window,
     /// An explicit rectangle in compositor logical coordinates.
     Region(Rect),

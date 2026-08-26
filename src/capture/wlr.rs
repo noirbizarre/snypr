@@ -216,7 +216,7 @@ const UNNAMED_OUTPUT: &str = "unknown";
 
 /// Compositor-aware selection variants must be resolved upstream (see
 /// `cli::screenshot::resolve_selection`). If one reaches capture, that's a bug: capture has
-/// no Hyprland IPC of its own.
+/// no window-manager IPC of its own (see `crate::wm`).
 ///
 /// Split out of [`resolve_targets`] so the guard is exercised without a Wayland connection.
 fn ensure_resolvable(selection: &Selection) -> Result<()> {

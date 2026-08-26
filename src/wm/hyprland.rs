@@ -1,4 +1,4 @@
-//! Hyprland IPC helpers (active window, focused monitor).
+//! Hyprland IPC backend (active window, focused monitor).
 //!
 //! Connects directly to Hyprland's command socket and parses the JSON responses to `activewindow`
 //! and `monitors`. We deliberately avoid the upstream `hyprland` crate because it hard-codes the
@@ -17,32 +17,44 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{oneshot, watch};
 
-use crate::capture::region::Rect;
+use super::{ActiveWindow, WmBackend, WmWindow};
 
-#[derive(Debug, Clone)]
-pub struct ActiveWindow {
-    pub title: String,
-    pub class: String,
-    pub at: (i32, i32),
-    pub size: (u32, u32),
-    /// Compositor monitor identifier. Hyprland reports this as a numeric ID, not a name, so we
-    /// surface it as a string for parity with the previous public API.
-    pub monitor: String,
-}
+/// Hyprland [`WmBackend`] implementation.
+pub struct Hyprland;
 
-impl ActiveWindow {
-    pub fn rect(&self) -> Rect {
-        Rect {
-            x: self.at.0,
-            y: self.at.1,
-            w: self.size.0,
-            h: self.size.1,
-        }
+#[async_trait::async_trait]
+impl WmBackend for Hyprland {
+    fn name(&self) -> &'static str {
+        "Hyprland"
+    }
+
+    fn socket_path(&self) -> Result<PathBuf> {
+        socket_path()
+    }
+
+    async fn active_window(&self) -> Result<ActiveWindow> {
+        active_window().await
+    }
+
+    async fn clients(&self) -> Result<Vec<WmWindow>> {
+        clients().await
+    }
+
+    async fn focused_output(&self) -> Result<String> {
+        focused_monitor().await
+    }
+
+    fn subscribe_focus(
+        &self,
+        handle: &tokio::runtime::Handle,
+        shutdown: oneshot::Receiver<()>,
+    ) -> watch::Receiver<Option<String>> {
+        subscribe_focus(handle, shutdown)
     }
 }
 
 /// Fetch the currently active window via Hyprland IPC.
-pub async fn active_window() -> Result<ActiveWindow> {
+async fn active_window() -> Result<ActiveWindow> {
     let body = query("j/activewindow").await?;
     // When no client is focused Hyprland answers with an empty object `{}` (or the literal string
     // `none` on older builds). Treat both as "no active window".
@@ -71,38 +83,9 @@ pub async fn active_window() -> Result<ActiveWindow> {
     })
 }
 
-/// A single Hyprland client (window) as reported by `j/clients`.
-///
-/// Order in the returned `Vec` matches Hyprland's IPC response, which is z-ordered
-/// front-to-back; callers that want hit-testing should iterate in order and pick the
-/// first match.
-#[derive(Debug, Clone)]
-pub struct HyprWindow {
-    pub address: String,
-    pub title: String,
-    pub class: String,
-    pub at: (i32, i32),
-    pub size: (u32, u32),
-    pub monitor: String,
-    pub workspace_id: i64,
-    pub mapped: bool,
-    pub hidden: bool,
-}
-
-impl HyprWindow {
-    pub fn rect(&self) -> Rect {
-        Rect {
-            x: self.at.0,
-            y: self.at.1,
-            w: self.size.0,
-            h: self.size.1,
-        }
-    }
-}
-
 /// List every Hyprland client (window). Order is preserved from the IPC response so
 /// front-to-back hit-testing works without re-sorting.
-pub async fn clients() -> Result<Vec<HyprWindow>> {
+async fn clients() -> Result<Vec<WmWindow>> {
     let body = query("j/clients").await?;
 
     #[derive(Deserialize)]
@@ -126,8 +109,8 @@ pub async fn clients() -> Result<Vec<HyprWindow>> {
         .with_context(|| format!("parsing Hyprland clients response: {body}"))?;
     Ok(raw
         .into_iter()
-        .map(|r| HyprWindow {
-            address: r.address,
+        .map(|r| WmWindow {
+            id: r.address,
             title: r.title,
             class: r.class,
             at: (r.at[0], r.at[1]),
@@ -140,18 +123,8 @@ pub async fn clients() -> Result<Vec<HyprWindow>> {
         .collect())
 }
 
-/// Topmost mapped, visible client whose rectangle contains the logical point `(x, y)`.
-///
-/// Assumes `clients` is in Hyprland's z-order (front-to-back), which is how
-/// [`clients`] returns them.
-pub fn window_at(clients: &[HyprWindow], x: i32, y: i32) -> Option<&HyprWindow> {
-    clients
-        .iter()
-        .find(|c| c.mapped && !c.hidden && c.rect().contains(x, y))
-}
-
 /// Name of the focused monitor.
-pub async fn focused_monitor() -> Result<String> {
+async fn focused_monitor() -> Result<String> {
     let body = query("j/monitors").await?;
 
     #[derive(Deserialize)]
@@ -183,7 +156,7 @@ pub async fn focused_monitor() -> Result<String> {
 ///
 /// The initial value is `None` (focus unknown); consumers should ignore `None` and rely on a
 /// one-shot [`focused_monitor`] for the *initial* placement instead.
-pub fn subscribe_focus(
+fn subscribe_focus(
     handle: &tokio::runtime::Handle,
     shutdown: oneshot::Receiver<()>,
 ) -> watch::Receiver<Option<String>> {
@@ -279,7 +252,7 @@ async fn query(command: &str) -> Result<String> {
 ///
 /// Prefers the modern `$XDG_RUNTIME_DIR/hypr/$HIS/.socket.sock` layout (Hyprland ≥ 0.42) and
 /// falls back to the legacy `/tmp/hypr/$HIS/.socket.sock` for older builds.
-pub(crate) fn socket_path() -> Result<PathBuf> {
+fn socket_path() -> Result<PathBuf> {
     socket_path_named(".socket.sock")
 }
 
@@ -331,17 +304,9 @@ mod tests {
         assert_eq!(parse_focused_monitor_event(line), expected);
     }
 
-    fn win(
-        address: &str,
-        x: i32,
-        y: i32,
-        w: u32,
-        h: u32,
-        mapped: bool,
-        hidden: bool,
-    ) -> HyprWindow {
-        HyprWindow {
-            address: address.into(),
+    fn win(id: &str, x: i32, y: i32, w: u32, h: u32, mapped: bool, hidden: bool) -> WmWindow {
+        WmWindow {
+            id: id.into(),
             title: "t".into(),
             class: "c".into(),
             at: (x, y),
@@ -361,7 +326,7 @@ mod tests {
             win("bottom", 0, 0, 200, 200, true, false),
         ];
         assert_eq!(
-            window_at(&clients, 50, 50).map(|w| w.address.as_str()),
+            super::super::window_at(&clients, 50, 50).map(|w| w.id.as_str()),
             Some("top")
         );
     }
@@ -374,7 +339,7 @@ mod tests {
             win("visible", 0, 0, 100, 100, true, false),
         ];
         assert_eq!(
-            window_at(&clients, 10, 10).map(|w| w.address.as_str()),
+            super::super::window_at(&clients, 10, 10).map(|w| w.id.as_str()),
             Some("visible")
         );
     }
@@ -383,7 +348,7 @@ mod tests {
     fn window_at_returns_none_when_point_outside() {
         let clients = vec![win("only", 0, 0, 10, 10, true, false)];
         assert_eq!(
-            window_at(&clients, 100, 100).map(|w| w.address.as_str()),
+            super::super::window_at(&clients, 100, 100).map(|w| w.id.as_str()),
             None
         );
     }
@@ -395,11 +360,11 @@ mod tests {
             win("right", 200, 0, 100, 100, true, false),
         ];
         assert_eq!(
-            window_at(&clients, 250, 50).map(|w| w.address.as_str()),
+            super::super::window_at(&clients, 250, 50).map(|w| w.id.as_str()),
             Some("right")
         );
         assert_eq!(
-            window_at(&clients, 50, 50).map(|w| w.address.as_str()),
+            super::super::window_at(&clients, 50, 50).map(|w| w.id.as_str()),
             Some("left")
         );
     }
@@ -415,7 +380,7 @@ mod tests {
         };
         assert_eq!(
             w.rect(),
-            Rect {
+            crate::capture::region::Rect {
                 x: -10,
                 y: 25,
                 w: 800,
@@ -475,5 +440,111 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains(sig), "unexpected error: {msg}");
         assert!(msg.contains("/tmp/hypr/"), "unexpected error: {msg}");
+    }
+
+    /// Prepare a hermetic `$XDG_RUNTIME_DIR/hypr/$sig/` directory and point the env at it.
+    /// Returns the directory the two sockets live in.
+    fn fake_instance_dir(sig: &str) -> (tempfile::TempDir, PathBuf) {
+        let runtime = tempfile::tempdir().unwrap();
+        let dir = runtime.path().join("hypr").join(sig);
+        std::fs::create_dir_all(&dir).unwrap();
+        set_env(Some(sig), Some(runtime.path()));
+        (runtime, dir)
+    }
+
+    /// Accept one connection on the fake `.socket.sock`, read the command to EOF (ignoring
+    /// its content — every query is a fixed literal like `j/activewindow`), and reply with
+    /// `response`. Mirrors Hyprland's plain-text (unframed) command socket protocol.
+    async fn serve_command(mut stream: UnixStream, response: &str) {
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_name_and_socket_path_delegate() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        // socket_path() only needs the file to exist; no listener required for this one.
+        std::fs::write(dir.join(".socket.sock"), b"").unwrap();
+
+        let backend: &dyn WmBackend = &Hyprland;
+        assert_eq!(backend.name(), "Hyprland");
+        assert_eq!(backend.socket_path().unwrap(), dir.join(".socket.sock"));
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_active_window_delegates_to_the_free_function() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        let listener = tokio::net::UnixListener::bind(dir.join(".socket.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_command(
+                stream,
+                r#"{"title":"term","class":"kitty","at":[1,2],"size":[3,4],"monitor":0}"#,
+            )
+            .await;
+        });
+
+        let backend: &dyn WmBackend = &Hyprland;
+        let win = backend.active_window().await.unwrap();
+        assert_eq!(win.title, "term");
+        assert_eq!(win.class, "kitty");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_clients_delegates_to_the_free_function() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        let listener = tokio::net::UnixListener::bind(dir.join(".socket.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_command(
+                stream,
+                r#"[{"address":"0x1","title":"t","class":"c","at":[0,0],"size":[10,10],"monitor":0,"workspace":{"id":1},"mapped":true,"hidden":false}]"#,
+            )
+            .await;
+        });
+
+        let backend: &dyn WmBackend = &Hyprland;
+        let list = backend.clients().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "0x1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_focused_output_delegates_to_the_free_function() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        let listener = tokio::net::UnixListener::bind(dir.join(".socket.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_command(
+                stream,
+                r#"[{"name":"DP-1","focused":false},{"name":"HDMI-A-1","focused":true}]"#,
+            )
+            .await;
+        });
+
+        let backend: &dyn WmBackend = &Hyprland;
+        assert_eq!(backend.focused_output().await.unwrap(), "HDMI-A-1");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hyprland_backend_subscribe_focus_publishes_events_from_the_event_socket() {
+        let (_runtime, dir) = fake_instance_dir("deadbeef");
+        let listener = tokio::net::UnixListener::bind(dir.join(".socket2.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"focusedmon>>DP-1,1\n").await.unwrap();
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let backend: &dyn WmBackend = &Hyprland;
+        let mut rx = backend.subscribe_focus(&handle, shutdown_rx);
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), Some("DP-1".to_string()));
+        server.await.unwrap();
     }
 }
