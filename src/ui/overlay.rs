@@ -129,7 +129,7 @@ pub async fn run(
 /// [`run`] so it's unit-testable without a live GTK display — `run` itself always ends by
 /// spawning a blocking GTK thread and cannot run headless.
 async fn detect_focused_output() -> Option<String> {
-    match crate::wm::detect() {
+    match crate::wm::detect().await {
         Some(backend) => backend.focused_output().await.ok(),
         None => None,
     }

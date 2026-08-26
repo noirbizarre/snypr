@@ -233,7 +233,12 @@ struct PickedWindow {
 impl From<&WmWindow> for PickedWindow {
     fn from(w: &WmWindow) -> Self {
         Self {
-            rect: w.rect(),
+            // `wm::window_at` (the only place that picks a `WmWindow` to convert here) only
+            // ever returns windows with known geometry — it hit-tests against `rect()`, which
+            // is `None` on backends without geometry (see `wm::foreign_toplevel`).
+            rect: w
+                .rect()
+                .expect("window_at only returns windows with known geometry"),
             title: w.title.clone(),
             class: w.class.clone(),
         }
@@ -414,7 +419,7 @@ fn logical_to_local(monitor_index: usize, rect: &Rect) -> Option<(f32, f32, f32,
 /// missing, IPC error) we log a warning and return an empty list — Window mode then falls
 /// back to its legacy "capture focused window" behavior via `Selection::Window`.
 async fn fetch_clients_or_warn() -> Vec<WmWindow> {
-    let Some(backend) = wm::detect() else {
+    let Some(backend) = wm::detect().await else {
         return Vec::new();
     };
     match backend.clients().await {
@@ -434,7 +439,7 @@ async fn fetch_clients_or_warn() -> Vec<WmWindow> {
 /// monitor in Screen mode. Failure (no backend detected, IPC error, no focused output) is
 /// silently dropped so the selector still opens with the legacy "click to pick" UX.
 async fn fetch_focused_monitor_or_log() -> Option<String> {
-    let backend = wm::detect()?;
+    let backend = wm::detect().await?;
     match backend.focused_output().await {
         Ok(name) => Some(name),
         Err(err) => {
@@ -451,7 +456,7 @@ async fn fetch_focused_monitor_or_log() -> Option<String> {
 /// Try to read the window manager's active window. Used to pre-select the current window in
 /// Window mode. Failure (no backend detected, IPC error, no focused client) is silently dropped.
 async fn fetch_active_window_or_log() -> Option<wm::ActiveWindow> {
-    let backend = wm::detect()?;
+    let backend = wm::detect().await?;
     match backend.active_window().await {
         Ok(aw) => Some(aw),
         Err(err) => {
@@ -577,11 +582,15 @@ fn build_overlays(
     });
 
     // Pre-select the focused window (Window mode default). Built from `ActiveWindow`
-    // directly so we don't depend on a `focused` flag in the clients snapshot.
-    let selected_window = focused_window.as_ref().map(|aw| PickedWindow {
-        rect: aw.rect(),
-        title: aw.title.clone(),
-        class: aw.class.clone(),
+    // directly so we don't depend on a `focused` flag in the clients snapshot. No geometry
+    // (e.g. the `foreign_toplevel` backend) means nothing to pre-select — silently falls back
+    // to "no window pre-selected", same as the backend-less case.
+    let selected_window = focused_window.as_ref().and_then(|aw| {
+        aw.rect().map(|rect| PickedWindow {
+            rect,
+            title: aw.title.clone(),
+            class: aw.class.clone(),
+        })
     });
 
     // A single toolbar follows focus across monitors. Built once here; the per-monitor windows
@@ -2034,15 +2043,15 @@ mod tests {
             id: "1".into(),
             title: "term".into(),
             class: "kitty".into(),
-            at: (5, 6),
-            size: (7, 8),
+            at: Some((5, 6)),
+            size: Some((7, 8)),
             monitor: "eDP-1".into(),
             workspace_id: 1,
             mapped: true,
             hidden: false,
         };
         let picked = PickedWindow::from(&w);
-        assert_eq!(picked.rect, w.rect());
+        assert_eq!(Some(picked.rect), w.rect());
         assert_eq!(picked.title, "term");
         assert_eq!(picked.class, "kitty");
     }

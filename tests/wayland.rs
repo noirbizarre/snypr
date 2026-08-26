@@ -24,6 +24,8 @@
 use snypr::capture::region::{Rect, stitch};
 use snypr::capture::wlr::WlrCapturer;
 use snypr::capture::{Capturer, Output, Selection};
+use snypr::wm::WmBackend;
+use snypr::wm::foreign_toplevel::ForeignToplevel;
 
 /// Whether a missing compositor must fail the run rather than skip it.
 fn capture_is_required() -> bool {
@@ -243,4 +245,116 @@ async fn unresolved_selections_are_rejected_by_the_capture_backend() {
             "unexpected error for {selection:?}: {err:#}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `crate::wm::foreign_toplevel` — needs a compositor advertising
+// `zwlr_foreign_toplevel_manager_v1` specifically, independent of `zwlr_screencopy_manager_v1`
+// above: nothing here reuses `require_capture!()`, since a compositor could implement one
+// protocol without the other.
+// ---------------------------------------------------------------------------
+
+/// Whether a compositor not advertising `zwlr_foreign_toplevel_manager_v1` must fail the run
+/// rather than skip it. Named distinctly from `SNYPR_REQUIRE_WAYLAND_CAPTURE` because a given
+/// test compositor may support one protocol and not the other.
+fn wm_is_required() -> bool {
+    match std::env::var("SNYPR_REQUIRE_WAYLAND_WM") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no"
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Emit the skip notice, or turn it into a failure when the caller demanded the protocol.
+fn skip_wm(reason: std::fmt::Arguments<'_>) {
+    assert!(
+        !wm_is_required(),
+        "SNYPR_REQUIRE_WAYLAND_WM is set but {reason}"
+    );
+    eprintln!("skipping wlr-foreign-toplevel integration test: {reason}");
+}
+
+#[tokio::test]
+async fn foreign_toplevel_focused_output_names_a_real_output() {
+    let backend = ForeignToplevel;
+    let name = match backend.focused_output().await {
+        Ok(n) => n,
+        Err(err) => return skip_wm(format_args!("no focused output: {err:#}")),
+    };
+    // Cross-check against the same compositor's `zwlr_screencopy` output list — both
+    // protocols must agree on what a real output is called.
+    let Some((_cap, outputs)) = outputs_or_skip().await else {
+        // `zwlr_screencopy` unsupported here even though foreign-toplevel is: still a useful
+        // partial result, just nothing to cross-check against.
+        assert!(!name.is_empty(), "empty output name");
+        return;
+    };
+    assert!(
+        outputs.iter().any(|o| o.name == name),
+        "focused_output() returned {name:?}, not among the outputs {outputs:?}"
+    );
+}
+
+#[tokio::test]
+async fn foreign_toplevel_clients_never_report_geometry() {
+    let backend = ForeignToplevel;
+    let clients = match backend.clients().await {
+        Ok(c) => c,
+        Err(err) => return skip_wm(format_args!("clients() failed: {err:#}")),
+    };
+    // The protocol has no position/size at all — asserting `None` here pins that down for
+    // real, rather than just at the unit-test level.
+    for w in &clients {
+        assert!(w.at.is_none(), "unexpected geometry on {w:?}", w = w.title);
+        assert!(
+            w.size.is_none(),
+            "unexpected geometry on {w:?}",
+            w = w.title
+        );
+        assert_eq!(
+            w.workspace_id,
+            -1,
+            "unexpected workspace id on {w:?}",
+            w = w.title
+        );
+    }
+}
+
+#[tokio::test]
+async fn foreign_toplevel_active_window_has_no_geometry_either() {
+    let backend = ForeignToplevel;
+    let win = match backend.active_window().await {
+        Ok(w) => w,
+        Err(err) => return skip_wm(format_args!("active_window() failed: {err:#}")),
+    };
+    assert!(
+        win.rect().is_none(),
+        "unexpected geometry on {win:?}",
+        win = win.title
+    );
+}
+
+#[tokio::test]
+async fn foreign_toplevel_subscribe_focus_publishes_and_stops_on_shutdown() {
+    let backend = ForeignToplevel;
+    let handle = tokio::runtime::Handle::current();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let mut rx = backend.subscribe_focus(&handle, shutdown_rx);
+    if rx.changed().await.is_err() {
+        // The task exited immediately: the compositor doesn't advertise the protocol at all
+        // (matches the same "no backend" outcome `probe()` would report).
+        return skip_wm(format_args!(
+            "subscribe_focus's background task exited without publishing a value"
+        ));
+    }
+    // Shutdown must be observed promptly (bounded by the next Wayland event at worst — see
+    // the module docs), not linger for the rest of the process.
+    drop(shutdown_tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while rx.changed().await.is_ok() {}
+    })
+    .await
+    .expect("subscribe_focus did not stop within 5s of shutdown firing");
 }

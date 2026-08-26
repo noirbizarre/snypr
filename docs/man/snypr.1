@@ -41,12 +41,15 @@ automatically when the template does not already contain it, so the files cannot
 onto one another. Incompatible with \fB\-\-edit\fR.
 .TP
 .BR \-\-focused
-Capture the currently focused monitor, queried over Hyprland's, Sway's, or Niri's IPC.
-Unavailable on other wlroots compositors.
+Capture the currently focused monitor, queried over Hyprland's, Sway's, or Niri's IPC, or the
+generic \fIzwlr_foreign_toplevel_manager_v1\fR protocol on other wlroots compositors that
+advertise it (river, labwc, ...).
 .TP
 .BR \-\-window
 Capture the currently active window, queried over Hyprland's, Sway's, or Niri's IPC.
-Unavailable on other wlroots compositors.
+Unavailable on other wlroots compositors: the generic
+\fIzwlr_foreign_toplevel_manager_v1\fR fallback used by \fB\-\-focused\fR never reports
+window position or size.
 .TP
 .BR \-\-output " " \fINAME\fR
 Capture a single output (\fIDP-1\fR, \fIeDP-1\fR, ...).

@@ -77,6 +77,12 @@ pub async fn serve_fake_sway_reply(
 /// by default; pass `Some(sock)` for `sway_sock`/`niri_sock` to make `crate::wm::detect()` pick
 /// the Sway/Niri backend respectively. Safe because nextest runs every test in its own
 /// process.
+///
+/// Also clears `WAYLAND_DISPLAY`/`WAYLAND_SOCKET` unconditionally, so `crate::wm::detect()`'s
+/// last-resort `foreign_toplevel` probe deterministically fails to connect regardless of the
+/// host running the test (e.g. a real Hyprland or river session with `WAYLAND_DISPLAY` set) —
+/// otherwise "no backend detected" tests would only pass by accident, depending on what
+/// compositor happens to be running outside the test.
 pub fn set_compositor_env(
     hyprland_sig: Option<&str>,
     sway_sock: Option<&std::path::Path>,
@@ -95,5 +101,7 @@ pub fn set_compositor_env(
             Some(v) => std::env::set_var("NIRI_SOCKET", v),
             None => std::env::remove_var("NIRI_SOCKET"),
         }
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("WAYLAND_SOCKET");
     }
 }
