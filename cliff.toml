@@ -64,10 +64,18 @@ body = """
 
     Tera's `filter` only does attribute equality, so collect in two passes.
     Note `ending_with` takes a positional argument; the keyword form is a
-    template parse error. -#}
+    template parse error.
+
+    `contributor.username` is `null` (not just absent — `is defined` won't
+    catch it) when GitHub can't resolve a GitHub account for the commit's
+    author email, which happens for commits pushed with an unlinked email.
+    Guard with `is string` first: Tera's `and` short-circuits, so this skips
+    `ending_with` instead of erroring on a non-string value. Contributors we
+    can't attribute to a handle are dropped from this list too, since there
+    is no `@handle` to credit them with. -#}
 {% set_global newcomers = [] -%}
 {% for contributor in github.contributors | filter(attribute="is_first_time", value=true) -%}
-{% if not contributor.username is ending_with("[bot]") -%}
+{% if contributor.username is string and not contributor.username is ending_with("[bot]") -%}
 {% set_global newcomers = newcomers | concat(with=contributor) -%}
 {% endif -%}
 {% endfor -%}
