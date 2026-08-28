@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use wayland_client::protocol::wl_shm;
 
 use crate::config::Config;
 use crate::path::{tilde, tilde_str};
@@ -84,6 +85,11 @@ struct DoctorState {
     // wlr-screencopy
     wlr_init: Result<(), String>,
     wlr_outputs: Result<Vec<(String, u32, u32)>, String>,
+    /// Negotiated `wl_shm` format per output, as the raw fourcc (see
+    /// `WlrCapturer::probe_pixel_formats`). `None` when the probe itself failed (e.g. no
+    /// compositor support) — reported as an informational note, not a fresh FAIL, since
+    /// `wlr_init`/`wlr_outputs` above already cover that case.
+    wlr_formats: Option<Vec<(String, u32)>>,
 
     // Daemon
     daemon_socket: PathBuf,
@@ -205,7 +211,7 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
     };
 
     // ---- wlr-screencopy ------------------------------------------------------
-    let (wlr_init, wlr_outputs) = match crate::capture::wlr::WlrCapturer::new() {
+    let (wlr_init, wlr_outputs, wlr_formats) = match crate::capture::wlr::WlrCapturer::new() {
         Ok(cap) => {
             use crate::capture::Capturer as _;
             let outputs = cap
@@ -217,11 +223,15 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
                         .collect()
                 })
                 .map_err(|e| format!("{e:#}"));
-            (Ok(()), outputs)
+            // Best-effort: a format-probe failure (e.g. compositor doesn't answer a second
+            // screencopy request the same way) shouldn't hide the outputs list above, so it's
+            // its own `Option` rather than folded into `wlr_outputs`'s `Result`.
+            let formats = cap.probe_pixel_formats().await.ok();
+            (Ok(()), outputs, formats)
         }
         Err(e) => {
             let msg = format!("{e:#}");
-            (Err(msg.clone()), Err(msg))
+            (Err(msg.clone()), Err(msg), None)
         }
     };
 
@@ -252,6 +262,7 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
         compositor,
         wlr_init,
         wlr_outputs,
+        wlr_formats,
         daemon_socket,
         daemon_ping,
     }
@@ -494,7 +505,36 @@ fn render(state: &DoctorState) -> String {
             bump(Status::Ok);
             let _ = writeln!(out, "- Outputs detected: {} [OK]", outs.len());
             for (name, w, h) in outs {
-                let _ = writeln!(out, "  - {name} {w}x{h}");
+                let format = state
+                    .wlr_formats
+                    .as_ref()
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
+                    .map(|(_, fourcc)| *fourcc);
+                match format {
+                    // Recognized: one of the four formats the capture pipeline understands
+                    // (see `PixelFormat`) — purely informational, since every one of them is
+                    // now handled correctly regardless of channel order.
+                    Some(fourcc) => match wl_shm::Format::try_from(fourcc) {
+                        Ok(f) => {
+                            let _ = writeln!(out, "  - {name} {w}x{h} [{f:?}]");
+                        }
+                        Err(_) => {
+                            // The compositor negotiated a fourcc the capture pipeline has
+                            // never seen. `capture::wlr::wl_shm_format` falls back to
+                            // `Xrgb8888` for this exact case — worth a WARN since that
+                            // fallback is a guess, not a confirmed format.
+                            bump(Status::Warn);
+                            let _ = writeln!(
+                                out,
+                                "  - {name} {w}x{h} [unrecognized format 0x{fourcc:08x}, \
+                                 assumed Xrgb8888] [WARN]"
+                            );
+                        }
+                    },
+                    None => {
+                        let _ = writeln!(out, "  - {name} {w}x{h} [format: n/a]");
+                    }
+                }
             }
         }
         Err(e) => {
@@ -574,6 +614,7 @@ mod tests {
             }),
             wlr_init: Ok(()),
             wlr_outputs: Ok(vec![("DP-1".to_owned(), 2560, 1440)]),
+            wlr_formats: Some(vec![("DP-1".to_owned(), wl_shm::Format::Xrgb8888 as u32)]),
             daemon_socket: PathBuf::from("/run/user/1000/snypr.sock"),
             daemon_ping: Err("socket does not exist".to_owned()),
         }
@@ -609,6 +650,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Each detected output must show its negotiated `wl_shm` format inline, purely
+    /// informational (no status tag) when it's one of the four formats the capture pipeline
+    /// recognizes.
+    #[test]
+    fn wlr_output_line_shows_the_negotiated_format() {
+        let report = render(&sample_state());
+        assert!(report.contains("- DP-1 2560x1440 [Xrgb8888]"), "{report}");
+    }
+
+    /// A fourcc `wl_shm_format` doesn't recognize is exactly the situation that used to
+    /// corrupt colors silently (see `PixelFormat`) — surface it as a `WARN` with the raw
+    /// fourcc instead of pretending it's `Xrgb8888` the way the capture path's fallback does.
+    #[test]
+    fn wlr_output_line_warns_on_an_unrecognized_format() {
+        let mut state = sample_state();
+        state.wlr_formats = Some(vec![("DP-1".to_owned(), 0xFFFF_FFFF)]);
+        let report = render(&state);
+        assert!(
+            report.contains("unrecognized format 0xffffffff") && report.contains("[WARN]"),
+            "{report}"
+        );
+    }
+
+    /// When the format probe itself failed (e.g. compositor rejected the second screencopy
+    /// request), the output line must degrade gracefully instead of panicking or hiding the
+    /// output.
+    #[test]
+    fn wlr_output_line_falls_back_when_the_format_probe_is_unavailable() {
+        let mut state = sample_state();
+        state.wlr_formats = None;
+        let report = render(&state);
+        assert!(
+            report.contains("- DP-1 2560x1440 [format: n/a]"),
+            "{report}"
+        );
     }
 
     #[test]

@@ -65,6 +65,77 @@ impl Capturer for WlrCapturer {
     }
 }
 
+impl WlrCapturer {
+    /// Negotiate (but never copy) a screencopy frame for every output, just far enough to
+    /// learn the compositor's real `wl_shm` format fourcc for each — cheaper than
+    /// [`Self::capture`] since no pixel data is ever allocated or read. Used by `doctor` to
+    /// surface exactly what a real capture would negotiate, without a live editor/save flow
+    /// to trigger one. Returns the *raw* fourcc (rather than the parsed `wl_shm::Format` or
+    /// mapped [`super::PixelFormat`]) so the caller can distinguish "recognized" from
+    /// "unrecognized" itself — `wl_shm_format`'s own fallback-and-warn would otherwise hide
+    /// that distinction here.
+    pub async fn probe_pixel_formats(&self) -> Result<Vec<(String, u32)>> {
+        tokio::task::spawn_blocking(probe_pixel_formats_blocking)
+            .await
+            .map_err(|e| anyhow!("pixel-format probe task panicked: {e}"))?
+    }
+}
+
+fn probe_pixel_formats_blocking() -> Result<Vec<(String, u32)>> {
+    let conn = Connection::connect_to_env().context("connecting to wayland display")?;
+    let (globals, mut queue) = registry_queue_init::<AppData>(&conn)?;
+    let qh = queue.handle();
+    let registry_state = RegistryState::new(&globals);
+    let output_state = OutputState::new(&globals, &qh);
+    let shm = Shm::bind(&globals, &qh).context("binding wl_shm")?;
+    let manager: ZwlrScreencopyManagerV1 = globals
+        .bind(&qh, 1..=3, ManagerData)
+        .map_err(|_| CaptureError::UnsupportedCompositor)?;
+
+    let mut data = AppData {
+        registry_state,
+        output_state,
+        shm,
+        manager,
+        frames: Vec::new(),
+        pool: None,
+    };
+
+    queue.roundtrip(&mut data)?;
+    queue.roundtrip(&mut data)?;
+
+    let targets = resolve_targets(&data, &Selection::PerOutput)?;
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for (wl_output, _output) in &targets {
+        let frame = data
+            .manager
+            .capture_output(0, wl_output, &qh, FrameUserData);
+        data.frames.push(FrameSlot::new(frame));
+    }
+
+    // Drive until every frame either reports its Buffer format or fails — same wait as
+    // `capture_blocking`, but we stop here instead of allocating buffers and copying.
+    while data.frames.iter().any(|f| f.format.is_none() && !f.failed) {
+        queue.blocking_dispatch(&mut data)?;
+    }
+
+    let mut results = Vec::with_capacity(data.frames.len());
+    for (i, slot) in data.frames.iter().enumerate() {
+        // Best-effort: an output whose frame negotiation failed just doesn't get a format
+        // line rather than aborting the whole probe.
+        let Some(fourcc) = slot.format.filter(|_| !slot.failed) else {
+            continue;
+        };
+        slot.frame.destroy();
+        let (_, output) = &targets[i];
+        results.push((output.name.clone(), fourcc));
+    }
+    Ok(results)
+}
+
 fn enumerate_outputs() -> Result<Vec<Output>> {
     let conn = Connection::connect_to_env().context("connecting to wayland display")?;
     let (globals, mut queue) = registry_queue_init::<AppData>(&conn)?;
