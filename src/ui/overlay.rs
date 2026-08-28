@@ -604,10 +604,13 @@ fn spawn_monitor_overlay(
         window.set_anchor(edge, true);
     }
     window.set_exclusive_zone(-1);
-    // Exclusive grab so keyboard shortcuts always reach the overlay — required because the
-    // pointer-passthrough mode below removes the input region and would otherwise prevent the
-    // surface from ever receiving focus.
-    window.set_keyboard_mode(KeyboardMode::Exclusive);
+    // Start detached from the keyboard. `ToolbarHost::sync_keyboard_mode` (via
+    // `place_initial`, called right after every window for this session is built and
+    // registered, before any of them are `present()`ed) is the single place that grants
+    // `KeyboardMode::Exclusive` — to exactly the one window currently hosting the toolbar.
+    // Every per-monitor window requesting `Exclusive` at once would leave the real Wayland
+    // keyboard focus up to compositor-defined arbitration among them.
+    window.set_keyboard_mode(KeyboardMode::None);
     window.set_default_size(mon_w, mon_h);
 
     let canvas = AnnotationCanvas::new();
@@ -737,11 +740,14 @@ fn spawn_monitor_overlay(
 /// Single source of truth shared by the toolbar's own `PassthroughToggled` action and the
 /// daemon-driven [`OverlayCommand::TogglePassthrough`]. Beside flipping the shared cell and
 /// asking each surface to re-render (so the per-frame `after-paint` handler picks the new
-/// state up immediately), this also flips `KeyboardMode` between `Exclusive` and `None`:
-/// Hyprland binds the pointer to a keyboard-`Exclusive` layer surface, so an empty input
-/// region alone is not enough to let clicks reach the apps below — the keyboard grab has to
-/// go away as well. Trade-off: the overlay's keyboard shortcuts (e.g. `P`) stop working
-/// while passthrough is on; the daemon IPC `PassthroughToggle` is the user's recovery path,
+/// state up immediately), this also delegates to `ToolbarHost::set_keyboard_passthrough`,
+/// which detaches *every* window's `KeyboardMode` while passthrough is on: Hyprland binds
+/// the pointer to a keyboard-`Exclusive` layer surface, so an empty input region alone is
+/// not enough to let clicks reach the apps below — the keyboard grab has to go away as
+/// well. When passthrough turns back off, only the slot currently hosting the toolbar
+/// regains `Exclusive` (see `ToolbarHost::sync_keyboard_mode`) — not every window, unlike
+/// before. Trade-off: the overlay's keyboard shortcuts (e.g. `P`) stop working while
+/// passthrough is on; the daemon IPC `PassthroughToggle` is the user's recovery path,
 /// typically bound to a Hyprland global keybind.
 fn apply_passthrough_state(
     passthrough: &Rc<Cell<bool>>,
@@ -750,16 +756,11 @@ fn apply_passthrough_state(
     on: bool,
 ) {
     passthrough.set(on);
-    let mode = if on {
-        // `None` rather than `OnDemand`: with `OnDemand` Hyprland would still re-grab the
-        // pointer the first time the toolbar gets focus. We want the surface fully detached
-        // from the keyboard until the user explicitly toggles back.
-        KeyboardMode::None
-    } else {
-        KeyboardMode::Exclusive
-    };
+    // `None` rather than `OnDemand` for the passthrough-on case: with `OnDemand` Hyprland
+    // would still re-grab the pointer the first time the toolbar gets focus. We want the
+    // surface fully detached from the keyboard until the user explicitly toggles back.
+    host.set_keyboard_passthrough(on);
     for w in windows.borrow().iter() {
-        w.set_keyboard_mode(mode);
         if let Some(s) = w.surface() {
             // queue_render asks for the next frame immediately rather than waiting for damage;
             // the after-paint handler will then re-derive the input region from `on`.
@@ -1649,6 +1650,33 @@ mod tests {
     use rstest::rstest;
 
     use crate::testing::test_ctx_with_sinks as test_ctx;
+    use crate::ui::require_gtk;
+
+    /// `apply_passthrough_state` only touches the shared `passthrough` cell and delegates
+    /// `KeyboardMode` bookkeeping to `ToolbarHost::set_keyboard_passthrough` (covered directly,
+    /// with no GTK window needed, by `toolbar::tests::keyboard_owner_modes_*`) — so this test
+    /// only needs bare, never-presented windows to confirm the wiring doesn't panic and the
+    /// shared cell actually flips both ways.
+    #[test]
+    fn apply_passthrough_state_flips_the_shared_cell() {
+        require_gtk!();
+        let passthrough = Rc::new(Cell::new(false));
+        let windows: WindowRegistry = Rc::new(RefCell::new(Vec::new()));
+        let host = ToolbarHost::new(Toolbar::new(ToolbarSpec::default()));
+        for i in 0..2 {
+            let window = gtk4::ApplicationWindow::builder().build();
+            let overlay = gtk4::Overlay::new();
+            host.register(i, Some(format!("OUT-{i}")), &overlay, &window);
+            windows.borrow_mut().push(window);
+        }
+        host.place_initial(Some("OUT-0"));
+
+        apply_passthrough_state(&passthrough, &windows, &host, true);
+        assert!(passthrough.get());
+
+        apply_passthrough_state(&passthrough, &windows, &host, false);
+        assert!(!passthrough.get());
+    }
 
     #[rstest]
     #[case::file(&["file"], OutputMode::File)]

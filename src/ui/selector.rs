@@ -714,11 +714,16 @@ fn spawn_monitor_overlay(
         window.set_anchor(edge, true);
     }
     window.set_exclusive_zone(-1);
-    // Exclusive keyboard: the selector lives or dies by its shortcuts (1/2/3/4, Enter,
-    // Shift+Enter, Esc) and needs modifier state for Shift-click on Capture. Toolbar
-    // buttons are non-focusable, so KeyboardMode::OnDemand would never trigger a
-    // keyboard grab and Shift would always read as un-held.
-    window.set_keyboard_mode(KeyboardMode::Exclusive);
+    // Start detached from the keyboard. The selector lives or dies by its shortcuts
+    // (1/2/3/4, Enter, Shift+Enter, Esc) and needs modifier state for Shift-click on
+    // Capture — `KeyboardMode::OnDemand` would never trigger a grab (toolbar buttons are
+    // non-focusable) and Shift would always read as un-held, so it still has to be
+    // `Exclusive`. But requesting `Exclusive` on every monitor's window at once leaves the
+    // real Wayland keyboard focus up to compositor-defined arbitration among them;
+    // `ToolbarHost::sync_keyboard_mode` (driven by `place_initial`/`move_to_connector`
+    // below) is the single place that grants it, to exactly the window currently hosting
+    // the toolbar.
+    window.set_keyboard_mode(KeyboardMode::None);
     window.set_default_size(mon_w.max(1), mon_h.max(1));
 
     let area = SelectorOverlay::new(shared.selection.clone(), info.index, (**style).clone());
