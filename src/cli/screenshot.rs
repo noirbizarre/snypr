@@ -275,9 +275,10 @@ pub(crate) fn notify_written(_config: &Config, _paths: &[std::path::PathBuf], _p
     crate::notify::notify_success(_config, _paths, _png);
 }
 
-/// Convert a screencopy `CapturedImage` (BGRA, possibly with padded stride) into a tight RGBA
-/// [`DocumentBase`] ready for the annotation canvas. Lives here so the editor branch of
-/// `execute` can call it directly without going through `crate::ui`.
+/// Convert a screencopy `CapturedImage` (possibly with padded stride, byte order per
+/// `img.format`) into a tight RGBA [`DocumentBase`] ready for the annotation canvas. Lives
+/// here so the editor branch of `execute` can call it directly without going through
+/// `crate::ui`.
 #[cfg(feature = "ui")]
 fn base_from_captured(img: &crate::capture::CapturedImage) -> crate::annotate::DocumentBase {
     // Shares the swizzle with `output::encode_png`. This path used to carry its own scalar
@@ -793,6 +794,7 @@ mod tests {
             height,
             stride,
             pixels: std::sync::Arc::from(pixels.into_boxed_slice()),
+            format: crate::capture::PixelFormat::Bgra,
             source: None,
         };
 

@@ -97,6 +97,38 @@ async fn outputs_are_enumerable_and_have_sane_geometry() {
     }
 }
 
+/// `WlrCapturer::probe_pixel_formats` drives the same `zwlr_screencopy_frame_v1` Buffer-event
+/// negotiation `capture()` does, but stops short of allocating/copying — this is the only
+/// place that exercises it, since it's specifically meant to run without a live editor/save
+/// flow (see `doctor`'s "Wayland capture" section).
+#[tokio::test]
+async fn probe_pixel_formats_reports_every_output_with_a_recognized_format() {
+    let (cap, outputs) = require_capture!();
+    let Ok(formats) = cap.probe_pixel_formats().await else {
+        assert!(!capture_is_required(), "pixel-format probe failed");
+        eprintln!("compositor does not advertise wlr-screencopy, skipping");
+        return;
+    };
+    assert_eq!(
+        formats.len(),
+        outputs.len(),
+        "expected one negotiated format per enumerated output"
+    );
+    for (name, fourcc) in &formats {
+        assert!(
+            outputs.iter().any(|o| &o.name == name),
+            "probe reported an output `{name}` that `outputs()` never listed"
+        );
+        // Note: 0 is a legitimate fourcc (Argb8888, the wl_shm default) — not a sentinel for
+        // "missing" — so the real sanity check is that it decodes to a known wl_shm format,
+        // not that it's non-zero.
+        assert!(
+            wayland_client::protocol::wl_shm::Format::try_from(*fourcc).is_ok(),
+            "output `{name}` reported an unrecognized fourcc 0x{fourcc:08x}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn every_output_can_be_captured_and_the_buffer_matches_its_geometry() {
     let (cap, outputs) = require_capture!();

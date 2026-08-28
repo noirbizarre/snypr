@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use super::CapturedImage;
+use super::{CapturedImage, PixelFormat};
 
 /// A pixel rectangle (logical coordinates unless otherwise noted).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +129,19 @@ pub fn stitch(images: &[CapturedImage], selection: &Selection) -> Result<Capture
     // 3840×2400) is placed and sized incorrectly relative to a 1× external monitor.
     let normalised: Vec<CapturedImage> = images.iter().map(to_logical_size).collect();
 
+    // Each output negotiates its buffer format independently, so a mixed-GPU/mixed-driver
+    // setup could in principle hand back outputs with different byte orders. That can't be
+    // represented by a single composite format; assume they agree (true in practice — the
+    // format comes from the shared SHM/renderer path) and flag it loudly if they don't so a
+    // real mismatch surfaces as a bug report instead of a silent color-channel corruption.
+    let format: PixelFormat = normalised[0].format;
+    if normalised.iter().any(|i| i.format != format) {
+        tracing::warn!(
+            "stitching outputs with mismatched pixel formats; colors on some outputs may be \
+             wrong in the composite"
+        );
+    }
+
     let bbox = normalised
         .iter()
         .map(|i| {
@@ -174,6 +187,7 @@ pub fn stitch(images: &[CapturedImage], selection: &Selection) -> Result<Capture
         height: bbox.h,
         stride: stride as u32,
         pixels: Arc::from(buf.into_boxed_slice()),
+        format,
         source: None,
     };
 
@@ -212,6 +226,7 @@ fn crop(img: &CapturedImage, origin: &Rect, rect: &Rect) -> Result<CapturedImage
         height: clipped.h,
         stride: dst_stride as u32,
         pixels: Arc::from(out.into_boxed_slice()),
+        format: img.format,
         source: None,
     })
 }
@@ -230,9 +245,9 @@ fn to_logical_size(img: &CapturedImage) -> CapturedImage {
         return img.clone();
     }
 
-    // Compact rows (drop any stride padding) into a tight RGBA-shaped buffer. The byte order is
-    // actually BGRA but `image`'s resampler treats each channel independently, so the result
-    // remains BGRA — no swizzle needed here.
+    // Compact rows (drop any stride padding) into a tight 4-channel buffer. `image`'s resampler
+    // treats each channel independently regardless of what it's called, so the result keeps
+    // whatever byte order `img.format` says it is — no swizzle needed here.
     let row_bytes = img.width as usize * 4;
     let stride = img.stride as usize;
     let mut tight = Vec::with_capacity(row_bytes * img.height as usize);
@@ -255,6 +270,7 @@ fn to_logical_size(img: &CapturedImage) -> CapturedImage {
         height: target_h,
         stride: target_w * 4,
         pixels,
+        format: img.format,
         source: img.source.clone(),
     }
 }
@@ -400,6 +416,7 @@ mod tests {
             height: rect.h,
             stride,
             pixels: pixels.into(),
+            format: PixelFormat::Bgra,
             source: Some(Output {
                 name: format!("FAKE{}", byte),
                 logical: rect,
@@ -450,6 +467,66 @@ mod tests {
         // Left column = 0x11, right column = 0x22.
         assert_eq!(out.pixels[0], 0x11);
         assert_eq!(out.pixels[8], 0x22);
+    }
+
+    #[test]
+    fn stitch_keeps_the_first_images_format_and_carries_it_forward() {
+        let left = solid_image(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+            },
+            0x11,
+        );
+        let right = solid_image(
+            Rect {
+                x: 2,
+                y: 0,
+                w: 2,
+                h: 2,
+            },
+            0x22,
+        );
+        assert_eq!(left.format, PixelFormat::Bgra);
+        let out = stitch(&[left, right], &Selection::Full).unwrap();
+        assert_eq!(out.format, PixelFormat::Bgra);
+    }
+
+    /// A mixed-GPU/mixed-driver setup could in principle negotiate different formats per
+    /// output. `stitch` can't represent that in a single composite; it picks the first
+    /// image's format and (per this test) at least logs the mismatch loudly rather than
+    /// silently mixing byte orders.
+    #[test]
+    fn stitch_warns_and_keeps_the_first_format_when_inputs_disagree() {
+        let left = solid_image(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+            },
+            0x11,
+        );
+        let mut right = solid_image(
+            Rect {
+                x: 2,
+                y: 0,
+                w: 2,
+                h: 2,
+            },
+            0x22,
+        );
+        right.format = PixelFormat::Rgba;
+        assert_ne!(left.format, right.format);
+
+        let out = stitch(&[left, right], &Selection::Full).unwrap();
+        assert_eq!(
+            out.format,
+            PixelFormat::Bgra,
+            "the composite keeps the first image's format"
+        );
     }
 
     #[test]

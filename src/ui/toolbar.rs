@@ -18,6 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::prelude::*;
+use gtk4_layer_shell::{KeyboardMode, LayerShell};
 
 use crate::annotate::{StrokeStyle, ToolKind};
 use crate::i18n::fl;
@@ -1806,7 +1807,7 @@ fn open_color_dialog(
     swatch: gtk4::DrawingArea,
     callback: Callback,
 ) {
-    use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+    use gtk4_layer_shell::Layer;
 
     // Walk up to the toplevel. If the button isn't realised yet (no root) bail silently.
     let Some(root_window) = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok()) else {
@@ -1983,6 +1984,10 @@ pub struct ToolbarHost {
     slots: RefCell<Vec<ToolbarSlot>>,
     /// Index into `slots` currently parenting the toolbar widget, if any.
     current: Cell<Option<usize>>,
+    /// Mirrors the overlay's pointer-passthrough state (Draw mode only — the selector never
+    /// calls [`Self::set_keyboard_passthrough`], so this stays `false` there). While `true`,
+    /// no slot holds `KeyboardMode::Exclusive`; see [`Self::sync_keyboard_mode`].
+    passthrough: Cell<bool>,
 }
 
 impl ToolbarHost {
@@ -1997,6 +2002,7 @@ impl ToolbarHost {
             toolbar,
             slots: RefCell::new(Vec::new()),
             current: Cell::new(None),
+            passthrough: Cell::new(false),
         })
     }
 
@@ -2077,32 +2083,86 @@ impl ToolbarHost {
     /// unparented (the Capture button's Shift-poll timer self-cancels on `parent().is_none()`,
     /// but GLib timeouts can't interleave between these two calls within one main-loop turn).
     fn move_to_slot(&self, slots: &[ToolbarSlot], target: usize) {
-        if self.current.get() == Some(target) {
-            return;
-        }
-        let widget = self.toolbar.widget();
-        if let Some(old) = self.current.get()
-            && let Some(slot) = slots.get(old)
-        {
-            slot.overlay.remove_overlay(widget);
-            // Repaint the window we just left so its per-frame passthrough handler drops the
-            // toolbar-bounds input region (otherwise, under passthrough, the old monitor would
-            // keep a stray clickable rectangle for up to one frame).
+        if self.current.get() != Some(target) {
+            let widget = self.toolbar.widget();
+            if let Some(old) = self.current.get()
+                && let Some(slot) = slots.get(old)
+            {
+                slot.overlay.remove_overlay(widget);
+                // Repaint the window we just left so its per-frame passthrough handler drops
+                // the toolbar-bounds input region (otherwise, under passthrough, the old
+                // monitor would keep a stray clickable rectangle for up to one frame).
+                if let Some(s) = slot.window.surface() {
+                    s.queue_render();
+                }
+            }
+            let slot = &slots[target];
+            slot.overlay.add_overlay(widget);
+            self.current.set(Some(target));
+
+            // Nudge the now-hosting surface to repaint so the overlay's per-frame passthrough
+            // input-region handler re-derives that this window hosts the toolbar without
+            // waiting for organic damage. Harmless for the selector (no passthrough handler).
             if let Some(s) = slot.window.surface() {
                 s.queue_render();
             }
         }
-        let slot = &slots[target];
-        slot.overlay.add_overlay(widget);
-        self.current.set(Some(target));
+        // Re-derive keyboard ownership every time, even on the no-op branch above: a
+        // passthrough toggle with no monitor change still needs the current slot's
+        // `KeyboardMode` flipped.
+        self.sync_keyboard_mode();
+    }
 
-        // Nudge the now-hosting surface to repaint so the overlay's per-frame passthrough
-        // input-region handler re-derives that this window hosts the toolbar without waiting for
-        // organic damage. Harmless for the selector (no passthrough handler).
-        if let Some(s) = slot.window.surface() {
-            s.queue_render();
+    /// Toggle pointer-passthrough's effect on keyboard ownership. Called from the Draw
+    /// overlay's `apply_passthrough_state`; the selector never calls this, so its slots are
+    /// always managed by [`Self::sync_keyboard_mode`] as if passthrough were permanently off.
+    pub fn set_keyboard_passthrough(&self, on: bool) {
+        self.passthrough.set(on);
+        self.sync_keyboard_mode();
+    }
+
+    /// The single, explicit owner of `KeyboardMode` across every registered slot: the slot
+    /// currently hosting the toolbar widget gets `Exclusive` (unless passthrough is on, in
+    /// which case `None`); every other slot gets `None`.
+    ///
+    /// This matters because `wlr-layer-shell-unstable-v1` leaves compositor arbitration among
+    /// several *simultaneously* `Exclusive` layer surfaces implementation-defined. Snypr maps
+    /// one layer-shell window per output; if every one of them requested `Exclusive` at once
+    /// (as they used to), the compositor's real Wayland keyboard focus could end up pinned to
+    /// a window other than the one currently hosting the toolbar — and never re-evaluated as
+    /// focus changes. Making this host the only place that ever sets `KeyboardMode` removes
+    /// that ambiguity: at most one window is ever `Exclusive`, and it's always the one
+    /// visually parenting the toolbar.
+    ///
+    /// The actual per-slot decision lives in the pure [`keyboard_owner_modes`] so it's
+    /// testable without a live layer-shell-capable compositor: `gtk4_layer_shell` silently
+    /// no-ops `set_keyboard_mode`/`keyboard_mode()` on a window that failed to become a real
+    /// layer surface (e.g. under a headless Weston backend with no `wlr-layer-shell`
+    /// support), which would make a GTK-window-based test pass or fail depending on the CI
+    /// environment rather than on this method's logic.
+    fn sync_keyboard_mode(&self) {
+        let slots = self.slots.borrow();
+        let modes = keyboard_owner_modes(slots.len(), self.current.get(), self.passthrough.get());
+        for (slot, mode) in slots.iter().zip(modes) {
+            slot.window.set_keyboard_mode(mode);
         }
     }
+}
+
+/// Pure decision core for [`ToolbarHost::sync_keyboard_mode`]: given `n` registered slots,
+/// which one (if any) currently hosts the toolbar, and whether pointer-passthrough is on,
+/// returns the `KeyboardMode` each slot should have. Exactly one slot is ever `Exclusive`
+/// (the `current` one, and only while `passthrough` is `false`); every other slot is `None`.
+fn keyboard_owner_modes(n: usize, current: Option<usize>, passthrough: bool) -> Vec<KeyboardMode> {
+    (0..n)
+        .map(|i| {
+            if Some(i) == current && !passthrough {
+                KeyboardMode::Exclusive
+            } else {
+                KeyboardMode::None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2200,6 +2260,141 @@ mod tests {
     }
 
     use crate::ui::require_gtk;
+
+    /// Bare (never-presented) window + overlay pair, standing in for one of the per-monitor
+    /// windows `spawn_monitor_overlay`/`selector::spawn_monitor_overlay` build in production.
+    fn bare_slot() -> (gtk4::ApplicationWindow, gtk4::Overlay) {
+        (
+            gtk4::ApplicationWindow::builder().build(),
+            gtk4::Overlay::new(),
+        )
+    }
+
+    /// `register`/`place_initial`/`move_to_index`/`move_to_connector`/`current_index` are
+    /// ordinary GTK widget-tree operations (`Overlay::add_overlay`/`remove_overlay`) that
+    /// don't touch `KeyboardMode` at all — unlike `sync_keyboard_mode` (covered separately by
+    /// the `keyboard_owner_modes` tests below), they work under any `GdkDisplay`, including
+    /// CI's headless Weston, with no `wlr-layer-shell` support required.
+    #[test]
+    fn toolbar_host_reparents_the_widget_between_registered_slots() {
+        require_gtk!();
+        let host = ToolbarHost::new(selector_toolbar(OutputMode::File));
+        let widget = host.toolbar().widget().clone();
+
+        let slots: Vec<(gtk4::ApplicationWindow, gtk4::Overlay)> =
+            (0..3).map(|_| bare_slot()).collect();
+        for (i, (window, overlay)) in slots.iter().enumerate() {
+            host.register(i, Some(format!("OUT-{i}")), overlay, window);
+        }
+        let occupied = |overlays: &[(gtk4::ApplicationWindow, gtk4::Overlay)]| -> Vec<bool> {
+            overlays
+                .iter()
+                .map(|(_, o)| o.first_child().is_some())
+                .collect()
+        };
+
+        assert_eq!(
+            host.current_index(),
+            None,
+            "nothing hosts the toolbar before the first placement"
+        );
+
+        host.place_initial(Some("OUT-1"));
+        assert_eq!(host.current_index(), Some(1));
+        assert_eq!(occupied(&slots), vec![false, true, false]);
+        assert!(
+            widget.parent().is_some(),
+            "the widget must be parented somewhere"
+        );
+
+        host.move_to_index(2);
+        assert_eq!(host.current_index(), Some(2));
+        assert_eq!(
+            occupied(&slots),
+            vec![false, false, true],
+            "the old slot must be vacated when the toolbar moves"
+        );
+
+        host.move_to_connector(Some("OUT-0"));
+        assert_eq!(host.current_index(), Some(0));
+        assert_eq!(occupied(&slots), vec![true, false, false]);
+
+        // Unknown connector / an index that's already current: no-ops, current slot unchanged.
+        host.move_to_connector(Some("does-not-exist"));
+        assert_eq!(host.current_index(), Some(0));
+        host.move_to_index(0);
+        assert_eq!(host.current_index(), Some(0));
+        assert_eq!(occupied(&slots), vec![true, false, false]);
+
+        // `set_keyboard_passthrough` is a thin wrapper delegating to `sync_keyboard_mode`
+        // (covered in isolation by the `keyboard_owner_modes` tests below); exercised here
+        // just to confirm it doesn't disturb which slot hosts the widget.
+        host.set_keyboard_passthrough(true);
+        host.set_keyboard_passthrough(false);
+        assert_eq!(host.current_index(), Some(0));
+        assert_eq!(occupied(&slots), vec![true, false, false]);
+    }
+
+    // `keyboard_owner_modes` is the pure decision core behind `ToolbarHost::sync_keyboard_mode`
+    // — deliberately tested without any GTK window: `gtk4_layer_shell` silently no-ops
+    // `set_keyboard_mode`/`keyboard_mode()` on a window that never became a real layer
+    // surface, which happens whenever the compositor doesn't support `wlr-layer-shell` (e.g.
+    // CI's headless Weston backend — see AGENTS.md). A test built on real windows would then
+    // pass or fail depending on the environment instead of on this function's logic.
+
+    /// `ToolbarHost` must be the single owner of `KeyboardMode`: exactly the slot currently
+    /// hosting the toolbar widget holds `Exclusive`; every other slot holds `None`. Before
+    /// this was centralized here, every per-monitor window requested `Exclusive`
+    /// simultaneously and permanently, leaving the real Wayland keyboard focus up to
+    /// compositor-defined arbitration among them — see `sync_keyboard_mode`'s doc comment.
+    #[test]
+    fn keyboard_owner_modes_grants_exclusive_only_to_the_current_slot() {
+        assert_eq!(
+            keyboard_owner_modes(3, Some(1), false),
+            vec![
+                KeyboardMode::None,
+                KeyboardMode::Exclusive,
+                KeyboardMode::None
+            ],
+            "only the current slot should hold Exclusive"
+        );
+
+        assert_eq!(
+            keyboard_owner_modes(3, Some(2), false),
+            vec![
+                KeyboardMode::None,
+                KeyboardMode::None,
+                KeyboardMode::Exclusive
+            ],
+            "moving `current` must flip the slot it left back to None"
+        );
+    }
+
+    /// No slot has been placed yet (`current: None`) — every slot must stay `None` rather
+    /// than defaulting to some arbitrary "first slot" owner.
+    #[test]
+    fn keyboard_owner_modes_grants_nothing_without_a_current_slot() {
+        assert_eq!(
+            keyboard_owner_modes(3, None, false),
+            vec![KeyboardMode::None, KeyboardMode::None, KeyboardMode::None]
+        );
+    }
+
+    /// Pointer-passthrough must detach the keyboard from *every* slot, including the one
+    /// currently hosting the toolbar — not just leave the others alone.
+    #[test]
+    fn keyboard_owner_modes_passthrough_detaches_even_the_current_slot() {
+        assert_eq!(
+            keyboard_owner_modes(2, Some(1), true),
+            vec![KeyboardMode::None, KeyboardMode::None],
+            "passthrough must detach the keyboard from every slot, including the current one"
+        );
+        assert_eq!(
+            keyboard_owner_modes(2, Some(1), false),
+            vec![KeyboardMode::None, KeyboardMode::Exclusive],
+            "turning passthrough off must restore Exclusive to the current slot only"
+        );
+    }
 
     /// Selector-shaped toolbar: modes + cursor + delay + the output switcher + Capture.
     fn selector_toolbar(initial: OutputMode) -> Toolbar {

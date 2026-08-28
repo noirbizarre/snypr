@@ -33,7 +33,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use super::region::{Output, Rect, Selection};
-use super::{CaptureError, CapturedImage, Capturer};
+use super::{CaptureError, CapturedImage, Capturer, PixelFormat};
 
 /// Native wlr-screencopy capturer.
 ///
@@ -63,6 +63,77 @@ impl Capturer for WlrCapturer {
             .await
             .map_err(|e| anyhow!("capture task panicked: {e}"))?
     }
+}
+
+impl WlrCapturer {
+    /// Negotiate (but never copy) a screencopy frame for every output, just far enough to
+    /// learn the compositor's real `wl_shm` format fourcc for each — cheaper than
+    /// [`Self::capture`] since no pixel data is ever allocated or read. Used by `doctor` to
+    /// surface exactly what a real capture would negotiate, without a live editor/save flow
+    /// to trigger one. Returns the *raw* fourcc (rather than the parsed `wl_shm::Format` or
+    /// mapped [`super::PixelFormat`]) so the caller can distinguish "recognized" from
+    /// "unrecognized" itself — `wl_shm_format`'s own fallback-and-warn would otherwise hide
+    /// that distinction here.
+    pub async fn probe_pixel_formats(&self) -> Result<Vec<(String, u32)>> {
+        tokio::task::spawn_blocking(probe_pixel_formats_blocking)
+            .await
+            .map_err(|e| anyhow!("pixel-format probe task panicked: {e}"))?
+    }
+}
+
+fn probe_pixel_formats_blocking() -> Result<Vec<(String, u32)>> {
+    let conn = Connection::connect_to_env().context("connecting to wayland display")?;
+    let (globals, mut queue) = registry_queue_init::<AppData>(&conn)?;
+    let qh = queue.handle();
+    let registry_state = RegistryState::new(&globals);
+    let output_state = OutputState::new(&globals, &qh);
+    let shm = Shm::bind(&globals, &qh).context("binding wl_shm")?;
+    let manager: ZwlrScreencopyManagerV1 = globals
+        .bind(&qh, 1..=3, ManagerData)
+        .map_err(|_| CaptureError::UnsupportedCompositor)?;
+
+    let mut data = AppData {
+        registry_state,
+        output_state,
+        shm,
+        manager,
+        frames: Vec::new(),
+        pool: None,
+    };
+
+    queue.roundtrip(&mut data)?;
+    queue.roundtrip(&mut data)?;
+
+    let targets = resolve_targets(&data, &Selection::PerOutput)?;
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for (wl_output, _output) in &targets {
+        let frame = data
+            .manager
+            .capture_output(0, wl_output, &qh, FrameUserData);
+        data.frames.push(FrameSlot::new(frame));
+    }
+
+    // Drive until every frame either reports its Buffer format or fails — same wait as
+    // `capture_blocking`, but we stop here instead of allocating buffers and copying.
+    while data.frames.iter().any(|f| f.format.is_none() && !f.failed) {
+        queue.blocking_dispatch(&mut data)?;
+    }
+
+    let mut results = Vec::with_capacity(data.frames.len());
+    for (i, slot) in data.frames.iter().enumerate() {
+        // Best-effort: an output whose frame negotiation failed just doesn't get a format
+        // line rather than aborting the whole probe.
+        let Some(fourcc) = slot.format.filter(|_| !slot.failed) else {
+            continue;
+        };
+        slot.frame.destroy();
+        let (_, output) = &targets[i];
+        results.push((output.name.clone(), fourcc));
+    }
+    Ok(results)
 }
 
 fn enumerate_outputs() -> Result<Vec<Output>> {
@@ -199,11 +270,15 @@ fn capture_blocking(selection: Selection, cursor: bool) -> Result<Vec<CapturedIm
             .ok_or_else(|| anyhow!("SHM canvas not available for frame {i}"))?;
         let pixels: Arc<[u8]> = Arc::from(canvas.to_vec().into_boxed_slice());
         let (_, output) = &targets[i];
+        let format = pixel_format_from_shm(wl_shm_format(
+            slot.format.expect("buffer event set the format"),
+        ));
         results.push(CapturedImage {
             width: slot.width,
             height: slot.height,
             stride: slot.stride,
             pixels,
+            format,
             source: Some(output.clone()),
         });
     }
@@ -293,8 +368,27 @@ fn resolve_targets(
 }
 
 fn wl_shm_format(fourcc: u32) -> wl_shm::Format {
-    // The frame `Buffer` event reports a wl_shm format encoded as u32.
-    wl_shm::Format::try_from(fourcc).unwrap_or(wl_shm::Format::Xrgb8888)
+    // The frame `Buffer` event reports a wl_shm format encoded as u32. Falling back to
+    // Xrgb8888 for an unrecognized fourcc is a last resort (we still need *some* format to
+    // size the SHM buffer) — log it loudly, since silently misreporting the format is
+    // exactly how a channel-swap bug (see `PixelFormat`) goes unnoticed.
+    wl_shm::Format::try_from(fourcc).unwrap_or_else(|_| {
+        tracing::warn!(
+            fourcc,
+            "compositor reported an unrecognized wl_shm format; assuming Xrgb8888"
+        );
+        wl_shm::Format::Xrgb8888
+    })
+}
+
+/// Map a negotiated `wl_shm` format to the neutral [`PixelFormat`] the rest of the pipeline
+/// understands. `Abgr8888`/`Xbgr8888` are already RGBA-ordered in memory; everything else
+/// (including the `Xrgb8888` fallback above) is treated as BGRA-ordered.
+fn pixel_format_from_shm(format: wl_shm::Format) -> PixelFormat {
+    match format {
+        wl_shm::Format::Abgr8888 | wl_shm::Format::Xbgr8888 => PixelFormat::Rgba,
+        _ => PixelFormat::Bgra,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -580,5 +674,17 @@ mod tests {
     #[test]
     fn wl_shm_format_falls_back_to_xrgb8888_for_an_unknown_fourcc() {
         assert_eq!(wl_shm_format(u32::MAX), wl_shm::Format::Xrgb8888);
+    }
+
+    #[rstest]
+    #[case(wl_shm::Format::Xrgb8888, PixelFormat::Bgra)]
+    #[case(wl_shm::Format::Argb8888, PixelFormat::Bgra)]
+    #[case(wl_shm::Format::Xbgr8888, PixelFormat::Rgba)]
+    #[case(wl_shm::Format::Abgr8888, PixelFormat::Rgba)]
+    fn pixel_format_from_shm_maps_bgr_and_rgb_variants(
+        #[case] format: wl_shm::Format,
+        #[case] expected: PixelFormat,
+    ) {
+        assert_eq!(pixel_format_from_shm(format), expected);
     }
 }
