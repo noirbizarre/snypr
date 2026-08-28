@@ -99,6 +99,7 @@ mod tests {
             height: 2,
             stride: 12, // 2px * 4 bytes + 4 bytes of row padding
             pixels: std::sync::Arc::from(vec![0xFFu8; 24].into_boxed_slice()),
+            format: crate::capture::PixelFormat::Bgra,
             source: source.map(|name| Output {
                 name: name.to_owned(),
                 logical: crate::capture::region::Rect {

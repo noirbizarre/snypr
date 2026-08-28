@@ -35,8 +35,8 @@ use crate::annotate::tools::rect::RectTool;
 use crate::annotate::tools::redact::RedactTool;
 use crate::annotate::tools::text::TextTool;
 use crate::annotate::{Document, DocumentBase, StrokeStyle, Tool, ToolKind};
-use crate::capture::CapturedImage;
 use crate::capture::region::Rect;
+use crate::capture::{CapturedImage, PixelFormat};
 
 glib::wrapper! {
     pub struct AnnotationCanvas(ObjectSubclass<imp::AnnotationCanvas>)
@@ -406,6 +406,7 @@ impl AnnotationCanvas {
             height: h,
             stride: stride as u32,
             pixels,
+            format: PixelFormat::Bgra,
             source: None,
         })
     }

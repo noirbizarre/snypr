@@ -36,7 +36,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::annotate::{Document, DocumentBase, ToolKind};
 use crate::capture::region::{Rect, slice_pixels};
-use crate::capture::{CapturedImage, Capturer};
+use crate::capture::{CapturedImage, Capturer, PixelFormat};
 use crate::cli::SinkSpec;
 use crate::context::Ctx;
 use crate::output::{OutputMode, SharedSinks, SinkSelection};
@@ -1121,6 +1121,9 @@ fn compose_edit(canvases: &[MonitorCanvas], edit: &EditState) -> Result<Captured
         height: base.height,
         stride: dst_stride as u32,
         pixels: std::sync::Arc::from(buf.into_boxed_slice()),
+        // Deliberately BGRA-ordered (see the swizzle above) to match `encode_png`'s
+        // historical expectation, regardless of what the original capture negotiated.
+        format: PixelFormat::Bgra,
         source: None,
     })
 }
@@ -1208,19 +1211,24 @@ async fn ensure_draw_blur_base(
             ) else {
                 continue;
             };
-            // wlr-screencopy hands back BGRA8888 premultiplied; `DocumentBase` /
-            // `build_base_texture` expect RGBA (`gdk::MemoryFormat::R8g8b8a8`). Without
-            // this swap the blurred region looks yellow/red-tinted because the R and B
-            // channels are exchanged. Mirrors `cli::screenshot::base_from_captured`.
+            // wlr-screencopy may hand back BGRA8888-ordered pixels (`stitched.format ==
+            // PixelFormat::Bgra`); `DocumentBase` / `build_base_texture` expect RGBA
+            // (`gdk::MemoryFormat::R8g8b8a8`). Without this swap a BGRA-ordered capture
+            // looks yellow/red-tinted because the R and B channels are exchanged. An
+            // already RGBA-ordered capture (`PixelFormat::Rgba`) must NOT be swapped, or
+            // it gets the same corruption in reverse. Mirrors
+            // `cli::screenshot::base_from_captured` / `output::bgra_to_rgba`.
             //
             // Kept as a hand-rolled loop (not `output::bgra_to_rgba`) rather than
             // restructured for `clippy::chunks_exact_to_as_chunks`: this async, GTK- and
             // live-capture-dependent path has no unit test exercising it either way, so
             // rewriting it would just move the untested surface instead of shrinking it.
             let mut rgba = bgra;
-            #[allow(clippy::chunks_exact_to_as_chunks)]
-            for px in rgba.chunks_exact_mut(4) {
-                px.swap(0, 2);
+            if stitched.format == PixelFormat::Bgra {
+                #[allow(clippy::chunks_exact_to_as_chunks)]
+                for px in rgba.chunks_exact_mut(4) {
+                    px.swap(0, 2);
+                }
             }
             let base = DocumentBase {
                 pixels: Arc::from(rgba.into_boxed_slice()),

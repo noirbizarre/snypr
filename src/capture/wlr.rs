@@ -33,7 +33,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use super::region::{Output, Rect, Selection};
-use super::{CaptureError, CapturedImage, Capturer};
+use super::{CaptureError, CapturedImage, Capturer, PixelFormat};
 
 /// Native wlr-screencopy capturer.
 ///
@@ -199,11 +199,15 @@ fn capture_blocking(selection: Selection, cursor: bool) -> Result<Vec<CapturedIm
             .ok_or_else(|| anyhow!("SHM canvas not available for frame {i}"))?;
         let pixels: Arc<[u8]> = Arc::from(canvas.to_vec().into_boxed_slice());
         let (_, output) = &targets[i];
+        let format = pixel_format_from_shm(wl_shm_format(
+            slot.format.expect("buffer event set the format"),
+        ));
         results.push(CapturedImage {
             width: slot.width,
             height: slot.height,
             stride: slot.stride,
             pixels,
+            format,
             source: Some(output.clone()),
         });
     }
@@ -293,8 +297,27 @@ fn resolve_targets(
 }
 
 fn wl_shm_format(fourcc: u32) -> wl_shm::Format {
-    // The frame `Buffer` event reports a wl_shm format encoded as u32.
-    wl_shm::Format::try_from(fourcc).unwrap_or(wl_shm::Format::Xrgb8888)
+    // The frame `Buffer` event reports a wl_shm format encoded as u32. Falling back to
+    // Xrgb8888 for an unrecognized fourcc is a last resort (we still need *some* format to
+    // size the SHM buffer) — log it loudly, since silently misreporting the format is
+    // exactly how a channel-swap bug (see `PixelFormat`) goes unnoticed.
+    wl_shm::Format::try_from(fourcc).unwrap_or_else(|_| {
+        tracing::warn!(
+            fourcc,
+            "compositor reported an unrecognized wl_shm format; assuming Xrgb8888"
+        );
+        wl_shm::Format::Xrgb8888
+    })
+}
+
+/// Map a negotiated `wl_shm` format to the neutral [`PixelFormat`] the rest of the pipeline
+/// understands. `Abgr8888`/`Xbgr8888` are already RGBA-ordered in memory; everything else
+/// (including the `Xrgb8888` fallback above) is treated as BGRA-ordered.
+fn pixel_format_from_shm(format: wl_shm::Format) -> PixelFormat {
+    match format {
+        wl_shm::Format::Abgr8888 | wl_shm::Format::Xbgr8888 => PixelFormat::Rgba,
+        _ => PixelFormat::Bgra,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -580,5 +603,17 @@ mod tests {
     #[test]
     fn wl_shm_format_falls_back_to_xrgb8888_for_an_unknown_fourcc() {
         assert_eq!(wl_shm_format(u32::MAX), wl_shm::Format::Xrgb8888);
+    }
+
+    #[rstest]
+    #[case(wl_shm::Format::Xrgb8888, PixelFormat::Bgra)]
+    #[case(wl_shm::Format::Argb8888, PixelFormat::Bgra)]
+    #[case(wl_shm::Format::Xbgr8888, PixelFormat::Rgba)]
+    #[case(wl_shm::Format::Abgr8888, PixelFormat::Rgba)]
+    fn pixel_format_from_shm_maps_bgr_and_rgb_variants(
+        #[case] format: wl_shm::Format,
+        #[case] expected: PixelFormat,
+    ) {
+        assert_eq!(pixel_format_from_shm(format), expected);
     }
 }

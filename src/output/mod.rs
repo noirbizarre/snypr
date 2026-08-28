@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::capture::CapturedImage;
+use crate::capture::{CapturedImage, PixelFormat};
 use crate::cli::{ClipboardKind, SinkSpec};
 use crate::config::{FilenameContext, PngCompression};
 use crate::context::Ctx;
@@ -197,8 +197,10 @@ impl Outputs {
     }
 }
 
-/// Convert a `CapturedImage`'s BGRA pixels (possibly with a padded stride) into a tight
-/// RGBA buffer.
+/// Convert a `CapturedImage`'s pixels (possibly with a padded stride) into a tight RGBA
+/// buffer, swizzling from BGRA only if `img.format` says the source actually is BGRA-ordered
+/// (`PixelFormat::Bgra`) — an already RGBA-ordered image (`PixelFormat::Rgba`) is just
+/// de-padded, not swizzled.
 ///
 /// Reading `u32`s and rotating bytes is several times faster than a `chunks_exact(4)` copy
 /// per pixel, with a scalar fallback for the unusual case where the rows do not align.
@@ -209,11 +211,17 @@ pub fn bgra_to_rgba(img: &CapturedImage) -> Vec<u8> {
     let height = img.height as usize;
     let row_bytes = width * 4;
     let stride = img.stride as usize;
+    let swizzle = img.format == PixelFormat::Bgra;
 
     let mut rgba = vec![0u8; row_bytes * height];
     for y in 0..height {
         let src = &img.pixels[y * stride..y * stride + row_bytes];
         let dst = &mut rgba[y * row_bytes..(y + 1) * row_bytes];
+        if !swizzle {
+            // Already RGBA-ordered: just drop the stride padding, no channel reorder.
+            dst.copy_from_slice(src);
+            continue;
+        }
         let (sp, src_u32, ss) = bytemuck::pod_align_to::<u8, u32>(src);
         let (dp, dst_u32, ds) = bytemuck::pod_align_to_mut::<u8, u32>(dst);
         if sp.is_empty()
@@ -247,8 +255,9 @@ pub fn bgra_to_rgba(img: &CapturedImage) -> Vec<u8> {
     rgba
 }
 
-/// Encode a `CapturedImage` to PNG bytes (BGRA → RGBA swizzle) using the supplied
-/// compression preset. See [`PngCompression`] for the speed/size trade-offs.
+/// Encode a `CapturedImage` to PNG bytes (swizzling BGRA → RGBA only if needed — see
+/// [`bgra_to_rgba`]) using the supplied compression preset. See [`PngCompression`] for the
+/// speed/size trade-offs.
 pub fn encode_png(img: &CapturedImage, compression: PngCompression) -> Result<Vec<u8>> {
     let rgba = bgra_to_rgba(img);
 
@@ -290,21 +299,29 @@ mod tests {
             height: 2,
             stride: 8,
             pixels,
+            format: PixelFormat::Bgra,
             source: None,
         }
     }
 
     /// Build a `width`x`height` image whose pixel `(x, y)` carries distinct per-channel
-    /// values, laid out BGRA with `padding` extra bytes at the end of every row.
-    fn distinct_image(width: u32, height: u32, padding: u32) -> CapturedImage {
+    /// values, laid out BGRA (or RGBA, per `format`) with `padding` extra bytes at the end of
+    /// every row.
+    fn distinct_image(width: u32, height: u32, padding: u32, format: PixelFormat) -> CapturedImage {
         let stride = width * 4 + padding;
         let mut pixels = vec![0u8; (stride * height) as usize];
         for y in 0..height {
             for x in 0..width {
                 let i = (y * stride + x * 4) as usize;
-                pixels[i] = 10 + x as u8; // B
-                pixels[i + 1] = 20 + x as u8; // G
-                pixels[i + 2] = 30 + x as u8; // R
+                let (c0, c1, c2) = match format {
+                    // B, G, R
+                    PixelFormat::Bgra => (10 + x as u8, 20 + x as u8, 30 + x as u8),
+                    // R, G, B
+                    PixelFormat::Rgba => (30 + x as u8, 20 + x as u8, 10 + x as u8),
+                };
+                pixels[i] = c0;
+                pixels[i + 1] = c1;
+                pixels[i + 2] = c2;
                 pixels[i + 3] = 40 + y as u8; // A
             }
             // Poison the padding so any code that fails to skip it produces wrong pixels.
@@ -317,6 +334,7 @@ mod tests {
             height,
             stride,
             pixels: Arc::from(pixels.into_boxed_slice()),
+            format,
             source: None,
         }
     }
@@ -340,7 +358,7 @@ mod tests {
     #[case(PngCompression::Best, 0)]
     #[case(PngCompression::Best, 1)]
     fn encode_png_swizzles_bgra_to_rgba(#[case] compression: PngCompression, #[case] padding: u32) {
-        let img = distinct_image(3, 2, padding);
+        let img = distinct_image(3, 2, padding, PixelFormat::Bgra);
         let png = encode_png(&img, compression).unwrap();
         let decoded = image::load_from_memory(&png).unwrap().to_rgba8();
 
@@ -356,6 +374,28 @@ mod tests {
         }
     }
 
+    /// An already RGBA-ordered capture (`PixelFormat::Rgba`) must not be swizzled — encoding
+    /// it should pass the channel values straight through.
+    #[rstest]
+    #[case(0)]
+    #[case(1)]
+    fn encode_png_does_not_swizzle_an_already_rgba_image(#[case] padding: u32) {
+        let img = distinct_image(3, 2, padding, PixelFormat::Rgba);
+        let png = encode_png(&img, PngCompression::Fast).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap().to_rgba8();
+
+        assert_eq!(decoded.dimensions(), (3, 2));
+        for y in 0..2u32 {
+            for x in 0..3u32 {
+                assert_eq!(
+                    decoded.get_pixel(x, y).0,
+                    [30 + x as u8, 20 + x as u8, 10 + x as u8, 40 + y as u8],
+                    "pixel ({x}, {y}) should be passed through unswizzled"
+                );
+            }
+        }
+    }
+
     /// The aligned `u32` fast path and the scalar fallback must agree byte for byte. A zero
     /// padding keeps every row's byte offset a multiple of 4 (`row_bytes` alone is already
     /// aligned); a padding of 1 is not itself a multiple of 4, so every row after the first
@@ -366,7 +406,7 @@ mod tests {
     #[case::fast_path(0)]
     #[case::scalar_fallback(1)]
     fn bgra_to_rgba_drops_padding_and_swizzles(#[case] padding: u32) {
-        let img = distinct_image(3, 2, padding);
+        let img = distinct_image(3, 2, padding, PixelFormat::Bgra);
         let rgba = bgra_to_rgba(&img);
 
         assert_eq!(rgba.len(), 3 * 2 * 4);
@@ -377,6 +417,28 @@ mod tests {
                     &rgba[i..i + 4],
                     &[30 + x as u8, 20 + x as u8, 10 + x as u8, 40 + y as u8],
                     "pixel ({x}, {y}) has the wrong channel order"
+                );
+            }
+        }
+    }
+
+    /// Same padding-drop guarantee, but for an already RGBA-ordered image: bytes must pass
+    /// through unchanged (no R<->B swap applied).
+    #[rstest]
+    #[case::fast_path(0)]
+    #[case::scalar_fallback(1)]
+    fn bgra_to_rgba_drops_padding_without_swizzling_an_rgba_image(#[case] padding: u32) {
+        let img = distinct_image(3, 2, padding, PixelFormat::Rgba);
+        let rgba = bgra_to_rgba(&img);
+
+        assert_eq!(rgba.len(), 3 * 2 * 4);
+        for y in 0..2usize {
+            for x in 0..3usize {
+                let i = (y * 3 + x) * 4;
+                assert_eq!(
+                    &rgba[i..i + 4],
+                    &[30 + x as u8, 20 + x as u8, 10 + x as u8, 40 + y as u8],
+                    "pixel ({x}, {y}) should be passed through unswizzled"
                 );
             }
         }
@@ -400,6 +462,7 @@ mod tests {
             height: 256,
             stride: 256 * 4,
             pixels: Arc::from(pixels.into_boxed_slice()),
+            format: PixelFormat::Bgra,
             source: None,
         };
         let fast = encode_png(&img, PngCompression::Fast).unwrap();
