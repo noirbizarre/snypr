@@ -4,6 +4,63 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/noirbizarre/snypr/compare/0.3.0..0.4.0) - 2026-08-29
+
+### 💫 Features
+
+- **doctor** Report the negotiated wl_shm pixel format per output - ([aca88be](https://github.com/noirbizarre/snypr/commit/aca88be87803884d0e8ebc9b493a18ea5cdbfd25))
+- **wm** Add a generic wlr-foreign-toplevel backend for river, labwc, and other wlroots compositors ([#40](https://github.com/noirbizarre/snypr/issues/40)) - ([30238fc](https://github.com/noirbizarre/snypr/commit/30238fc8fe9c23a6b0bbc52bb7ffa1fe66b6dea2))
+- **wm** Add a Niri backend for --window, --focused, and Window mode ([#39](https://github.com/noirbizarre/snypr/issues/39)) - ([5511680](https://github.com/noirbizarre/snypr/commit/55116804c48cf688aa4677604a3a0ac13d96fc70))
+- **wm** Add Sway support for --window, --focused, and Window mode ([#35](https://github.com/noirbizarre/snypr/issues/35)) - ([4f1f45a](https://github.com/noirbizarre/snypr/commit/4f1f45a026b51a138b7bec37e8b932cb07109254))
+
+### 🐛 Bug Fixes
+
+- **capture** Don't assume BGRA byte order in the screencopy pipeline - ([7d895fe](https://github.com/noirbizarre/snypr/commit/7d895fe42fb3a3d0ebbd9d5fa10e91ff8df193bd))
+- **changelog** Guard ending_with against unresolved contributor usernames ([#42](https://github.com/noirbizarre/snypr/issues/42)) - ([3499957](https://github.com/noirbizarre/snypr/commit/34999578568e00008304274354844908d7d29c4e))
+- **config** Correct documented default text color to #FFF233 - ([b9fa92c](https://github.com/noirbizarre/snypr/commit/b9fa92cebfaa99eb6f602b2a370bde5e359d7b15))
+- **daemon** Gate the draw overlay behind the ui feature - ([7ee419f](https://github.com/noirbizarre/snypr/commit/7ee419f389fe45067cea18d717044812d4531397))
+- **lint** Replace chunks_exact(4) with as_chunks::<4>() for BGRA/RGBA swizzles ([#36](https://github.com/noirbizarre/snypr/issues/36)) - ([4182dbb](https://github.com/noirbizarre/snypr/commit/4182dbbea1f63972b1bea5975897e6d8ab72dbd7))
+- **ui** Make ToolbarHost the sole owner of layer-shell keyboard focus - ([26e1d60](https://github.com/noirbizarre/snypr/commit/26e1d6004f354c9451b23f541902195bd0c85c59))
+
+### 🔨 Refactor
+
+- **annotate** DRY up repeated Tool trait boilerplate via a macro - ([20d6ef3](https://github.com/noirbizarre/snypr/commit/20d6ef382a8b95b3e43d94cccf21bdf1f5f195d1))
+- **annotate** Centralize tool default stroke color/width constants - ([28b9228](https://github.com/noirbizarre/snypr/commit/28b9228db19a80121725c996acd3f9a1ec363a03))
+- **doctor** Replace anonymous env tuple with a named EnvVar struct - ([50c6f42](https://github.com/noirbizarre/snypr/commit/50c6f42e77da36402a3ad86f8c6d96bf8b23475f))
+- **wm** Use .expect(reason) instead of bare unwrap in sway.rs - ([42e08eb](https://github.com/noirbizarre/snypr/commit/42e08eba04042dd309697f05962866c1a36699f6))
+- Split the pure decision cores out of the widgets - ([a3b955e](https://github.com/noirbizarre/snypr/commit/a3b955e260368e143d5dee64290cc1f5142dde38))
+
+### 📚 Documentation
+
+- **agents** Mention Niri in the window-manager IPC backend list - ([ab62f82](https://github.com/noirbizarre/snypr/commit/ab62f827a090ef283e5154b72f3e5cd4552974e4))
+- **agents** Fix stale hypr module reference in naming example - ([e901f30](https://github.com/noirbizarre/snypr/commit/e901f305284424e79a2d982c15ff18b4e914e4a9))
+- **cli** Mention Niri support in screenshot --focused/--window help - ([878b542](https://github.com/noirbizarre/snypr/commit/878b54273305065f0af7426509ee09511df2d96b))
+- **contributing** Clarify check() is skipped in CI, not removed from PKGBUILDs - ([56ac825](https://github.com/noirbizarre/snypr/commit/56ac8251bd9035e6b81cc39e2b779b4552b3ea81))
+- **contributing** Fix self-contradiction about snypr-git's source - ([170ce0b](https://github.com/noirbizarre/snypr/commit/170ce0b5ddf1565af9287dd37ea3e9c28cbfcebe))
+- **daemon** Document the temp_dir fallback for the default socket path - ([c04e467](https://github.com/noirbizarre/snypr/commit/c04e467576e70d28c74cc67afeef7ca0026e4ebf))
+- **readme** Annotate [output] example values that aren't the real defaults - ([28a7c0b](https://github.com/noirbizarre/snypr/commit/28a7c0b02a0d1245df971a11c197853d03a89fad))
+- **readme** Add --force to the cargo install --path . example - ([0fea41f](https://github.com/noirbizarre/snypr/commit/0fea41f26e60c197ef938e0de32009c663ac4a91))
+- **readme** Fix mise run test/cover command comments - ([5004d8a](https://github.com/noirbizarre/snypr/commit/5004d8a4bc50a96083c4193ead3741c809fcbf7f))
+- **readme** Add links to release and license ([#28](https://github.com/noirbizarre/snypr/issues/28)) - ([5fbca9e](https://github.com/noirbizarre/snypr/commit/5fbca9eaf924eac64136b8ad7986a0eadecebd55))
+- Describe Snypr as supporting Hyprland and other wlroots compositors - ([9ed7e54](https://github.com/noirbizarre/snypr/commit/9ed7e540dc58674c56774939ffe6f11f0a7f7756))
+
+### 🧪 Tests
+
+- Cover the extracted logic and the untested ui modules - ([72f5706](https://github.com/noirbizarre/snypr/commit/72f570626909d8611dd658b6fe935dea8a9cda26))
+
+### 🏗️ Build
+
+- **deps** Bump libc from 0.2.186 to 0.2.189 ([#31](https://github.com/noirbizarre/snypr/issues/31)) - ([32767fa](https://github.com/noirbizarre/snypr/commit/32767fa37ed9af8d978870887219fe72aab4a801))
+- **deps** Bump glib from 0.22.7 to 0.22.8 ([#33](https://github.com/noirbizarre/snypr/issues/33)) - ([8afabe2](https://github.com/noirbizarre/snypr/commit/8afabe291aef414aea492b0c173e3f119a879415))
+- **deps** Bump chrono from 0.4.44 to 0.4.45 ([#30](https://github.com/noirbizarre/snypr/issues/30)) - ([ad48e10](https://github.com/noirbizarre/snypr/commit/ad48e10e9d4dbfabc11a12b6350cd1efeeac107d))
+- **deps** Bump clap from 4.6.1 to 4.6.6 ([#34](https://github.com/noirbizarre/snypr/issues/34)) - ([ffb6d75](https://github.com/noirbizarre/snypr/commit/ffb6d75ce1fdfa2b3b93fc323f03b1813966afdc))
+- **deps** Bump ksni from 0.3.4 to 0.3.6 ([#32](https://github.com/noirbizarre/snypr/issues/32)) - ([f5e04a2](https://github.com/noirbizarre/snypr/commit/f5e04a2d1f2f006c9fb2046f9174ef8c92efe136))
+- Stop requiring system glib and xkbcommon for the no-ui build - ([51da1bd](https://github.com/noirbizarre/snypr/commit/51da1bd7c34451c2924c91f035721bb924d7214b))
+
+### 🔧 CI
+
+- Report coverage under separate core and gtk flags - ([dcd8093](https://github.com/noirbizarre/snypr/commit/dcd8093101a9d0a5e5504ebac4c55a4feab4519a))
+
 ## [0.3.0](https://github.com/noirbizarre/snypr/compare/0.2.0..0.3.0) - 2026-08-18
 
 ### 💫 Features
