@@ -29,7 +29,7 @@ Code Style:
 - Edition 2024; use `anyhow::Result` for fallible public fns; prefer `?` and propagate errors; avoid `.unwrap()` outside tests unless guaranteed.
 - Imports: group std / external / crate; avoid wildcard; keep ordering lexical; re-export only intentional items (see `lib.rs`).
 - Types: use explicit `PathBuf`; share state through `Ctx = Arc<Context>` (see `src/context.rs`); prefer enums over strings for state (e.g. `PngCompression`, `SinkSpec`, `SelectionSpec`).
-- Naming: snake_case for functions/vars, PascalCase for types/traits; modules named after their domain (`capture`, `annotate`, `output`, `ui`, `hypr`, `ipc`); constants UPPER_SNAKE; avoid abbreviations except well-known (`ctx`, `cfg`).
+- Naming: snake_case for functions/vars, PascalCase for types/traits; modules named after their domain (`capture`, `annotate`, `output`, `ui`, `wm`, `ipc`); constants UPPER_SNAKE; avoid abbreviations except well-known (`ctx`, `cfg`).
 - Async: traits with `#[async_trait]`; pass cloned `Arc<Context>` rather than `&mut`; avoid blocking in async (use `tokio::task::spawn_blocking` for sync work).
 - Error handling: never silence errors; use `anyhow!(...)` / `.context(...)` / `.with_context(...)` for context; return early on invalid state. Use `thiserror` for typed errors that callers branch on (e.g. `CaptureError`, `ProtocolError`); `ui::selector::Cancelled` is a hand-rolled unit error for the same purpose.
 - CLI: derive `Parser`/`Subcommand`; keep help strings imperative; prefer explicit flags (`--per-output`, `--via-daemon`); document precedence in doc-comments when CLI/config/IPC fields overlap.
