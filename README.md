@@ -502,7 +502,7 @@ line      = "#FF0000"    # straight-line stroke
 freehand  = "#FF0000"    # freehand stroke
 highlight = "#FFFF0059"  # translucent yellow fill
 number    = "#E61A1A"    # number badge background (text stays white)
-text      = "#FFF333"    # text foreground
+text      = "#FFF233"    # text foreground
 ```
 
 Template tokens: `{ts}`, `{date}`, `{time}`, `{output}`, `{selection}`.

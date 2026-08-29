@@ -386,7 +386,7 @@ pub struct AnnotateColors {
     pub highlight: Color,
     /// Number badge background fill. Default: `#E61A1A` (dark red).
     pub number: Color,
-    /// Text foreground color. Default: `#FFF333` (warm yellow).
+    /// Text foreground color. Default: `#FFF233` (warm yellow).
     pub text: Color,
 }
 
@@ -912,6 +912,10 @@ mod tests {
         assert_eq!(c.number.g, 0x1A);
         assert_eq!(c.number.b, 0x1A);
         assert_eq!(c.number.a, 0xFF);
+        // Text green channel rounds to 0xF2 (=242) at u8 precision (0.95 * 255 + 0.5 = 242.75).
+        assert_eq!(c.text.r, 0xFF);
+        assert_eq!(c.text.g, 0xF2);
+        assert_eq!(c.text.b, 0x33);
         assert_eq!(c.text.a, 0xFF);
     }
 
