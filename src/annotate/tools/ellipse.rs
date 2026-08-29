@@ -1,7 +1,8 @@
+use super::rect::{DEFAULT_STROKE, DEFAULT_STROKE_WIDTH};
 use crate::annotate::{StrokeStyle, Tool, ToolKind};
 use crate::capture::region::Rect;
 
-/// Outline ellipse inscribed in `bounds`. Same defaults as [`super::rect::RectTool`] — a
+/// Outline ellipse inscribed in `bounds`. Reuses [`super::rect::RectTool`]'s defaults — a
 /// 2px red stroke — so the two shape tools behave symmetrically. Hit-testing uses the
 /// bounding rectangle (matches `RectTool`) which is plenty for the current selection /
 /// hover model; switching to a true point-in-ellipse test is a one-liner if we ever need
@@ -18,8 +19,8 @@ impl EllipseTool {
     pub fn new(bounds: Rect) -> Self {
         Self {
             bounds,
-            stroke: [1.0, 0.0, 0.0, 1.0],
-            stroke_width: 2.0,
+            stroke: DEFAULT_STROKE,
+            stroke_width: DEFAULT_STROKE_WIDTH,
             stroke_style: StrokeStyle::Solid,
         }
     }

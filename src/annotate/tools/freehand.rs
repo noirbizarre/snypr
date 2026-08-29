@@ -9,9 +9,9 @@ pub struct FreehandTool {
     pub stroke_style: StrokeStyle,
 }
 
-/// Default stroke width, matching [`ArrowTool`](super::arrow::ArrowTool) and
-/// [`LineTool`](super::line::LineTool): freehand strokes read as pen marks rather than as
-/// the thinner geometric outlines used by Rect / Ellipse.
+/// Default stroke width, matching [`arrow::DEFAULT_STROKE_WIDTH`](super::arrow::DEFAULT_STROKE_WIDTH)
+/// and [`line::DEFAULT_STROKE_WIDTH`](super::line::DEFAULT_STROKE_WIDTH): freehand strokes read
+/// as pen marks rather than as the thinner geometric outlines used by Rect / Ellipse.
 pub const DEFAULT_STROKE_WIDTH: f32 = 3.0;
 
 impl FreehandTool {

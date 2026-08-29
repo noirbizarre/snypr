@@ -10,13 +10,21 @@ pub struct ArrowTool {
     pub stroke_style: StrokeStyle,
 }
 
+/// Default stroke color for a freshly created Arrow tool: opaque red. Mirrored by
+/// [`crate::config::AnnotateColors::default`], the documented source of truth for
+/// user-configurable defaults.
+pub const DEFAULT_STROKE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+/// Default stroke width, in logical pixels — thicker than the shape outlines (Rect/Ellipse)
+/// so arrows read as pointers rather than outlines.
+pub const DEFAULT_STROKE_WIDTH: f32 = 3.0;
+
 impl ArrowTool {
     pub fn new(from: (f64, f64), to: (f64, f64)) -> Self {
         Self {
             from,
             to,
-            stroke: [1.0, 0.0, 0.0, 1.0],
-            stroke_width: 3.0,
+            stroke: DEFAULT_STROKE,
+            stroke_width: DEFAULT_STROKE_WIDTH,
             stroke_style: StrokeStyle::Solid,
         }
     }

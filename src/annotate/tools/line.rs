@@ -1,8 +1,9 @@
 //! Straight-line tool. Identical drag semantics to [`super::arrow::ArrowTool`] but
 //! renders only the line segment — no arrowhead. Sibling of Arrow so the user can pick
 //! one or the other from the toolbar depending on whether they want a pointer or a plain
-//! ruler.
+//! ruler. Reuses Arrow's default stroke color/width for the same reason.
 
+use super::arrow::{DEFAULT_STROKE, DEFAULT_STROKE_WIDTH};
 use crate::annotate::{StrokeStyle, Tool, ToolKind};
 use crate::capture::region::Rect;
 
@@ -20,8 +21,8 @@ impl LineTool {
         Self {
             from,
             to,
-            stroke: [1.0, 0.0, 0.0, 1.0],
-            stroke_width: 3.0,
+            stroke: DEFAULT_STROKE,
+            stroke_width: DEFAULT_STROKE_WIDTH,
             stroke_style: StrokeStyle::Solid,
         }
     }
