@@ -85,8 +85,8 @@ means the URLs baked into the PKGBUILDs already resolve. It builds `snypr-bin`
 and `snypr` with `makepkg --nocheck` before pushing, so a broken PKGBUILD fails
 in CI rather than on a user's machine. `snypr-git` is skipped: its source is the
 branch tip rather than the release, so a CI build would not describe what users
-get. `check()` is skipped everywhere because it re-runs, in release mode, the
-suite CI already ran on the same commit.
+get. `check()` is skipped **in CI** everywhere (via `--nocheck`) because it
+re-runs, in release mode, the suite CI already ran on the same commit.
 
 Pushing requires an `AUR_SSH_PRIVATE_KEY` secret in the dedicated `aur`
 environment, whose public half is registered on the maintainer's
