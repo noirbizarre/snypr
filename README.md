@@ -117,7 +117,7 @@ release, along with the desktop entries, icons and manpage.
 
 Ubuntu packaging is planned through
 [hyprland-ppa](https://github.com/cpiber/hyprland-ppa). Until then, build from
-source with `cargo install --path .` (or `mise run setup`), which drops the
+source with `cargo install --path . --force` (or `mise run setup`), which drops the
 binary in `~/.cargo/bin` — note the launcher integration below assumes a proper
 package, so you will need to install the desktop files and icons yourself.
 
