@@ -75,8 +75,16 @@ async fn read_message(stream: &mut UnixStream) -> Result<(u32, Vec<u8>)> {
     if &header[0..6] != MAGIC {
         bail!("Sway IPC response did not start with the i3-ipc magic");
     }
-    let len = u32::from_le_bytes(header[6..10].try_into().unwrap()) as usize;
-    let msg_type = u32::from_le_bytes(header[10..14].try_into().unwrap());
+    let len = u32::from_le_bytes(
+        header[6..10]
+            .try_into()
+            .expect("4-byte slice of a fixed HEADER_LEN array"),
+    ) as usize;
+    let msg_type = u32::from_le_bytes(
+        header[10..14]
+            .try_into()
+            .expect("4-byte slice of a fixed HEADER_LEN array"),
+    );
     let mut payload = vec![0u8; len];
     stream
         .read_exact(&mut payload)
