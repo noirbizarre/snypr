@@ -8,7 +8,8 @@ use crate::context::Context;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Override the socket path. Defaults to `$XDG_RUNTIME_DIR/snypr.sock`.
+    /// Override the socket path. Defaults to `$XDG_RUNTIME_DIR/snypr.sock`, falling back to
+    /// the OS temp directory if `$XDG_RUNTIME_DIR` is unset.
     #[arg(long, value_name = "PATH")]
     pub socket: Option<std::path::PathBuf>,
 

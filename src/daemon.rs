@@ -45,7 +45,8 @@ struct DaemonState {
     overlay: Mutex<Option<OverlayHandle>>,
 }
 
-/// Default IPC socket path: `$XDG_RUNTIME_DIR/snypr.sock`.
+/// Default IPC socket path: `$XDG_RUNTIME_DIR/snypr.sock`, falling back to the OS temp
+/// directory if `$XDG_RUNTIME_DIR` is unset.
 pub fn default_socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
