@@ -107,6 +107,25 @@ pub trait Tool: std::fmt::Debug + Send + Sync {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
+/// Generates the identical `clone_box`/`as_any`/`as_any_mut` boilerplate every [`Tool`]
+/// implementor needs, since neither `Clone` nor `Any`'s downcasting helpers are directly
+/// object-safe. Invoke inside each type's `impl Tool for ...` block; `Tool` must be in
+/// scope (it already is everywhere in `src/annotate/tools/`).
+macro_rules! impl_tool_boilerplate {
+    () => {
+        fn clone_box(&self) -> Box<dyn Tool> {
+            Box::new(self.clone())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    };
+}
+pub(crate) use impl_tool_boilerplate;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ToolKind {
     /// Pointer mode: select an existing layer, then move / resize / re-edit it. Never produces

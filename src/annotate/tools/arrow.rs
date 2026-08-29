@@ -1,4 +1,4 @@
-use crate::annotate::{StrokeStyle, Tool, ToolKind};
+use crate::annotate::{StrokeStyle, Tool, ToolKind, impl_tool_boilerplate};
 use crate::capture::region::Rect;
 
 #[derive(Debug, Clone)]
@@ -45,15 +45,7 @@ impl Tool for ArrowTool {
         self.from = (self.from.0 + dx, self.from.1 + dy);
         self.to = (self.to.0 + dx, self.to.1 + dy);
     }
-    fn clone_box(&self) -> Box<dyn Tool> {
-        Box::new(self.clone())
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    impl_tool_boilerplate!();
 }
 
 #[cfg(test)]
