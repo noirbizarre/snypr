@@ -440,10 +440,10 @@ spawn-at-startup "snypr" "daemon" "--systray"
 language = "en"
 
 [output]
-directory          = "/home/me/Pictures/Screenshots"
-filename_template  = "snypr_{date}_{time}_{output}.png"
-default_sinks      = ["file", "clipboard"]
-use_utc            = false
+directory          = "/home/me/Pictures/Screenshots"  # default: unset (uses $XDG_PICTURES_DIR/Screenshots/)
+filename_template  = "snypr_{date}_{time}_{output}.png"  # default: "snypr_{ts}.png"
+default_sinks      = ["file", "clipboard"]  # default: ["file"]
+use_utc            = false  # default
 # PNG compression preset: "fast" (largest, fastest), "balanced" (default), or "best"
 # (smallest, ~10x slower than fast). Balanced typically halves file size vs fast.
 compression        = "balanced"
