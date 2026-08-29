@@ -1,4 +1,4 @@
-use crate::annotate::{StrokeStyle, Tool, ToolKind};
+use crate::annotate::{StrokeStyle, Tool, ToolKind, impl_tool_boilerplate};
 use crate::capture::region::Rect;
 
 #[derive(Debug, Clone)]
@@ -9,12 +9,19 @@ pub struct RectTool {
     pub stroke_style: StrokeStyle,
 }
 
+/// Default stroke color for a freshly created Rect tool: opaque red. Mirrored by
+/// [`crate::config::AnnotateColors::default`], the documented source of truth for
+/// user-configurable defaults.
+pub const DEFAULT_STROKE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+/// Default stroke width, in logical pixels.
+pub const DEFAULT_STROKE_WIDTH: f32 = 2.0;
+
 impl RectTool {
     pub fn new(bounds: Rect) -> Self {
         Self {
             bounds,
-            stroke: [1.0, 0.0, 0.0, 1.0],
-            stroke_width: 2.0,
+            stroke: DEFAULT_STROKE,
+            stroke_width: DEFAULT_STROKE_WIDTH,
             stroke_style: StrokeStyle::Solid,
         }
     }
@@ -33,15 +40,7 @@ impl Tool for RectTool {
     fn translate(&mut self, dx: f64, dy: f64) {
         self.bounds = self.bounds.translate(dx, dy);
     }
-    fn clone_box(&self) -> Box<dyn Tool> {
-        Box::new(self.clone())
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    impl_tool_boilerplate!();
 }
 
 #[cfg(test)]

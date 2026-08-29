@@ -18,14 +18,14 @@ pub struct Args {
     /// Capture each connected output to a separate file.
     #[arg(long, group = "selection", conflicts_with = "edit")]
     pub per_output: bool,
-    /// Capture only the currently focused monitor (via Hyprland/Sway IPC, or the generic
+    /// Capture only the currently focused monitor (via Hyprland/Sway/Niri IPC, or the generic
     /// wlr-foreign-toplevel protocol on other compositors that advertise it).
     #[arg(long, group = "selection")]
     pub focused: bool,
     /// Capture a specific output by name (e.g. `DP-1`).
     #[arg(long, value_name = "NAME", group = "selection")]
     pub output: Option<String>,
-    /// Capture the currently active window (via Hyprland or Sway IPC).
+    /// Capture the currently active window (via Hyprland, Sway, or Niri IPC).
     #[arg(long, group = "selection")]
     pub window: bool,
     /// Capture an explicit region as `X,Y,WxH`.

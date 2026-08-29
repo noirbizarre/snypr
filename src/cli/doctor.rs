@@ -51,6 +51,13 @@ struct CompositorProbe {
     ping: Result<String, String>,
 }
 
+/// One environment variable checked by the "Environment" section of the report.
+struct EnvVar {
+    name: &'static str,
+    value: Option<String>,
+    required: bool,
+}
+
 /// Snapshot of everything `render` needs. Built by the async collector; passed to a pure
 /// formatter so the rendering logic can be unit-tested without touching the system.
 struct DoctorState {
@@ -63,7 +70,7 @@ struct DoctorState {
     // Environment
     os: &'static str,
     arch: &'static str,
-    env: Vec<(&'static str, Option<String>, bool /* required */)>,
+    env: Vec<EnvVar>,
 
     // Configuration
     config_source: Option<PathBuf>,
@@ -121,37 +128,49 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
 
     // ---- Environment ---------------------------------------------------------
     let env = vec![
-        (
-            "XDG_SESSION_TYPE",
-            std::env::var("XDG_SESSION_TYPE").ok(),
-            false,
-        ),
-        (
-            "WAYLAND_DISPLAY",
-            std::env::var("WAYLAND_DISPLAY").ok(),
-            false,
-        ),
-        (
-            "XDG_RUNTIME_DIR",
-            std::env::var("XDG_RUNTIME_DIR").ok(),
-            false,
-        ),
-        (
-            "XDG_CONFIG_HOME",
-            std::env::var("XDG_CONFIG_HOME").ok(),
-            false,
-        ),
-        (
+        EnvVar {
+            name: "XDG_SESSION_TYPE",
+            value: std::env::var("XDG_SESSION_TYPE").ok(),
+            required: false,
+        },
+        EnvVar {
+            name: "WAYLAND_DISPLAY",
+            value: std::env::var("WAYLAND_DISPLAY").ok(),
+            required: false,
+        },
+        EnvVar {
+            name: "XDG_RUNTIME_DIR",
+            value: std::env::var("XDG_RUNTIME_DIR").ok(),
+            required: false,
+        },
+        EnvVar {
+            name: "XDG_CONFIG_HOME",
+            value: std::env::var("XDG_CONFIG_HOME").ok(),
+            required: false,
+        },
+        EnvVar {
             // None of these three is universally required: exactly one is set when running
             // under its respective compositor, and all three are absent on other wlroots
             // compositors (river, wayfire, …), which is a supported (if more limited) state.
-            "HYPRLAND_INSTANCE_SIGNATURE",
-            std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok(),
-            false,
-        ),
-        ("SWAYSOCK", std::env::var("SWAYSOCK").ok(), false),
-        ("NIRI_SOCKET", std::env::var("NIRI_SOCKET").ok(), false),
-        ("SNYPR_CONFIG", std::env::var("SNYPR_CONFIG").ok(), false),
+            name: "HYPRLAND_INSTANCE_SIGNATURE",
+            value: std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok(),
+            required: false,
+        },
+        EnvVar {
+            name: "SWAYSOCK",
+            value: std::env::var("SWAYSOCK").ok(),
+            required: false,
+        },
+        EnvVar {
+            name: "NIRI_SOCKET",
+            value: std::env::var("NIRI_SOCKET").ok(),
+            required: false,
+        },
+        EnvVar {
+            name: "SNYPR_CONFIG",
+            value: std::env::var("SNYPR_CONFIG").ok(),
+            required: false,
+        },
     ];
 
     // ---- Configuration -------------------------------------------------------
@@ -354,7 +373,12 @@ fn render(state: &DoctorState) -> String {
     // ---- Environment ---------------------------------------------------------
     let _ = writeln!(out, "### Environment");
     let _ = writeln!(out, "- OS: {} / {}", state.os, state.arch);
-    for (name, value, required) in &state.env {
+    for EnvVar {
+        name,
+        value,
+        required,
+    } in &state.env
+    {
         let req = if *required { " [REQUIRED]" } else { "" };
         let status = match value {
             Some(_) => Status::Ok,
@@ -590,10 +614,26 @@ mod tests {
             os: "linux",
             arch: "x86_64",
             env: vec![
-                ("WAYLAND_DISPLAY", Some("wayland-1".to_owned()), false),
-                ("HYPRLAND_INSTANCE_SIGNATURE", None, false),
-                ("SWAYSOCK", None, false),
-                ("NIRI_SOCKET", None, false),
+                EnvVar {
+                    name: "WAYLAND_DISPLAY",
+                    value: Some("wayland-1".to_owned()),
+                    required: false,
+                },
+                EnvVar {
+                    name: "HYPRLAND_INSTANCE_SIGNATURE",
+                    value: None,
+                    required: false,
+                },
+                EnvVar {
+                    name: "SWAYSOCK",
+                    value: None,
+                    required: false,
+                },
+                EnvVar {
+                    name: "NIRI_SOCKET",
+                    value: None,
+                    required: false,
+                },
             ],
             config_source: Some(PathBuf::from("/home/u/.config/snypr/config.toml")),
             config_source_exists: false,

@@ -1,4 +1,4 @@
-use crate::annotate::{StrokeStyle, Tool, ToolKind};
+use crate::annotate::{StrokeStyle, Tool, ToolKind, impl_tool_boilerplate};
 use crate::capture::region::Rect;
 
 #[derive(Debug, Clone)]
@@ -9,9 +9,9 @@ pub struct FreehandTool {
     pub stroke_style: StrokeStyle,
 }
 
-/// Default stroke width, matching [`ArrowTool`](super::arrow::ArrowTool) and
-/// [`LineTool`](super::line::LineTool): freehand strokes read as pen marks rather than as
-/// the thinner geometric outlines used by Rect / Ellipse.
+/// Default stroke width, matching [`arrow::DEFAULT_STROKE_WIDTH`](super::arrow::DEFAULT_STROKE_WIDTH)
+/// and [`line::DEFAULT_STROKE_WIDTH`](super::line::DEFAULT_STROKE_WIDTH): freehand strokes read
+/// as pen marks rather than as the thinner geometric outlines used by Rect / Ellipse.
 pub const DEFAULT_STROKE_WIDTH: f32 = 3.0;
 
 impl FreehandTool {
@@ -65,15 +65,7 @@ impl Tool for FreehandTool {
             p.1 += dy;
         }
     }
-    fn clone_box(&self) -> Box<dyn Tool> {
-        Box::new(self.clone())
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    impl_tool_boilerplate!();
 }
 
 #[cfg(test)]

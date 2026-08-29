@@ -126,7 +126,8 @@ Toggle a daemon-managed overlay instead of spawning a new process.
 Flip pointer passthrough on the running overlay from a global keybind. Requires
 \fB\-\-via-daemon\fR.
 .SS daemon
-Run the IPC server on \fI$XDG_RUNTIME_DIR/snypr.sock\fR.
+Run the IPC server on \fI$XDG_RUNTIME_DIR/snypr.sock\fR (falls back to the OS temp
+directory if \fI$XDG_RUNTIME_DIR\fR is unset).
 .TP
 .BR \-\-socket " " \fIPATH\fR
 Listen on \fIPATH\fR instead of \fI$XDG_RUNTIME_DIR/snypr.sock\fR.

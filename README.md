@@ -14,7 +14,7 @@
 
 ---
 
-A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https://hyprland.org/).
+A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https://hyprland.org/) and other wlroots-based Wayland compositors.
 
 Snypr pulls together what currently requires three separate tools on a Wayland desktop:
 
@@ -42,10 +42,10 @@ existing shape to move it, resize it via drag handles, re-edit text, or delete i
 
 ```sh
 mise run build           # cargo build
-mise run test            # cargo nextest run
+mise run test            # cargo nextest run --all-features
 mise run lint            # cargo clippy --all-targets --all-features -- -Dclippy::all
 mise run fmt             # cargo fmt --all
-mise run cover           # cargo llvm-cov nextest --all-features
+mise run cover           # cargo llvm-cov nextest --profile ci --all-features
 mise run spell           # typos
 ```
 
@@ -117,7 +117,7 @@ release, along with the desktop entries, icons and manpage.
 
 Ubuntu packaging is planned through
 [hyprland-ppa](https://github.com/cpiber/hyprland-ppa). Until then, build from
-source with `cargo install --path .` (or `mise run setup`), which drops the
+source with `cargo install --path . --force` (or `mise run setup`), which drops the
 binary in `~/.cargo/bin` — note the launcher integration below assumes a proper
 package, so you will need to install the desktop files and icons yourself.
 
@@ -440,10 +440,10 @@ spawn-at-startup "snypr" "daemon" "--systray"
 language = "en"
 
 [output]
-directory          = "/home/me/Pictures/Screenshots"
-filename_template  = "snypr_{date}_{time}_{output}.png"
-default_sinks      = ["file", "clipboard"]
-use_utc            = false
+directory          = "/home/me/Pictures/Screenshots"  # default: unset (uses $XDG_PICTURES_DIR/Screenshots/)
+filename_template  = "snypr_{date}_{time}_{output}.png"  # default: "snypr_{ts}.png"
+default_sinks      = ["file", "clipboard"]  # default: ["file"]
+use_utc            = false  # default
 # PNG compression preset: "fast" (largest, fastest), "balanced" (default), or "best"
 # (smallest, ~10x slower than fast). Balanced typically halves file size vs fast.
 compression        = "balanced"
@@ -502,7 +502,7 @@ line      = "#FF0000"    # straight-line stroke
 freehand  = "#FF0000"    # freehand stroke
 highlight = "#FFFF0059"  # translucent yellow fill
 number    = "#E61A1A"    # number badge background (text stays white)
-text      = "#FFF333"    # text foreground
+text      = "#FFF233"    # text foreground
 ```
 
 Template tokens: `{ts}`, `{date}`, `{time}`, `{output}`, `{selection}`.

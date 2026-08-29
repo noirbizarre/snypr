@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::annotate::tools::{arrow, rect};
 use crate::cli::{ClipboardKind, SinkSpec};
 
 /// Top-level configuration.
@@ -246,6 +247,12 @@ impl Color {
         }
     }
 
+    /// Build a color from a `[f32; 4]` RGBA array, as used by the annotate tools'
+    /// `DEFAULT_STROKE`/`DEFAULT_*` constants (see e.g. [`crate::annotate::tools::rect`]).
+    pub const fn from_f32_array(rgba: [f32; 4]) -> Self {
+        Self::from_rgba_f32(rgba[0], rgba[1], rgba[2], rgba[3])
+    }
+
     /// Convert to a `[f32; 4]` array (RGBA channels in the `[0.0, 1.0]` range).
     /// Used by the annotation canvas, which stores tool colors in this format
     /// for direct consumption by GSK render nodes.
@@ -386,18 +393,21 @@ pub struct AnnotateColors {
     pub highlight: Color,
     /// Number badge background fill. Default: `#E61A1A` (dark red).
     pub number: Color,
-    /// Text foreground color. Default: `#FFF333` (warm yellow).
+    /// Text foreground color. Default: `#FFF233` (warm yellow).
     pub text: Color,
 }
 
 impl Default for AnnotateColors {
     fn default() -> Self {
         Self {
-            rect: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
-            ellipse: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
-            arrow: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
-            line: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
-            freehand: Color::from_rgba_f32(1.0, 0.0, 0.0, 1.0),
+            // Rect/Ellipse/Arrow/Line/Freehand reuse the same DEFAULT_STROKE constants the
+            // tool constructors use, so this can't silently drift from `tools::rect::RectTool`,
+            // `tools::arrow::ArrowTool`, etc. (see `annotate_colors_defaults_match_canvas_literals`).
+            rect: Color::from_f32_array(rect::DEFAULT_STROKE),
+            ellipse: Color::from_f32_array(rect::DEFAULT_STROKE),
+            arrow: Color::from_f32_array(arrow::DEFAULT_STROKE),
+            line: Color::from_f32_array(arrow::DEFAULT_STROKE),
+            freehand: Color::from_f32_array(arrow::DEFAULT_STROKE),
             highlight: Color::from_rgba_f32(1.0, 1.0, 0.0, 0.35),
             number: Color::from_rgba_f32(0.9, 0.1, 0.1, 1.0),
             text: Color::from_rgba_f32(1.0, 0.95, 0.2, 1.0),
@@ -895,14 +905,17 @@ mod tests {
 
     #[test]
     fn annotate_colors_defaults_match_canvas_literals() {
-        // Values mirror the literals previously hardcoded in
-        // `src/ui/canvas.rs::AnnotationCanvas::default`.
+        // Rect/Ellipse/Arrow/Line/Freehand must stay in sync with the tool constructors'
+        // own DEFAULT_STROKE constants (rect::DEFAULT_STROKE, arrow::DEFAULT_STROKE) --
+        // asserting against the constants directly, rather than duplicating the literal
+        // here, is what makes this test actually catch drift between config.rs and
+        // `src/annotate/tools/*.rs` / `src/ui/canvas.rs`.
         let c = AnnotateColors::default();
-        assert_eq!(c.rect.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(c.ellipse.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(c.arrow.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(c.line.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(c.freehand.to_f32_array(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(c.rect.to_f32_array(), rect::DEFAULT_STROKE);
+        assert_eq!(c.ellipse.to_f32_array(), rect::DEFAULT_STROKE);
+        assert_eq!(c.arrow.to_f32_array(), arrow::DEFAULT_STROKE);
+        assert_eq!(c.line.to_f32_array(), arrow::DEFAULT_STROKE);
+        assert_eq!(c.freehand.to_f32_array(), arrow::DEFAULT_STROKE);
         // Highlight alpha rounds to 0x59 (=89) at u8 precision (0.35 * 255 + 0.5 = 89.75).
         assert_eq!(c.highlight.r, 0xFF);
         assert_eq!(c.highlight.g, 0xFF);
@@ -912,6 +925,10 @@ mod tests {
         assert_eq!(c.number.g, 0x1A);
         assert_eq!(c.number.b, 0x1A);
         assert_eq!(c.number.a, 0xFF);
+        // Text green channel rounds to 0xF2 (=242) at u8 precision (0.95 * 255 + 0.5 = 242.75).
+        assert_eq!(c.text.r, 0xFF);
+        assert_eq!(c.text.g, 0xF2);
+        assert_eq!(c.text.b, 0x33);
         assert_eq!(c.text.a, 0xFF);
     }
 

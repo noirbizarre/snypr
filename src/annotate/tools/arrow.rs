@@ -1,4 +1,4 @@
-use crate::annotate::{StrokeStyle, Tool, ToolKind};
+use crate::annotate::{StrokeStyle, Tool, ToolKind, impl_tool_boilerplate};
 use crate::capture::region::Rect;
 
 #[derive(Debug, Clone)]
@@ -10,13 +10,21 @@ pub struct ArrowTool {
     pub stroke_style: StrokeStyle,
 }
 
+/// Default stroke color for a freshly created Arrow tool: opaque red. Mirrored by
+/// [`crate::config::AnnotateColors::default`], the documented source of truth for
+/// user-configurable defaults.
+pub const DEFAULT_STROKE: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+/// Default stroke width, in logical pixels — thicker than the shape outlines (Rect/Ellipse)
+/// so arrows read as pointers rather than outlines.
+pub const DEFAULT_STROKE_WIDTH: f32 = 3.0;
+
 impl ArrowTool {
     pub fn new(from: (f64, f64), to: (f64, f64)) -> Self {
         Self {
             from,
             to,
-            stroke: [1.0, 0.0, 0.0, 1.0],
-            stroke_width: 3.0,
+            stroke: DEFAULT_STROKE,
+            stroke_width: DEFAULT_STROKE_WIDTH,
             stroke_style: StrokeStyle::Solid,
         }
     }
@@ -37,15 +45,7 @@ impl Tool for ArrowTool {
         self.from = (self.from.0 + dx, self.from.1 + dy);
         self.to = (self.to.0 + dx, self.to.1 + dy);
     }
-    fn clone_box(&self) -> Box<dyn Tool> {
-        Box::new(self.clone())
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    impl_tool_boilerplate!();
 }
 
 #[cfg(test)]

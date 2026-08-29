@@ -1432,9 +1432,9 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     };
                     if r.w >= 2 && r.h >= 2 {
                         let mut t = RectTool::new(r);
-                        if let Some(color) = c.tool_color(ToolKind::Rect) {
-                            t.stroke = color;
-                        }
+                        t.stroke = c
+                            .tool_color(ToolKind::Rect)
+                            .unwrap_or(crate::annotate::tools::rect::DEFAULT_STROKE);
                         t.stroke_style = stroke.style;
                         doc.push_layer(Box::new(t));
                     }
@@ -1447,9 +1447,9 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     };
                     if r.w >= 2 && r.h >= 2 {
                         let mut t = EllipseTool::new(r);
-                        if let Some(color) = c.tool_color(ToolKind::Ellipse) {
-                            t.stroke = color;
-                        }
+                        t.stroke = c
+                            .tool_color(ToolKind::Ellipse)
+                            .unwrap_or(crate::annotate::tools::rect::DEFAULT_STROKE);
                         t.stroke_style = stroke.style;
                         doc.push_layer(Box::new(t));
                     }
@@ -1459,9 +1459,9 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     let dy = stroke.to.1 - stroke.from.1;
                     if (dx * dx + dy * dy) >= 16.0 {
                         let mut t = ArrowTool::new(stroke.from, stroke.to);
-                        if let Some(color) = c.tool_color(ToolKind::Arrow) {
-                            t.stroke = color;
-                        }
+                        t.stroke = c
+                            .tool_color(ToolKind::Arrow)
+                            .unwrap_or(crate::annotate::tools::arrow::DEFAULT_STROKE);
                         t.stroke_style = stroke.style;
                         doc.push_layer(Box::new(t));
                     }
@@ -1471,9 +1471,9 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     let dy = stroke.to.1 - stroke.from.1;
                     if (dx * dx + dy * dy) >= 16.0 {
                         let mut t = LineTool::new(stroke.from, stroke.to);
-                        if let Some(color) = c.tool_color(ToolKind::Line) {
-                            t.stroke = color;
-                        }
+                        t.stroke = c
+                            .tool_color(ToolKind::Line)
+                            .unwrap_or(crate::annotate::tools::arrow::DEFAULT_STROKE);
                         t.stroke_style = stroke.style;
                         doc.push_layer(Box::new(t));
                     }
@@ -1497,7 +1497,7 @@ fn install_drag(canvas: &AnnotationCanvas) {
                     if stroke.points.len() >= 2 {
                         let stroke_color = c
                             .tool_color(ToolKind::Freehand)
-                            .unwrap_or([1.0, 0.0, 0.0, 1.0]);
+                            .unwrap_or(crate::annotate::tools::arrow::DEFAULT_STROKE);
                         doc.push_layer(Box::new(FreehandTool::new(
                             stroke.points,
                             stroke_color,
