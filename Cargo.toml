@@ -2,7 +2,7 @@
 name = "snypr"
 edition = "2024"
 version = "0.3.0"
-description = "A GTK4-based screenshot, annotation, and live-drawing tool for Hyprland"
+description = "A GTK4-based screenshot, annotation, and live-drawing tool for Hyprland and other wlroots-based Wayland compositors"
 readme = "README.md"
 repository = "https://github.com/noirbizarre/snypr"
 license = "MIT"

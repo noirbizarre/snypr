@@ -14,7 +14,7 @@
 
 ---
 
-A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https://hyprland.org/).
+A GTK4-based screenshot, annotation, and live-drawing tool for [Hyprland](https://hyprland.org/) and other wlroots-based Wayland compositors.
 
 Snypr pulls together what currently requires three separate tools on a Wayland desktop:
 
