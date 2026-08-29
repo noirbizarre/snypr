@@ -47,7 +47,8 @@ Coverage: CI uploads twice, under two Codecov flags — `core` (`--no-default-fe
 General: Do not add new dependencies lightly; prefer existing patterns
 (notifications via `notify-rust` wrapped in `src/notify.rs`, GTK styling via
 `ui::style`, window-manager IPC via the in-tree `src/wm/` backends — Hyprland's
-own socket, Sway's i3ipc socket — rather than upstream crates). Update docs
+own socket, Sway's i3ipc socket, Niri's own socket — rather than upstream
+crates). Update docs
 (README, `docs/man/snypr.1`) when user-facing behavior changes.
 
 Translations: user-facing UI strings (toolbar/selector/tray tooltips, desktop
