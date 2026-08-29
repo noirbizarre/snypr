@@ -70,8 +70,8 @@ results, because pushes made with it do not trigger workflows.
 - a **prebuilt binary** tarball, built inside an `archlinux:base-devel`
   container. Snypr links GTK4 and gtk4-layer-shell dynamically, so this binary
   is only supported on Arch — it exists so `snypr-bin` users never compile;
-- a **source tarball** from `git archive`, which is what `snypr`, `snypr-git`
-  and other distribution packagers consume.
+- a **source tarball** from `git archive`, which is what `snypr` and other
+  distribution packagers consume.
 
 ### AUR
 
