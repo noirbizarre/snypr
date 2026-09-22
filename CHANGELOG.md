@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1](https://github.com/noirbizarre/snypr/compare/0.4.0..0.4.1) - 2026-09-22
+
+### 🐛 Bug Fixes
+
+- **capture** Bound zwlr_screencopy frame waits with a timeout - ([d95137a](https://github.com/noirbizarre/snypr/commit/d95137acbc73c2f964816a749cf518fcabf772c4))
+- **clipboard** Report fast serve() failures instead of a false "copied" success - ([78ded89](https://github.com/noirbizarre/snypr/commit/78ded89d97b1ff50c39f219fd36f246490693d1b))
+- **hyprland** Clip window selections to visible monitor geometry ([#49](https://github.com/noirbizarre/snypr/issues/49)) - ([a01b5fc](https://github.com/noirbizarre/snypr/commit/a01b5fc95e26eb4c68ef85ef44a7ecebc153c4de))
+- **ui** Clear stale toolbar-host state on overlay teardown - ([990ce1f](https://github.com/noirbizarre/snypr/commit/990ce1f401ff23337639a1723320546184b39fa8))
+
+### 🧪 Tests
+
+- Cover the new timeout/teardown logic added for the stuck-capture fix - ([dfa1ba0](https://github.com/noirbizarre/snypr/commit/dfa1ba053a43fffeabf6f461a2b317c14f7fb363))
+
+### 🏗️ Build
+
+- **deps** Bump gdk4-wayland from 0.11.0 to 0.11.4 ([#44](https://github.com/noirbizarre/snypr/issues/44)) - ([79fbe7c](https://github.com/noirbizarre/snypr/commit/79fbe7c7240f9ff41383bf62df1ed9ea427d7bfd))
+
+## ❤️ New Contributors
+
+* @Mabikega made their first contribution in [#49](https://github.com/noirbizarre/snypr/pull/49)
 ## [0.4.0](https://github.com/noirbizarre/snypr/compare/0.3.0..0.4.0) - 2026-08-29
 
 ### 💫 Features
