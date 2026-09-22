@@ -2022,6 +2022,29 @@ impl ToolbarHost {
         });
     }
 
+    /// Drop every registered slot and reset `current`/`passthrough`. Call once, right
+    /// after destroying the per-monitor windows (`dismiss_overlays`/`tear_down`), so
+    /// this `Rc<ToolbarHost>` — which callers (notably `attach_focus`'s WM
+    /// focus-watch loop) may still hold a clone of after teardown — can no longer
+    /// reach the now-destroyed `gtk4::Overlay`/`ApplicationWindow` objects.
+    ///
+    /// Without this, a focus-change event already in flight on the GTK main loop when
+    /// teardown runs could still call `move_to_connector`/`move_to_slot` against a
+    /// slot whose window was just `.destroy()`'d: window destruction is synchronous,
+    /// but the upstream `tokio::sync::watch::Sender` that would otherwise stop
+    /// `attach_focus`'s loop is only dropped once the WM-focus task observes the
+    /// shutdown signal on a different thread, which isn't guaranteed to have happened
+    /// yet. `attach_focus` is expected to additionally check its own torn-down flag
+    /// before calling in (see `selector.rs`/`overlay.rs`), but clearing the slots here
+    /// too means even a caller that skips that check degrades to a harmless no-op
+    /// (`move_to_index`/`move_to_connector` return early on an empty `slots`) instead
+    /// of touching destroyed GTK objects.
+    pub fn clear(&self) {
+        self.slots.borrow_mut().clear();
+        self.current.set(None);
+        self.passthrough.set(false);
+    }
+
     /// The single shared toolbar.
     pub fn toolbar(&self) -> &Toolbar {
         &self.toolbar
@@ -2083,6 +2106,11 @@ impl ToolbarHost {
     /// unparented (the Capture button's Shift-poll timer self-cancels on `parent().is_none()`,
     /// but GLib timeouts can't interleave between these two calls within one main-loop turn).
     fn move_to_slot(&self, slots: &[ToolbarSlot], target: usize) {
+        tracing::debug!(
+            from = ?self.current.get(),
+            to = target,
+            "toolbar host: moving toolbar to slot"
+        );
         if self.current.get() != Some(target) {
             let widget = self.toolbar.widget();
             if let Some(old) = self.current.get()
@@ -2143,6 +2171,12 @@ impl ToolbarHost {
     fn sync_keyboard_mode(&self) {
         let slots = self.slots.borrow();
         let modes = keyboard_owner_modes(slots.len(), self.current.get(), self.passthrough.get());
+        tracing::debug!(
+            current = ?self.current.get(),
+            passthrough = self.passthrough.get(),
+            ?modes,
+            "toolbar host: syncing keyboard mode across slots"
+        );
         for (slot, mode) in slots.iter().zip(modes) {
             slot.window.set_keyboard_mode(mode);
         }

@@ -370,6 +370,14 @@ type MonitorList = Rc<RefCell<Vec<MonitorInfo>>>;
 type ClientList = Rc<RefCell<Vec<WmWindow>>>;
 /// Shared handle to the window-manager focus-event reader's shutdown channel. Fired on dismiss.
 type FocusShutdown = Rc<RefCell<Option<tokio::sync::oneshot::Sender<()>>>>;
+/// Flipped to `true` by [`dismiss_overlays`] before any window is destroyed. Checked by
+/// [`attach_focus`]'s WM focus-watch loop *before* calling into [`ToolbarHost`], so a
+/// focus-change event already in flight on the GTK main loop when teardown runs can't
+/// still reach `move_to_connector`/`move_to_slot` against slots whose windows were just
+/// destroyed — closing a race the cross-thread `watch` channel closing alone doesn't
+/// (that happens asynchronously, on a different thread, with no ordering guarantee
+/// relative to this synchronous teardown).
+type TornDown = Rc<Cell<bool>>;
 
 fn send_once(tx: &Sender, msg: Result<SelectorOutcome>) {
     if let Ok(mut guard) = tx.lock()
@@ -632,6 +640,7 @@ fn build_overlays(
         countdown_source: Rc::new(RefCell::new(None)),
         allow_annotate,
         clients: Rc::new(RefCell::new(clients)),
+        torn_down: Rc::new(Cell::new(false)),
     };
 
     // Wire the single toolbar's actions once (mode / cursor / delay / Capture / Annotate).
@@ -679,9 +688,21 @@ fn build_overlays(
 /// reader task.
 fn attach_focus(shared: &SharedState, mut rx: tokio::sync::watch::Receiver<Option<String>>) {
     let host = shared.host.clone();
+    let torn_down = shared.torn_down.clone();
     glib::MainContext::default().spawn_local(async move {
         while rx.changed().await.is_ok() {
             let name = rx.borrow_and_update().clone();
+            tracing::debug!(connector = ?name, "attach_focus: focused-output changed");
+            // `dismiss_overlays` sets this synchronously, before destroying any window;
+            // the upstream `watch::Sender` this loop reads only closes once the
+            // WM-focus task observes the shutdown signal asynchronously on a different
+            // thread, which isn't guaranteed to have happened by the time a
+            // focus-change event already in flight here gets polled. Checking this
+            // flag first keeps a late event from calling into `ToolbarHost` slots that
+            // were just destroyed/cleared.
+            if torn_down.get() {
+                break;
+            }
             host.move_to_connector(name.as_deref());
         }
     });
@@ -744,6 +765,7 @@ fn spawn_monitor_overlay(
         &shared.host,
         &shared.focus_shutdown,
         &shared.countdown_source,
+        &shared.torn_down,
         info.clone(),
         shared.allow_annotate,
     );
@@ -781,6 +803,7 @@ fn wire_toolbar(shared: &SharedState) {
     let host = shared.host.clone();
     let focus_shutdown = shared.focus_shutdown.clone();
     let countdown_source = shared.countdown_source.clone();
+    let torn_down = shared.torn_down.clone();
     let toolbar = shared.host.toolbar();
     toolbar.connect(move |action| match action {
         ToolbarAction::ModeSelected(mode) => {
@@ -822,6 +845,7 @@ fn wire_toolbar(shared: &SharedState) {
                 &host,
                 &focus_shutdown,
                 &countdown_source,
+                &torn_down,
                 current_monitor_info(&host, &monitors),
                 false,
             );
@@ -838,6 +862,7 @@ fn wire_toolbar(shared: &SharedState) {
                 &host,
                 &focus_shutdown,
                 &countdown_source,
+                &torn_down,
                 current_monitor_info(&host, &monitors),
                 true,
             );
@@ -885,6 +910,8 @@ struct SharedState {
     /// for cursor-based hit-testing. Empty when the query failed or no backend was detected —
     /// in that case Window mode falls back to the legacy "capture focused window" behavior.
     clients: ClientList,
+    /// Set by [`dismiss_overlays`] before it destroys any window. See [`TornDown`].
+    torn_down: TornDown,
 }
 
 /// Classify a Region press at widget-local `(x, y)` given the settled rect for the monitor
@@ -1190,6 +1217,7 @@ fn install_keys(
     host: &Rc<ToolbarHost>,
     focus_shutdown: &FocusShutdown,
     countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
+    torn_down: &TornDown,
     info: MonitorInfo,
     allow_annotate: bool,
 ) {
@@ -1204,15 +1232,18 @@ fn install_keys(
     let host = host.clone();
     let focus_shutdown = focus_shutdown.clone();
     let countdown_source = countdown_source.clone();
+    let torn_down = torn_down.clone();
     key.connect_key_pressed(move |_, k, _, modifiers| match k {
         gdk4::Key::Escape => {
             cancel(
                 &tx,
                 &finalised,
                 &windows,
+                &host,
                 &focus_shutdown,
                 &app_weak,
                 &countdown_source,
+                &torn_down,
             );
             glib::Propagation::Stop
         }
@@ -1234,6 +1265,7 @@ fn install_keys(
                 &host,
                 &focus_shutdown,
                 &countdown_source,
+                &torn_down,
                 Some(info.clone()),
                 edit,
             );
@@ -1246,7 +1278,11 @@ fn install_keys(
 
 /// Tear down every overlay window synchronously and flush the Wayland connection so the
 /// compositor processes the unmap requests *before* we hand control back to the caller.
-fn dismiss_overlays(windows: &WindowRegistry) {
+fn dismiss_overlays(windows: &WindowRegistry, host: &Rc<ToolbarHost>, torn_down: &TornDown) {
+    // Flip this before touching any window so a focus-change event already in flight on
+    // the GTK main loop (see `attach_focus`) bails out instead of calling into
+    // `ToolbarHost` slots we're about to destroy or clear.
+    torn_down.set(true);
     let count = windows.borrow().len();
     let t0 = std::time::Instant::now();
     for window in windows.borrow_mut().drain(..) {
@@ -1256,10 +1292,16 @@ fn dismiss_overlays(windows: &WindowRegistry) {
     if let Some(display) = gdk4::Display::default() {
         display.flush();
     }
+    // Drop the host's slot registry too: it held clones of the `gtk4::Overlay` /
+    // `gtk4::ApplicationWindow` objects just destroyed above. Belt-and-suspenders with
+    // `torn_down` above — even a caller that forgot the flag check degrades to a
+    // harmless no-op against an empty slot list instead of touching destroyed GTK
+    // objects.
+    host.clear();
     tracing::debug!(
         count,
         elapsed_us = t0.elapsed().as_micros() as u64,
-        "dismissed selector overlay windows (set_visible(false) + destroy() + display.flush())"
+        "dismissed selector overlay windows (set_visible(false) + destroy() + display.flush() + host.clear())"
     );
 }
 
@@ -1283,6 +1325,7 @@ const BLANK_FRAME_MS: u64 = 50;
 /// By blanking the snapshot first, hiding the toolbars, flushing the connection, and only
 /// then scheduling the destroy a few frames later, the surface goes into fadeOut already
 /// fully transparent, so the animation has nothing to leak.
+#[allow(clippy::too_many_arguments)]
 fn blank_and_dismiss(
     windows: &WindowRegistry,
     areas: &AreaRegistry,
@@ -1290,8 +1333,10 @@ fn blank_and_dismiss(
     focus_shutdown: &FocusShutdown,
     tx: &Sender,
     app_weak: &glib::WeakRef<gtk4::Application>,
+    torn_down: &TornDown,
     outcome: SelectorOutcome,
 ) {
+    tracing::debug!("blank_and_dismiss: hiding chrome, scheduling destroy in {BLANK_FRAME_MS}ms");
     // Stop following focus before we blank: a focus event mid-teardown would just reparent a
     // hidden toolbar (harmless), but closing the socket promptly is tidier.
     stop_focus(focus_shutdown);
@@ -1306,12 +1351,14 @@ fn blank_and_dismiss(
     }
 
     let windows = windows.clone();
+    let host = host.clone();
+    let torn_down = torn_down.clone();
     let tx = tx.clone();
     let app_weak = app_weak.clone();
     glib::timeout_add_local_once(
         std::time::Duration::from_millis(BLANK_FRAME_MS),
         move || {
-            dismiss_overlays(&windows);
+            dismiss_overlays(&windows, &host, &torn_down);
             send_once(&tx, Ok(outcome));
             if let Some(app) = app_weak.upgrade() {
                 app.quit();
@@ -1383,6 +1430,7 @@ fn commit(
     host: &Rc<ToolbarHost>,
     focus_shutdown: &FocusShutdown,
     countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
+    torn_down: &TornDown,
     local_info: Option<MonitorInfo>,
     edit: bool,
 ) {
@@ -1392,8 +1440,13 @@ fn commit(
     let state = selection.borrow().clone();
     let monitors_snapshot = monitors.borrow().clone();
     let Some(sel) = resolve_selection(&state, local_info.as_ref(), &monitors_snapshot) else {
+        tracing::warn!(
+            ?state,
+            "commit: could not resolve a selection from the current UI state; ignoring Enter"
+        );
         return;
     };
+    tracing::debug!(?sel, edit, "commit: resolved selection, finalising");
     *finalised.borrow_mut() = true;
 
     // The countdown happens here (inside the selector), so downstream consumers
@@ -1408,7 +1461,16 @@ fn commit(
 
     let total_secs = state.delay.as_secs().min(u32::MAX as u64) as u32;
     if total_secs == 0 {
-        blank_and_dismiss(windows, areas, host, focus_shutdown, tx, app_weak, outcome);
+        blank_and_dismiss(
+            windows,
+            areas,
+            host,
+            focus_shutdown,
+            tx,
+            app_weak,
+            torn_down,
+            outcome,
+        );
         return;
     }
 
@@ -1430,6 +1492,7 @@ fn commit(
     let tx_cloned = tx.clone();
     let app_weak_cloned = app_weak.clone();
     let countdown_source_cloned = countdown_source.clone();
+    let torn_down_cloned = torn_down.clone();
     let id = glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
         let next = remaining.get().saturating_sub(1);
         remaining.set(next);
@@ -1449,6 +1512,7 @@ fn commit(
                 &focus_shutdown_cloned,
                 &tx_cloned,
                 &app_weak_cloned,
+                &torn_down_cloned,
                 outcome.clone(),
             );
             return glib::ControlFlow::Break;
@@ -1461,13 +1525,16 @@ fn commit(
     *countdown_source.borrow_mut() = Some(id);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cancel(
     tx: &Sender,
     finalised: &Rc<RefCell<bool>>,
     windows: &WindowRegistry,
+    host: &Rc<ToolbarHost>,
     focus_shutdown: &FocusShutdown,
     app_weak: &glib::WeakRef<gtk4::Application>,
     countdown_source: &Rc<RefCell<Option<glib::SourceId>>>,
+    torn_down: &TornDown,
 ) {
     // An in-flight countdown means `commit()` has already set `finalised = true`. Escape
     // during the countdown still has to win, so we treat the presence of a live timer
@@ -1484,8 +1551,9 @@ fn cancel(
         *f = true;
         drop(f);
     }
+    tracing::debug!("cancel: dismissing selector overlays");
     stop_focus(focus_shutdown);
-    dismiss_overlays(windows);
+    dismiss_overlays(windows, host, torn_down);
     send_once(tx, Err(anyhow::Error::new(Cancelled)));
     if let Some(app) = app_weak.upgrade() {
         app.quit();

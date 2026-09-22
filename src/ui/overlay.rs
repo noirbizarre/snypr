@@ -140,6 +140,13 @@ type WindowRegistry = Rc<RefCell<Vec<gtk4::ApplicationWindow>>>;
 type ResultSender = Arc<Mutex<Option<mpsc::SyncSender<Result<()>>>>>;
 /// Shared handle to the Hyprland focus-event reader's shutdown channel. Fired by [`tear_down`].
 type FocusShutdown = Rc<RefCell<Option<tokio::sync::oneshot::Sender<()>>>>;
+/// Flipped to `true` by [`tear_down`] before any window is destroyed. Checked by
+/// [`attach_focus`]'s WM focus-watch loop *before* calling into [`ToolbarHost`] — mirrors
+/// `selector.rs`'s `TornDown`; see that module's doc comment for the race this closes
+/// (window destruction is synchronous, but the upstream `watch::Sender` this loop reads
+/// only closes once the WM-focus task observes the shutdown signal asynchronously, on a
+/// different thread, with no ordering guarantee relative to this synchronous teardown).
+type TornDown = Rc<Cell<bool>>;
 
 /// Per-monitor canvas paired with the region of the unified Edit-mode buffer it owns. In Draw
 /// mode `slice` is `None` and the canvas is empty + transparent.
@@ -231,13 +238,15 @@ fn run_gtk(
 /// tear the overlay down cleanly without racing the GTK thread.
 fn attach_shutdown(shared: &Shared, rx: tokio::sync::oneshot::Receiver<()>) {
     let windows = shared.windows.clone();
+    let host = shared.host.clone();
     let focus_shutdown = shared.focus_shutdown.clone();
     let app_weak = shared.app_weak.clone();
+    let torn_down = shared.torn_down.clone();
     glib::MainContext::default().spawn_local(async move {
         // If the sender is dropped without firing, await yields Err; either way we tear down so
         // the overlay doesn't outlive the daemon-side state.
         let _ = rx.await;
-        tear_down(&windows, &focus_shutdown, &app_weak);
+        tear_down(&windows, &host, &focus_shutdown, &app_weak, &torn_down);
     });
 }
 
@@ -268,9 +277,14 @@ fn attach_commands(shared: &Shared, mut rx: OverlayCommandRx) {
 /// teardown).
 fn attach_focus(shared: &Shared, mut rx: tokio::sync::watch::Receiver<Option<String>>) {
     let host = shared.host.clone();
+    let torn_down = shared.torn_down.clone();
     glib::MainContext::default().spawn_local(async move {
         while rx.changed().await.is_ok() {
             let name = rx.borrow_and_update().clone();
+            tracing::debug!(connector = ?name, "attach_focus: focused-output changed");
+            if torn_down.get() {
+                break;
+            }
             host.move_to_connector(name.as_deref());
         }
     });
@@ -433,6 +447,7 @@ fn build_overlays(
         // the visual context the user just had in the region selector persists into the
         // annotation editor. `None` in Draw mode keeps the overlay fully transparent.
         edit_veil_dim: ctx.config.ui.selector.dim_strong.to_rgba(),
+        torn_down: Rc::new(Cell::new(false)),
     };
 
     // Wire the single toolbar's actions once (Tool/Color/Style/Clear/Passthrough/Undo/Save).
@@ -546,6 +561,8 @@ struct Shared {
     /// Sourced from `ctx.config.ui.selector.dim_strong` so the annotation editor reuses the
     /// exact veil the user just saw in the region selector. Unused in Draw mode.
     edit_veil_dim: gtk4::gdk::RGBA,
+    /// Set by [`tear_down`] before it destroys any window. See [`TornDown`].
+    torn_down: TornDown,
 }
 
 /// Build (or skip) one overlay window for a monitor. Returns `Some(window)` when a window
@@ -815,6 +832,7 @@ fn wire_toolbar(shared: &Shared) {
     let blur_in_flight = shared.blur_capture_in_flight.clone();
     let notify = shared.notify.clone();
     let sinks = shared.sinks.clone();
+    let torn_down = shared.torn_down.clone();
 
     let toolbar = shared.host.toolbar();
     toolbar.connect(move |action| match action {
@@ -915,7 +933,7 @@ fn wire_toolbar(shared: &Shared) {
                             for p in &paths {
                                 println!("{}", p.display());
                             }
-                            tear_down(&windows, &focus_shutdown, &app_weak);
+                            tear_down(&windows, &host, &focus_shutdown, &app_weak, &torn_down);
                         }
                         Err(err) => report_overlay_error(&notify, "save failed", &err),
                     },
@@ -1401,11 +1419,13 @@ async fn run_draw_save(
 fn install_keys(window: &gtk4::ApplicationWindow, shared: &Shared) {
     let key = gtk4::EventControllerKey::new();
     let windows = shared.windows.clone();
+    let host = shared.host.clone();
     let focus_shutdown = shared.focus_shutdown.clone();
     let app_weak = shared.app_weak.clone();
+    let torn_down = shared.torn_down.clone();
     key.connect_key_pressed(move |_, k, _, _| match k {
         gdk4::Key::Escape => {
-            tear_down(&windows, &focus_shutdown, &app_weak);
+            tear_down(&windows, &host, &focus_shutdown, &app_weak, &torn_down);
             glib::Propagation::Stop
         }
         _ => glib::Propagation::Proceed,
@@ -1529,9 +1549,16 @@ fn toolbar_input_region(
 
 fn tear_down(
     windows: &WindowRegistry,
+    host: &Rc<ToolbarHost>,
     focus_shutdown: &FocusShutdown,
     app_weak: &glib::WeakRef<gtk4::Application>,
+    torn_down: &TornDown,
 ) {
+    tracing::debug!("tear_down: dismissing overlay windows");
+    // Flip this before touching any window so a focus-change event already in flight on
+    // the GTK main loop (see `attach_focus`) bails out instead of calling into
+    // `ToolbarHost` slots we're about to destroy or clear.
+    torn_down.set(true);
     // Stop the window-manager focus-event reader so its connection closes promptly (otherwise
     // it lingers until the watch receiver is dropped with the GTK app).
     if let Some(tx) = focus_shutdown.borrow_mut().take() {
@@ -1544,6 +1571,9 @@ fn tear_down(
     if let Some(display) = gdk4::Display::default() {
         display.flush();
     }
+    // Drop the host's slot registry too — see `selector.rs::dismiss_overlays` for why this
+    // is kept alongside (not instead of) the `torn_down` flag above.
+    host.clear();
     if let Some(app) = app_weak.upgrade() {
         app.quit();
     }
