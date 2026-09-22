@@ -10,8 +10,9 @@
 //! 5. On `Ready`, read pixels out of the SHM-mapped buffer.
 
 use std::io::Write;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -23,7 +24,7 @@ use smithay_client_toolkit::{
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
-    Connection, QueueHandle,
+    Connection, EventQueue, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_buffer, wl_output, wl_registry, wl_shm},
 };
@@ -81,6 +82,124 @@ impl WlrCapturer {
     }
 }
 
+/// Upper bound on how long we wait for the compositor to answer a screencopy frame
+/// request before giving up. Real-world negotiation is sub-100ms; this is generous
+/// enough to tolerate a slow multi-monitor round-trip without masking a genuine hang —
+/// an output disconnect/reconfiguration race, or any other compositor-side hiccup that
+/// leaves a `zwlr_screencopy_frame_v1` request with no `Buffer`/`Ready`/`Failed` event
+/// ever arriving. Without this bound, [`wait_until`] (used by every frame-wait loop in
+/// this module) would block the calling `spawn_blocking` thread forever, which is
+/// exactly the "stuck capturing" failure mode this constant exists to prevent.
+const SCREENCOPY_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How much of the wait is left before `deadline`, or `None` once it's passed (or
+/// exactly reached — a zero-length poll isn't a useful "still have time" signal).
+///
+/// Pure so the "ran out of time" edge case is unit-testable without a live Wayland
+/// connection; the actual fd-poll glue in [`dispatch_or_timeout`] can't be exercised
+/// without a real compositor, matching this file's existing test boundary (see
+/// `wl_shm_format`/`want_output` for the same split between pure logic and Wayland
+/// glue).
+fn remaining_until(deadline: Instant, now: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|d| !d.is_zero())
+}
+
+/// One bounded round of "dispatch whatever's already buffered, else wait for the
+/// compositor's next batch of events (or `deadline`, whichever comes first) and
+/// dispatch that." Building block for [`wait_until`].
+///
+/// Unlike `EventQueue::blocking_dispatch`, this never blocks past `deadline`: on
+/// timeout it cancels the pending read (dropping the `ReadEventsGuard`) and returns
+/// `CaptureError::Timeout` instead of parking on `libc::poll` indefinitely.
+fn dispatch_or_timeout(
+    queue: &mut EventQueue<AppData>,
+    data: &mut AppData,
+    deadline: Instant,
+) -> Result<()> {
+    if queue.dispatch_pending(data)? > 0 {
+        return Ok(());
+    }
+    queue.flush()?;
+    let Some(remaining) = remaining_until(deadline, Instant::now()) else {
+        return Err(CaptureError::Timeout(SCREENCOPY_FRAME_TIMEOUT).into());
+    };
+    let Some(guard) = queue.prepare_read() else {
+        // Events arrived between `dispatch_pending` and here (e.g. another thread
+        // read them); nothing to poll on this round, but there's work waiting for
+        // the next `dispatch_pending` call.
+        return Ok(());
+    };
+    let fd = guard.connection_fd();
+    let mut pollfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+    loop {
+        let ret = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            drop(guard);
+            return Err(err).context("polling the wayland connection for screencopy events");
+        }
+        break;
+    }
+    if !poll_signalled_readable(pollfd.revents) {
+        // Timed out: the socket never became readable within `remaining`.
+        drop(guard);
+        return Err(CaptureError::Timeout(SCREENCOPY_FRAME_TIMEOUT).into());
+    }
+    guard.read()?;
+    queue.dispatch_pending(data)?;
+    Ok(())
+}
+
+/// Pure classification of a `poll(2)` result: did anything happen on the fd, or did we
+/// genuinely time out? Split out of [`dispatch_or_timeout`] so this exact bit logic is
+/// unit-testable without a live Wayland connection.
+///
+/// Checks `POLLHUP`/`POLLERR` alongside `POLLIN`: if the compositor drops the
+/// connection, Linux may report that as `POLLHUP` without `POLLIN` — checking `POLLIN`
+/// alone would make a closed connection look exactly like a timeout instead of
+/// surfacing the actual disconnect via `guard.read()`.
+fn poll_signalled_readable(revents: i16) -> bool {
+    revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+}
+
+/// Pure decision behind [`AppData::output_destroyed`]: should a frame slot matching the
+/// destroyed output be failed early? Split out so the logic is unit-testable without a
+/// live `wl_output::WlOutput` proxy (which can't be constructed outside a real Wayland
+/// connection) — mirrors [`poll_signalled_readable`]/[`remaining_until`].
+fn should_fail_on_output_destroyed(
+    slot_matches_destroyed_output: bool,
+    done: bool,
+    failed: bool,
+) -> bool {
+    slot_matches_destroyed_output && !done && !failed
+}
+
+/// Drive `queue` until `done(data)` is true, or bail with `CaptureError::Timeout` once
+/// `timeout` elapses. Replaces the unbounded `while ... { queue.blocking_dispatch(...) }`
+/// pattern for every frame-wait loop in this module — see [`SCREENCOPY_FRAME_TIMEOUT`].
+fn wait_until(
+    queue: &mut EventQueue<AppData>,
+    data: &mut AppData,
+    timeout: Duration,
+    mut done: impl FnMut(&AppData) -> bool,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !done(data) {
+        dispatch_or_timeout(queue, data, deadline)?;
+    }
+    Ok(())
+}
+
 fn probe_pixel_formats_blocking() -> Result<Vec<(String, u32)>> {
     let conn = Connection::connect_to_env().context("connecting to wayland display")?;
     let (globals, mut queue) = registry_queue_init::<AppData>(&conn)?;
@@ -113,14 +232,14 @@ fn probe_pixel_formats_blocking() -> Result<Vec<(String, u32)>> {
         let frame = data
             .manager
             .capture_output(0, wl_output, &qh, FrameUserData);
-        data.frames.push(FrameSlot::new(frame));
+        data.frames.push(FrameSlot::new(frame, wl_output.clone()));
     }
 
     // Drive until every frame either reports its Buffer format or fails — same wait as
     // `capture_blocking`, but we stop here instead of allocating buffers and copying.
-    while data.frames.iter().any(|f| f.format.is_none() && !f.failed) {
-        queue.blocking_dispatch(&mut data)?;
-    }
+    wait_until(&mut queue, &mut data, SCREENCOPY_FRAME_TIMEOUT, |d| {
+        !d.frames.iter().any(|f| f.format.is_none() && !f.failed)
+    })?;
 
     let mut results = Vec::with_capacity(data.frames.len());
     for (i, slot) in data.frames.iter().enumerate() {
@@ -219,13 +338,13 @@ fn capture_blocking(selection: Selection, cursor: bool) -> Result<Vec<CapturedIm
         let frame = data
             .manager
             .capture_output(cursor_flag, wl_output, &qh, FrameUserData);
-        data.frames.push(FrameSlot::new(frame));
+        data.frames.push(FrameSlot::new(frame, wl_output.clone()));
     }
 
     // Drive until we have Buffer events for every frame.
-    while data.frames.iter().any(|f| f.format.is_none() && !f.failed) {
-        queue.blocking_dispatch(&mut data)?;
-    }
+    wait_until(&mut queue, &mut data, SCREENCOPY_FRAME_TIMEOUT, |d| {
+        !d.frames.iter().any(|f| f.format.is_none() && !f.failed)
+    })?;
     if let Some(f) = data.frames.iter().find(|f| f.failed) {
         bail!("compositor failed initial frame negotiation: {:?}", f.error);
     }
@@ -254,9 +373,9 @@ fn capture_blocking(selection: Selection, cursor: bool) -> Result<Vec<CapturedIm
         slot.buffer = Some(buffer);
     }
 
-    while data.frames.iter().any(|f| !f.done && !f.failed) {
-        queue.blocking_dispatch(&mut data)?;
-    }
+    wait_until(&mut queue, &mut data, SCREENCOPY_FRAME_TIMEOUT, |d| {
+        !d.frames.iter().any(|f| !f.done && !f.failed)
+    })?;
 
     // Collect results.
     let mut results = Vec::with_capacity(data.frames.len());
@@ -413,6 +532,12 @@ struct FrameUserData;
 
 struct FrameSlot {
     frame: ZwlrScreencopyFrameV1,
+    /// The `wl_output` this frame was requested for. Lets [`AppData::output_destroyed`]
+    /// find and fail the right slot(s) when an output disappears mid-capture, instead
+    /// of relying solely on the compositor's own `Failed` event (not guaranteed) or the
+    /// [`wait_until`] timeout (correct, but slower than necessary for this specific,
+    /// detectable case).
+    output: wl_output::WlOutput,
     format: Option<u32>,
     width: u32,
     height: u32,
@@ -424,9 +549,10 @@ struct FrameSlot {
 }
 
 impl FrameSlot {
-    fn new(frame: ZwlrScreencopyFrameV1) -> Self {
+    fn new(frame: ZwlrScreencopyFrameV1, output: wl_output::WlOutput) -> Self {
         Self {
             frame,
+            output,
             format: None,
             width: 0,
             height: 0,
@@ -452,7 +578,27 @@ impl OutputHandler for AppData {
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        // An output disappearing (unplug, DPMS/output-disable, reconfiguration) while a
+        // screencopy frame is in flight for it isn't guaranteed to produce a `Failed`
+        // event from every compositor. Without this, that frame would just sit in
+        // `wait_until` until `SCREENCOPY_FRAME_TIMEOUT` — correct, but slower than
+        // necessary when we already know exactly why it'll never complete.
+        for slot in self.frames.iter_mut() {
+            if should_fail_on_output_destroyed(slot.output == output, slot.done, slot.failed) {
+                tracing::warn!(
+                    "output destroyed while a screencopy frame was in flight for it; failing that frame early"
+                );
+                slot.failed = true;
+                slot.error = Some("output was disconnected/reconfigured mid-capture".to_owned());
+            }
+        }
+    }
 }
 
 impl ShmHandler for AppData {
@@ -674,6 +820,67 @@ mod tests {
     #[test]
     fn wl_shm_format_falls_back_to_xrgb8888_for_an_unknown_fourcc() {
         assert_eq!(wl_shm_format(u32::MAX), wl_shm::Format::Xrgb8888);
+    }
+
+    #[test]
+    fn remaining_until_reports_time_left_before_the_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(2);
+        let remaining = remaining_until(deadline, now).expect("deadline is in the future");
+        // Exact equality would be flaky against `Instant` arithmetic quirks; bound it.
+        assert!(remaining <= Duration::from_secs(2));
+        assert!(remaining > Duration::from_millis(1900));
+    }
+
+    #[test]
+    fn remaining_until_is_none_once_the_deadline_has_passed() {
+        let now = Instant::now();
+        let deadline = now - Duration::from_millis(1);
+        assert_eq!(remaining_until(deadline, now), None);
+    }
+
+    #[rstest]
+    #[case(libc::POLLIN, true)]
+    #[case(libc::POLLHUP, true)]
+    #[case(libc::POLLERR, true)]
+    #[case(libc::POLLIN | libc::POLLHUP, true)]
+    #[case(libc::POLLOUT, false)]
+    #[case(0, false)]
+    fn poll_signalled_readable_matches_in_hup_and_err(
+        #[case] revents: i16,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(poll_signalled_readable(revents), expected);
+    }
+
+    #[rstest]
+    // Matching output, not yet done or failed: this is exactly the case we want to fail
+    // early instead of waiting out the full timeout.
+    #[case(true, false, false, true)]
+    // A different output: never touch it.
+    #[case(false, false, false, false)]
+    // Already finished (either way) before the output disappeared: nothing to do.
+    #[case(true, true, false, false)]
+    #[case(true, false, true, false)]
+    fn should_fail_on_output_destroyed_only_fails_live_matching_slots(
+        #[case] slot_matches_destroyed_output: bool,
+        #[case] done: bool,
+        #[case] failed: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            should_fail_on_output_destroyed(slot_matches_destroyed_output, done, failed),
+            expected
+        );
+    }
+
+    #[test]
+    fn remaining_until_is_none_exactly_at_the_deadline() {
+        // A zero-length remainder isn't a useful "still have time to poll" signal —
+        // treat it the same as "already timed out" rather than looping once more with
+        // a 0ms poll.
+        let now = Instant::now();
+        assert_eq!(remaining_until(now, now), None);
     }
 
     #[rstest]

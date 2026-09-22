@@ -63,6 +63,8 @@ pub enum CaptureError {
     NoMatchingOutput(String),
     #[error("wayland error: {0}")]
     Wayland(String),
+    #[error("timed out after {0:?} waiting for the compositor to respond")]
+    Timeout(std::time::Duration),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
