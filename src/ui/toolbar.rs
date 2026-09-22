@@ -2369,6 +2369,49 @@ mod tests {
         assert_eq!(occupied(&slots), vec![true, false, false]);
     }
 
+    /// `clear()` is what `dismiss_overlays`/`tear_down` call right after destroying every
+    /// window, so a stale focus event racing teardown degrades to a no-op instead of
+    /// touching a destroyed `gtk4::Overlay`/`ApplicationWindow` (see those functions' doc
+    /// comments in `selector.rs`/`overlay.rs`).
+    #[test]
+    fn toolbar_host_clear_empties_slots_and_resets_state() {
+        require_gtk!();
+        let host = ToolbarHost::new(selector_toolbar(OutputMode::File));
+        let slots: Vec<(gtk4::ApplicationWindow, gtk4::Overlay)> =
+            (0..2).map(|_| bare_slot()).collect();
+        for (i, (window, overlay)) in slots.iter().enumerate() {
+            host.register(i, Some(format!("OUT-{i}")), overlay, window);
+        }
+        host.place_initial(Some("OUT-0"));
+        host.set_keyboard_passthrough(true);
+        assert_eq!(host.current_index(), Some(0));
+
+        host.clear();
+
+        assert_eq!(
+            host.current_index(),
+            None,
+            "clear() must drop the slot registry entirely"
+        );
+        // A stale caller reaching in after clear() must degrade to a harmless no-op
+        // rather than touching the (now unregistered) windows above.
+        host.move_to_index(0);
+        host.move_to_connector(Some("OUT-0"));
+        assert_eq!(host.current_index(), None);
+
+        // A fresh `register`+`place_initial` after `clear()` (as happens for the
+        // embeddable `pick_region_in_app` selector, reused across draw-save cycles) must
+        // still work normally — `clear()` also resets `passthrough`, so this doesn't
+        // inherit whatever the torn-down session left behind (the actual `KeyboardMode`
+        // effect is covered in isolation by `keyboard_owner_modes_*`, not here — see that
+        // test group's doc comment for why bare windows can't assert on it directly).
+        let fresh: Vec<(gtk4::ApplicationWindow, gtk4::Overlay)> =
+            (0..1).map(|_| bare_slot()).collect();
+        host.register(0, Some("OUT-0".to_owned()), &fresh[0].1, &fresh[0].0);
+        host.place_initial(Some("OUT-0"));
+        assert_eq!(host.current_index(), Some(0));
+    }
+
     // `keyboard_owner_modes` is the pure decision core behind `ToolbarHost::sync_keyboard_mode`
     // — deliberately tested without any GTK window: `gtk4_layer_shell` silently no-ops
     // `set_keyboard_mode`/`keyboard_mode()` on a window that never became a real layer

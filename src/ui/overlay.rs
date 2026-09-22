@@ -1708,6 +1708,49 @@ mod tests {
         assert!(!passthrough.get());
     }
 
+    /// `tear_down` must flip `torn_down` before destroying anything (so a focus event
+    /// racing teardown on the GTK main loop bails out — see `attach_focus`'s doc comment),
+    /// drain the window registry, and clear the host's slot registry so a stale caller
+    /// can't reach into destroyed windows afterwards.
+    #[test]
+    fn tear_down_dismisses_windows_and_clears_host_state() {
+        require_gtk!();
+        let windows: WindowRegistry = Rc::new(RefCell::new(Vec::new()));
+        let host = ToolbarHost::new(Toolbar::new(ToolbarSpec::default()));
+        for i in 0..2 {
+            let window = gtk4::ApplicationWindow::builder().build();
+            let overlay = gtk4::Overlay::new();
+            host.register(i, Some(format!("OUT-{i}")), &overlay, &window);
+            windows.borrow_mut().push(window);
+        }
+        host.place_initial(Some("OUT-0"));
+        assert_eq!(host.current_index(), Some(0));
+
+        let focus_shutdown: FocusShutdown = Rc::new(RefCell::new(None));
+        let (focus_tx, focus_rx) = tokio::sync::oneshot::channel();
+        *focus_shutdown.borrow_mut() = Some(focus_tx);
+        let app_weak: glib::WeakRef<gtk4::Application> = glib::WeakRef::new();
+        let torn_down: TornDown = Rc::new(Cell::new(false));
+
+        tear_down(&windows, &host, &focus_shutdown, &app_weak, &torn_down);
+
+        assert!(
+            windows.borrow().is_empty(),
+            "every window must be destroyed and drained"
+        );
+        assert!(torn_down.get(), "torn_down must be set");
+        assert_eq!(
+            host.current_index(),
+            None,
+            "the host's slot registry must be cleared"
+        );
+        assert!(
+            focus_shutdown.borrow().is_none(),
+            "the shutdown sender must be taken (and fired)"
+        );
+        drop(focus_rx);
+    }
+
     #[rstest]
     #[case::file(&["file"], OutputMode::File)]
     #[case::clipboard(&["clipboard"], OutputMode::Clipboard)]

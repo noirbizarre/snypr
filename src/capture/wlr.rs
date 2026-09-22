@@ -150,11 +150,7 @@ fn dispatch_or_timeout(
         }
         break;
     }
-    // `POLLHUP`/`POLLERR` alongside `POLLIN`: if the compositor drops the connection,
-    // Linux may report that as `POLLHUP` without `POLLIN` — checking `POLLIN` alone
-    // would make a closed connection look exactly like a timeout instead of surfacing
-    // the actual disconnect via `guard.read()` below.
-    if pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+    if !poll_signalled_readable(pollfd.revents) {
         // Timed out: the socket never became readable within `remaining`.
         drop(guard);
         return Err(CaptureError::Timeout(SCREENCOPY_FRAME_TIMEOUT).into());
@@ -162,6 +158,30 @@ fn dispatch_or_timeout(
     guard.read()?;
     queue.dispatch_pending(data)?;
     Ok(())
+}
+
+/// Pure classification of a `poll(2)` result: did anything happen on the fd, or did we
+/// genuinely time out? Split out of [`dispatch_or_timeout`] so this exact bit logic is
+/// unit-testable without a live Wayland connection.
+///
+/// Checks `POLLHUP`/`POLLERR` alongside `POLLIN`: if the compositor drops the
+/// connection, Linux may report that as `POLLHUP` without `POLLIN` — checking `POLLIN`
+/// alone would make a closed connection look exactly like a timeout instead of
+/// surfacing the actual disconnect via `guard.read()`.
+fn poll_signalled_readable(revents: i16) -> bool {
+    revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+}
+
+/// Pure decision behind [`AppData::output_destroyed`]: should a frame slot matching the
+/// destroyed output be failed early? Split out so the logic is unit-testable without a
+/// live `wl_output::WlOutput` proxy (which can't be constructed outside a real Wayland
+/// connection) — mirrors [`poll_signalled_readable`]/[`remaining_until`].
+fn should_fail_on_output_destroyed(
+    slot_matches_destroyed_output: bool,
+    done: bool,
+    failed: bool,
+) -> bool {
+    slot_matches_destroyed_output && !done && !failed
 }
 
 /// Drive `queue` until `done(data)` is true, or bail with `CaptureError::Timeout` once
@@ -570,7 +590,7 @@ impl OutputHandler for AppData {
         // `wait_until` until `SCREENCOPY_FRAME_TIMEOUT` — correct, but slower than
         // necessary when we already know exactly why it'll never complete.
         for slot in self.frames.iter_mut() {
-            if slot.output == output && !slot.done && !slot.failed {
+            if should_fail_on_output_destroyed(slot.output == output, slot.done, slot.failed) {
                 tracing::warn!(
                     "output destroyed while a screencopy frame was in flight for it; failing that frame early"
                 );
@@ -817,6 +837,41 @@ mod tests {
         let now = Instant::now();
         let deadline = now - Duration::from_millis(1);
         assert_eq!(remaining_until(deadline, now), None);
+    }
+
+    #[rstest]
+    #[case(libc::POLLIN, true)]
+    #[case(libc::POLLHUP, true)]
+    #[case(libc::POLLERR, true)]
+    #[case(libc::POLLIN | libc::POLLHUP, true)]
+    #[case(libc::POLLOUT, false)]
+    #[case(0, false)]
+    fn poll_signalled_readable_matches_in_hup_and_err(
+        #[case] revents: i16,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(poll_signalled_readable(revents), expected);
+    }
+
+    #[rstest]
+    // Matching output, not yet done or failed: this is exactly the case we want to fail
+    // early instead of waiting out the full timeout.
+    #[case(true, false, false, true)]
+    // A different output: never touch it.
+    #[case(false, false, false, false)]
+    // Already finished (either way) before the output disappeared: nothing to do.
+    #[case(true, true, false, false)]
+    #[case(true, false, true, false)]
+    fn should_fail_on_output_destroyed_only_fails_live_matching_slots(
+        #[case] slot_matches_destroyed_output: bool,
+        #[case] done: bool,
+        #[case] failed: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            should_fail_on_output_destroyed(slot_matches_destroyed_output, done, failed),
+            expected
+        );
     }
 
     #[test]
