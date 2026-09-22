@@ -18,6 +18,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{oneshot, watch};
 
 use super::{ActiveWindow, WmBackend, WmWindow};
+use crate::capture::region::Rect;
 
 /// Hyprland [`WmBackend`] implementation.
 pub struct Hyprland;
@@ -88,6 +89,11 @@ async fn active_window() -> Result<ActiveWindow> {
 async fn clients() -> Result<Vec<WmWindow>> {
     let body = query("j/clients").await?;
 
+    let monitors = query("j/monitors").await?;
+    parse_clients(&body, &monitors)
+}
+
+fn parse_clients(body: &str, monitors: &str) -> Result<Vec<WmWindow>> {
     #[derive(Deserialize)]
     struct RawWorkspace {
         id: i64,
@@ -103,22 +109,75 @@ async fn clients() -> Result<Vec<WmWindow>> {
         workspace: RawWorkspace,
         mapped: bool,
         hidden: bool,
+        #[serde(default)]
+        floating: bool,
+        #[serde(default)]
+        pinned: bool,
+        #[serde(default)]
+        fullscreen: u8,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Monitor {
+        id: i64,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        scale: f64,
+        transform: u8,
+        active_workspace: RawWorkspace,
+        special_workspace: RawWorkspace,
     }
 
-    let raw: Vec<Raw> = serde_json::from_str(&body)
+    let monitors: Vec<Monitor> = serde_json::from_str(monitors)
+        .context("parsing Hyprland monitors response for client visibility")?;
+    let raw: Vec<Raw> = serde_json::from_str(body)
         .with_context(|| format!("parsing Hyprland clients response: {body}"))?;
     Ok(raw
         .into_iter()
-        .map(|r| WmWindow {
-            id: r.address,
-            title: r.title,
-            class: r.class,
-            at: Some((r.at[0], r.at[1])),
-            size: Some((r.size[0].max(0) as u32, r.size[1].max(0) as u32)),
-            monitor: r.monitor.to_string(),
-            workspace_id: r.workspace.id,
-            mapped: r.mapped,
-            hidden: r.hidden,
+        .map(|r| {
+            let mut rect = Some(Rect {
+                x: r.at[0],
+                y: r.at[1],
+                w: r.size[0].max(0) as u32,
+                h: r.size[1].max(0) as u32,
+            });
+            let monitor = monitors.iter().find(|m| m.id == r.monitor);
+            let visible_workspace = monitor.is_some_and(|m| {
+                r.pinned
+                    || r.workspace.id == m.active_workspace.id
+                    || (m.special_workspace.id != 0 && r.workspace.id == m.special_workspace.id)
+            });
+            // Tiled windows on a scrolling layout retain offscreen global coordinates.
+            // Hyprland renders them only on their owning monitor; floating windows may span
+            // outputs. Clip the selection too, so capture cannot include a neighbouring output.
+            if !r.floating || r.fullscreen != 0 {
+                rect = monitor.and_then(|m| {
+                    let (width, height) = if m.transform % 2 == 1 {
+                        (m.height, m.width)
+                    } else {
+                        (m.width, m.height)
+                    };
+                    rect?.intersect(&Rect {
+                        x: m.x,
+                        y: m.y,
+                        w: (f64::from(width) / m.scale).round() as u32,
+                        h: (f64::from(height) / m.scale).round() as u32,
+                    })
+                });
+            }
+            WmWindow {
+                id: r.address,
+                title: r.title,
+                class: r.class,
+                at: rect.map(|r| (r.x, r.y)),
+                size: rect.map(|r| (r.w, r.h)),
+                monitor: r.monitor.to_string(),
+                workspace_id: r.workspace.id,
+                mapped: r.mapped,
+                hidden: r.hidden || !visible_workspace || rect.is_none(),
+            }
         })
         .collect())
 }
@@ -302,6 +361,76 @@ mod tests {
     #[case("focusedmon>>", None)]
     fn parses_focused_monitor_events(#[case] line: &str, #[case] expected: Option<&str>) {
         assert_eq!(parse_focused_monitor_event(line), expected);
+    }
+
+    const MONITORS: &str = r#"[
+        {"id":0,"x":0,"y":0,"width":1920,"height":1080,"scale":1,"transform":0,
+         "activeWorkspace":{"id":1},"specialWorkspace":{"id":0}},
+        {"id":1,"x":1920,"y":0,"width":2560,"height":1440,"scale":1,"transform":0,
+         "activeWorkspace":{"id":11},"specialWorkspace":{"id":-99}}
+    ]"#;
+
+    #[rstest]
+    #[case::offscreen_left(1500, false, 11, false, false, None)]
+    #[case::partial_left(1800, false, 11, false, false, Some((1920, 180)))]
+    #[case::partial_right(4400, false, 11, false, false, Some((4400, 80)))]
+    #[case::visible(2000, false, 11, false, false, Some((2000, 300)))]
+    #[case::inactive_workspace(2000, false, 12, false, false, None)]
+    #[case::closed_special(2000, false, -98, false, false, None)]
+    #[case::open_special(2000, false, -99, false, false, Some((2000, 300)))]
+    #[case::floating_spans_outputs(1800, true, 11, false, false, Some((1800, 300)))]
+    #[case::pinned(1800, true, 12, true, false, Some((1800, 300)))]
+    #[case::hidden(2000, false, 11, false, true, None)]
+    fn clients_select_only_visible_geometry(
+        #[case] x: i32,
+        #[case] floating: bool,
+        #[case] workspace: i64,
+        #[case] pinned: bool,
+        #[case] hidden: bool,
+        #[case] expected: Option<(i32, u32)>,
+    ) {
+        let body = serde_json::json!([{
+            "address":"0x1", "title":"t", "class":"c", "at":[x,10], "size":[300,100],
+            "monitor":1, "workspace":{"id":workspace}, "mapped":true, "hidden":hidden,
+            "floating":floating, "pinned":pinned
+        }]);
+        let clients = parse_clients(&body.to_string(), MONITORS).unwrap();
+        let selectable = clients
+            .iter()
+            .filter(|w| w.mapped && !w.hidden)
+            .filter_map(WmWindow::rect)
+            .map(|r| (r.x, r.w))
+            .collect::<Vec<_>>();
+        assert_eq!(selectable, expected.into_iter().collect::<Vec<_>>());
+        if !floating {
+            assert!(super::super::window_at(&clients, 1800, 10).is_none());
+        }
+    }
+
+    #[rstest]
+    #[case::scaled(0, 1800, 100, 1920, 200)]
+    #[case::rotated(1, 2000, 900, 2000, 180)]
+    #[case::flipped_rotated(5, 2000, 900, 2000, 180)]
+    fn clients_clip_in_logical_monitor_coordinates(
+        #[case] transform: u8,
+        #[case] x: i32,
+        #[case] y: i32,
+        #[case] expected_x: i32,
+        #[case] expected_height: u32,
+    ) {
+        let monitors = serde_json::json!([{
+            "id":1, "x":1920, "y":0, "width":2160, "height":1440,
+            "scale":2, "transform":transform,
+            "activeWorkspace":{"id":11}, "specialWorkspace":{"id":0}
+        }]);
+        let body = serde_json::json!([{
+            "address":"0x1", "title":"t", "class":"c", "at":[x,y], "size":[300,200],
+            "monitor":1, "workspace":{"id":11}, "mapped":true, "hidden":false
+        }]);
+        let clients = parse_clients(&body.to_string(), &monitors.to_string()).unwrap();
+        let rect = clients[0].rect().unwrap();
+        assert_eq!(rect.x, expected_x);
+        assert_eq!(rect.h, expected_height);
     }
 
     fn win(id: &str, x: i32, y: i32, w: u32, h: u32, mapped: bool, hidden: bool) -> WmWindow {
@@ -503,6 +632,8 @@ mod tests {
                 r#"[{"address":"0x1","title":"t","class":"c","at":[0,0],"size":[10,10],"monitor":0,"workspace":{"id":1},"mapped":true,"hidden":false}]"#,
             )
             .await;
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_command(stream, MONITORS).await;
         });
 
         let backend: &dyn WmBackend = &Hyprland;
