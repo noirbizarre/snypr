@@ -145,7 +145,7 @@ once_cell = "1"
 glib-build-tools = { version = "0.22", optional = true }
 
 [dev-dependencies]
-rstest = "0.26"
+rstest = "0.27"
 pretty_assertions = "1"
 tempfile = "3"
 
