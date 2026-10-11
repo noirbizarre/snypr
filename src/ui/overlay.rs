@@ -1374,7 +1374,7 @@ async fn run_draw_save(
     host.toolbar().set_output_mode(outcome.output_mode);
     let app_ctx = draw_save.app_ctx.clone();
     let collected = draw_save.collected.clone();
-    let label = crate::cli::screenshot::selection_label(&selection);
+    let label = crate::cli::selection::selection_label(&selection);
 
     let join = draw_save.runtime.spawn(async move {
         let capturer = crate::capture::wlr::WlrCapturer::new()?;

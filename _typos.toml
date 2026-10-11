@@ -22,3 +22,4 @@ presse = "presse" # "presse-papiers" -- clipboard
 unparseable = "unparseable"
 unparented = "unparented"
 PN = "PN"                   # "PNG" truncated by the tokenizer in a prose comment
+datas = "datas"             # `pipewire::buffer::Buffer::datas_mut()` -- upstream API name

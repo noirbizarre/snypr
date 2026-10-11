@@ -61,6 +61,14 @@ description = "Run the application"
 raw_args = true
 run = 'cargo run --bin snypr --'
 
+[tasks."snypr:screencast"]
+description = "Run the application with `snypr record` enabled"
+raw_args = true
+# `screencast` is opt-in (needs `pipewire` dev headers at build time, ffmpeg at runtime —
+# see README's Build dependencies), so the plain `snypr` task above builds default features
+# only. Use this one to exercise `record`, e.g. `mise run snypr:screencast record`.
+run = 'cargo run --bin snypr --features screencast --'
+
 [tasks.fmt]
 description = "Format the code"
 run = "cargo fmt --all"
