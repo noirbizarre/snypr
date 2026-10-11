@@ -7,14 +7,17 @@ use anyhow::{Context as _, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
-// Only the overlay lifecycle uses a oneshot, and that whole path is `ui`-gated.
-#[cfg(feature = "ui")]
+// The overlay and recording lifecycles are the only users of a oneshot shutdown signal, and
+// both are feature-gated (`ui` / `screencast` respectively).
+#[cfg(any(feature = "ui", feature = "screencast"))]
 use tokio::sync::oneshot;
 
 use crate::capture::Selection;
 use crate::capture::region::Rect;
 use crate::cli::SinkSpec as CliSinkSpec;
 use crate::context::Ctx;
+#[cfg(feature = "screencast")]
+use crate::ipc::{RecordRequest, VideoFormatSpec};
 use crate::ipc::{Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
 
 /// Handle to a daemon-spawned draw overlay. Holds the channels needed to drive it from
@@ -26,6 +29,15 @@ use crate::ipc::{Request, Response, ScreenshotRequest, SelectionSpec, SinkSpec};
 struct OverlayHandle {
     shutdown: oneshot::Sender<()>,
     commands: tokio::sync::mpsc::UnboundedSender<crate::ui::overlay::OverlayCommand>,
+}
+
+/// Handle to a daemon-spawned recording session. `shutdown` asks
+/// [`crate::record::run`]'s driving loop to stop; `task` is its `JoinHandle`, awaited by the
+/// second `RecordToggle` call to retrieve the finished file's path (or its error).
+#[cfg(feature = "screencast")]
+struct RecordHandle {
+    shutdown: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<Result<PathBuf>>,
 }
 
 /// Per-daemon mutable state that survives across IPC clients. Shared via `Arc` between the
@@ -43,6 +55,11 @@ struct DaemonState {
     /// A `PassthroughToggle` request reads the `commands` channel instead.
     #[cfg(feature = "ui")]
     overlay: Mutex<Option<OverlayHandle>>,
+    /// `Some(handle)` while a daemon-managed recording is in progress. A `RecordToggle`
+    /// request flips this exactly like `overlay` above: present → stop it and return its
+    /// path; absent → start a new one.
+    #[cfg(feature = "screencast")]
+    recording: Mutex<Option<RecordHandle>>,
 }
 
 /// Default IPC socket path: `$XDG_RUNTIME_DIR/snypr.sock`, falling back to the OS temp
@@ -109,9 +126,41 @@ pub async fn serve(ctx: Ctx, socket: PathBuf, systray: bool) -> Result<()> {
         }
     }
 
+    // A recording left running when the daemon exits would never get its container trailer
+    // (moov atom, WebM cues, ...) written, producing a corrupt/unplayable file — unlike the
+    // draw overlay, which has no on-disk state to lose, this one gets an explicit graceful
+    // finalization step before the process actually exits.
+    finalize_recording(&state).await;
+
     let _ = std::fs::remove_file(&socket);
     Ok(())
 }
+
+/// Stop any in-flight daemon-managed recording and wait for `ffmpeg` to finish muxing before
+/// the daemon process exits. Best-effort: failures are logged, not propagated, since `serve`
+/// is already on its way out either way.
+#[cfg(feature = "screencast")]
+async fn finalize_recording(state: &Arc<DaemonState>) {
+    let Some(handle) = state.recording.lock().await.take() else {
+        return;
+    };
+    tracing::info!("daemon shutting down with a recording in progress; finalizing it");
+    let _ = handle.shutdown.send(());
+    match handle.task.await {
+        Ok(Ok(path)) => {
+            tracing::info!(path = %path.display(), "recording finalized before shutdown");
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(error = ?err, "recording failed while finalizing before shutdown");
+        }
+        Err(err) => {
+            tracing::warn!(error = ?err, "recording task panicked while finalizing before shutdown");
+        }
+    }
+}
+
+#[cfg(not(feature = "screencast"))]
+async fn finalize_recording(_state: &Arc<DaemonState>) {}
 
 /// Awaits the next message from an optional channel; returns `None` forever when the channel is
 /// absent (so the `select!` arm never resolves and doesn't tip the loop). This is cleaner than
@@ -189,6 +238,30 @@ async fn handle_tray_action(
                 }
             });
         }
+        #[cfg(feature = "screencast")]
+        TrayAction::ToggleRecording => {
+            tokio::spawn(async move {
+                // Tray entry point has no per-invocation flags to override; recording
+                // starts against `Selection::Full` (mirroring the plain-screenshot tray
+                // item) with every other parameter left to fall back to config defaults.
+                let req = crate::ipc::RecordRequest {
+                    selection: SelectionSpec::Full,
+                    cursor: false,
+                    fps: None,
+                    format: None,
+                    path: None,
+                };
+                match toggle_recording(&ctx, &state, req).await {
+                    Ok(Response::Paths { paths }) => {
+                        for p in &paths {
+                            tracing::info!(path = %p.display(), "tray recording saved");
+                        }
+                    }
+                    Ok(_) => tracing::info!("tray recording started"),
+                    Err(err) => tracing::warn!(error = ?err, "tray recording toggle failed"),
+                }
+            });
+        }
     }
     false
 }
@@ -233,6 +306,7 @@ async fn dispatch(ctx: Ctx, state: Arc<DaemonState>, req: Request) -> Response {
         Request::PassthroughToggle => toggle_overlay_passthrough(&state)
             .await
             .map(|_| Response::Ok),
+        Request::RecordToggle(req) => toggle_recording(&ctx, &state, req).await,
     };
     match result {
         Ok(resp) => resp,
@@ -339,6 +413,89 @@ async fn toggle_overlay(ctx: &Ctx, state: &Arc<DaemonState>) -> Result<Response>
 #[cfg(not(feature = "ui"))]
 async fn toggle_overlay(_ctx: &Ctx, _state: &Arc<DaemonState>) -> Result<Response> {
     anyhow::bail!("{}", crate::i18n::fl!("error-draw-requires-ui-feature"))
+}
+
+/// Toggle a daemon-managed recording, mirroring [`toggle_overlay`]'s present/absent shape:
+/// present → send the shutdown signal and await the session's `JoinHandle` for its finished
+/// path; absent → resolve the requested selection/output path against `ctx`'s config and
+/// spawn a fresh session.
+#[cfg(feature = "screencast")]
+async fn toggle_recording(
+    ctx: &Ctx,
+    state: &Arc<DaemonState>,
+    req: RecordRequest,
+) -> Result<Response> {
+    use anyhow::Context as _;
+
+    let mut guard = state.recording.lock().await;
+    if let Some(handle) = guard.take() {
+        drop(guard);
+        let _ = handle.shutdown.send(());
+        let path = handle.task.await.context("recording task panicked")??;
+        crate::cli::record::notify_recording_saved(&ctx.config, &path);
+        return Ok(Response::Paths { paths: vec![path] });
+    }
+
+    let selection = selection_from_spec(req.selection);
+    let cursor = req.cursor || ctx.config.record.cursor;
+    let format = req
+        .format
+        .map(video_format_from_spec)
+        .unwrap_or(ctx.config.record.format);
+    let fps = req.fps.unwrap_or(ctx.config.record.fps);
+    let crf = ctx.config.record.crf;
+    let path = crate::cli::record::resolve_output_path(&ctx.config, req.path, format, &selection);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let opts = crate::record::RecordOptions {
+        selection,
+        cursor,
+        fps,
+        format,
+        crf,
+        path,
+    };
+    let task = tokio::spawn(crate::record::run(opts, shutdown_rx));
+    *guard = Some(RecordHandle {
+        shutdown: shutdown_tx,
+        task,
+    });
+    crate::cli::record::notify_recording_started(&ctx.config);
+    Ok(Response::Ok)
+}
+
+/// Without the `screencast` feature there is no recording pipeline to toggle.
+#[cfg(not(feature = "screencast"))]
+async fn toggle_recording(
+    _ctx: &Ctx,
+    _state: &Arc<DaemonState>,
+    _req: crate::ipc::RecordRequest,
+) -> Result<Response> {
+    anyhow::bail!(
+        "{}",
+        crate::i18n::fl!("error-record-requires-screencast-feature")
+    )
+}
+
+/// Convert the wire [`VideoFormatSpec`] into the in-process [`crate::config::VideoFormat`].
+#[cfg(feature = "screencast")]
+fn video_format_from_spec(spec: VideoFormatSpec) -> crate::config::VideoFormat {
+    match spec {
+        VideoFormatSpec::Mp4 => crate::config::VideoFormat::Mp4,
+        VideoFormatSpec::WebM => crate::config::VideoFormat::WebM,
+        VideoFormatSpec::Gif => crate::config::VideoFormat::Gif,
+    }
+}
+
+/// Reverse of [`video_format_from_spec`], used by the IPC client when forwarding CLI args to
+/// the daemon.
+#[cfg(feature = "screencast")]
+pub fn video_format_to_spec(format: crate::config::VideoFormat) -> VideoFormatSpec {
+    match format {
+        crate::config::VideoFormat::Mp4 => VideoFormatSpec::Mp4,
+        crate::config::VideoFormat::WebM => VideoFormatSpec::WebM,
+        crate::config::VideoFormat::Gif => VideoFormatSpec::Gif,
+    }
 }
 
 async fn run_screenshot(

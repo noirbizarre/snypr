@@ -16,6 +16,10 @@ pub enum Request {
     /// Errors when no overlay is alive. Bind to a Hyprland global keybind so users can
     /// recover from passthrough mode (which detaches the surface from the keyboard).
     PassthroughToggle,
+    /// Start a daemon-managed recording if none is running, otherwise stop the running one
+    /// and return its file path. Mirrors `DrawToggle`'s start/stop-on-alternate-calls shape.
+    /// Only meaningful in builds with the `screencast` cargo feature.
+    RecordToggle(RecordRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +36,35 @@ pub struct ScreenshotRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_secs: Option<u32>,
     pub sinks: Vec<SinkSpec>,
+}
+
+/// Parameters for starting a daemon-managed recording. Ignored (but still required on the
+/// wire for a well-formed request) when this `RecordToggle` is actually the *stop* call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordRequest {
+    pub selection: SelectionSpec,
+    pub cursor: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<VideoFormatSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+/// Wire form of [`crate::config::VideoFormat`], kept as an independent enum (like
+/// [`SinkSpec`] vs. `crate::cli::SinkSpec`) so the IPC schema doesn't change shape if the
+/// config-side enum ever needs config-only fields.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+// `lowercase`, not `snake_case`: the latter would render `WebM` as `"web_m"`, disagreeing
+// with `config::VideoFormat`'s own `#[serde(rename_all = "lowercase")]` (`"webm"`) for no
+// good reason — keep the two wire forms (TOML config value, IPC JSON tag) textually
+// identical for the same logical enum.
+#[serde(rename_all = "lowercase")]
+pub enum VideoFormatSpec {
+    Mp4,
+    WebM,
+    Gif,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +143,20 @@ mod tests {
         delay_secs: Some(3),
         sinks: vec![SinkSpec::File { path: None }],
     }))]
+    #[case(Request::RecordToggle(RecordRequest {
+        selection: SelectionSpec::Full,
+        cursor: false,
+        fps: None,
+        format: None,
+        path: None,
+    }))]
+    #[case(Request::RecordToggle(RecordRequest {
+        selection: SelectionSpec::Region { x: 1, y: 2, w: 3, h: 4 },
+        cursor: true,
+        fps: Some(60),
+        format: Some(VideoFormatSpec::WebM),
+        path: Some("/tmp/cast.webm".into()),
+    }))]
     fn round_trips_requests(#[case] req: Request) {
         let json = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&json).unwrap();
@@ -183,6 +230,68 @@ mod tests {
             json,
             r#"{"kind":"screenshot","selection":{"kind":"region","x":1,"y":2,"w":3,"h":4},"cursor":true,"edit":true,"delay_secs":3,"sinks":[{"kind":"file","path":"/tmp/a.png"},{"kind":"clipboard","clipboard_kind":"primary"}]}"#
         );
+    }
+
+    #[test]
+    fn record_toggle_request_omits_optional_fields_when_unset() {
+        let json = serde_json::to_string(&Request::RecordToggle(RecordRequest {
+            selection: SelectionSpec::Full,
+            cursor: false,
+            fps: None,
+            format: None,
+            path: None,
+        }))
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"record_toggle","selection":{"kind":"full"},"cursor":false}"#
+        );
+    }
+
+    #[test]
+    fn record_toggle_request_emits_optional_fields_when_set() {
+        let json = serde_json::to_string(&Request::RecordToggle(RecordRequest {
+            selection: SelectionSpec::Output {
+                name: "DP-1".into(),
+            },
+            cursor: true,
+            fps: Some(60),
+            format: Some(VideoFormatSpec::WebM),
+            path: Some("/tmp/cast.webm".into()),
+        }))
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"record_toggle","selection":{"kind":"output","name":"DP-1"},"cursor":true,"fps":60,"format":"webm","path":"/tmp/cast.webm"}"#
+        );
+    }
+
+    /// `VideoFormatSpec` intentionally uses `lowercase`, not `snake_case` — pin the exact
+    /// wire tokens so a future edit doesn't silently reintroduce `"web_m"` (see the type's
+    /// doc comment) and, more importantly, so they stay identical to
+    /// `config::VideoFormat`'s own TOML tokens (`"mp4"`, `"webm"`, `"gif"`).
+    #[rstest]
+    #[case(VideoFormatSpec::Mp4, r#""mp4""#)]
+    #[case(VideoFormatSpec::WebM, r#""webm""#)]
+    #[case(VideoFormatSpec::Gif, r#""gif""#)]
+    fn video_format_spec_uses_lowercase_tokens(
+        #[case] format: VideoFormatSpec,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(serde_json::to_string(&format).unwrap(), expected);
+    }
+
+    /// `fps`, `format`, and `path` all carry `#[serde(default, skip_serializing_if)]` so a
+    /// minimal (stop-call-shaped) frame from an older or minimal client still parses.
+    #[test]
+    fn legacy_record_toggle_frames_without_the_optional_fields_still_parse() {
+        let legacy = r#"{"kind":"record_toggle","selection":{"kind":"full"},"cursor":false}"#;
+        let Request::RecordToggle(req) = serde_json::from_str::<Request>(legacy).unwrap() else {
+            panic!("expected a record_toggle request");
+        };
+        assert_eq!(req.fps, None);
+        assert!(req.format.is_none());
+        assert_eq!(req.path, None);
     }
 
     #[rstest]

@@ -24,6 +24,9 @@ pub mod ui;
 pub mod annotate;
 pub mod daemon;
 
+#[cfg(feature = "screencast")]
+pub mod record;
+
 /// Fixtures shared across the in-crate test modules.
 #[cfg(test)]
 pub(crate) mod testing;

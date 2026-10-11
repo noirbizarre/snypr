@@ -104,6 +104,37 @@ pub fn notify_success(cfg: &Config, paths: &[PathBuf], png_bytes: &[u8]) {
     dispatch(builder);
 }
 
+/// Emit a desktop notification when a recording session starts. Unlike [`notify_success`],
+/// there is no thumbnail yet (the first frame hasn't been captured when this fires).
+pub fn notify_recording_started(cfg: &Config) {
+    if !cfg.notify.success {
+        return;
+    }
+    let mut builder = Notification::new();
+    builder
+        .summary(&crate::i18n::fl!("notify-recording-started"))
+        .icon(APP_ICON)
+        .appname(APP_NAME)
+        .timeout(notify_rust::Timeout::Milliseconds(cfg.notify.timeout_ms));
+    dispatch(builder);
+}
+
+/// Emit a desktop notification once a recording has been written to `path`.
+pub fn notify_recording_saved(cfg: &Config, path: &Path) {
+    if !cfg.notify.success {
+        return;
+    }
+    let default_dir = cfg.record_save_directory();
+    let mut builder = Notification::new();
+    builder
+        .summary(&crate::i18n::fl!("notify-recording-saved"))
+        .body(&display_path(path, &default_dir))
+        .icon(APP_ICON)
+        .appname(APP_NAME)
+        .timeout(notify_rust::Timeout::Milliseconds(cfg.notify.timeout_ms));
+    dispatch(builder);
+}
+
 /// Format a saved screenshot path for display in a notification body.
 ///
 /// When the file sits directly in `default_dir` (the configured/derived save directory),

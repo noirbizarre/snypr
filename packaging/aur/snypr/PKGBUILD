@@ -15,9 +15,16 @@ license=('MIT')
 # ships no .install file.
 depends=('gtk4' 'gtk4-layer-shell' 'wayland' 'hicolor-icon-theme' 'desktop-file-utils')
 makedepends=('rust' 'pkgconf')
+# `snypr record` (the `screencast` Cargo feature) is *not* built here: it is not a default
+# Cargo feature and needs `pipewire` dev headers at build time plus `ffmpeg` at runtime, a
+# new dependency footprint we're not imposing on every packager/user by default yet. Build
+# locally with `cargo build --release --features screencast` (after installing `pipewire`)
+# if you want it; `ffmpeg`/`pipewire` are listed below as optdepends for that case.
 optdepends=(
   'libnotify: desktop notifications (any notification daemon, e.g. mako, dunst, swaync)'
   'waybar: StatusNotifierItem host for `snypr daemon --systray` (any SNI host works)'
+  'ffmpeg: `snypr record` (requires building with --features screencast)'
+  'pipewire: `snypr record` (requires building with --features screencast)'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/$pkgver/$pkgname-$pkgver.tar.gz")
 sha256sums=('@SHA256@')

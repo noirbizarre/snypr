@@ -29,6 +29,12 @@ pub enum TrayAction {
     Screenshot { edit: bool },
     /// Open the live draw-on-screen overlay.
     OpenDraw,
+    /// Start a daemon-managed recording if none is running, otherwise stop the running one.
+    /// Mirrors `OpenDraw`'s fixed label despite also being a toggle underneath — the menu
+    /// does not track live recording/overlay state (no `ksni::Handle::update()` wiring
+    /// exists for either yet).
+    #[cfg(feature = "screencast")]
+    ToggleRecording,
     /// Tear the daemon down.
     Quit,
 }
@@ -105,6 +111,14 @@ impl ksni::Tray for SnyprTray {
                 label: fl!("tray-draw-on-screen"),
                 icon_name: "draw-freehand".into(),
                 activate: Box::new(|this: &mut Self| this.send(TrayAction::OpenDraw)),
+                ..Default::default()
+            }
+            .into(),
+            #[cfg(feature = "screencast")]
+            StandardItem {
+                label: fl!("tray-toggle-recording"),
+                icon_name: "media-record".into(),
+                activate: Box::new(|this: &mut Self| this.send(TrayAction::ToggleRecording)),
                 ..Default::default()
             }
             .into(),

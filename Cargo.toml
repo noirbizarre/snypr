@@ -42,6 +42,13 @@ notify = ["dep:notify-rust"]
 # compositor. The tests skip themselves when the protocol is unavailable (CI's headless
 # Weston does not implement it); set SNYPR_REQUIRE_WAYLAND_CAPTURE=1 to make that a failure.
 integration-wayland = []
+# Video recording (`snypr record`) via the xdg-desktop-portal ScreenCast portal + PipeWire.
+# Not in `default`: `pipewire` needs `libpipewire-0.3` dev headers + pkg-config at build
+# time, a new system dependency the toolkit-free and default builds should not pay for
+# unconditionally. Encoding shells out to the system `ffmpeg` binary at runtime (checked by
+# `doctor`) rather than linking libav, keeping the build-time dependency footprint to just
+# the capture side.
+screencast = ["dep:ashpd", "dep:pipewire"]
 
 [dependencies]
 # Errors / logging
@@ -63,6 +70,7 @@ tokio = { version = "1", features = [
   "io-util",
   "time",
   "signal",
+  "process",
 ] }
 async-channel = "2"
 async-trait = "0.1"
@@ -138,6 +146,15 @@ rust-embed = "8"
 fluent = "0.17"
 unic-langid = "0.9"
 once_cell = "1"
+
+# Video recording (optional via `screencast` feature): xdg-desktop-portal ScreenCast session
+# negotiation (`ashpd`) and the resulting PipeWire video stream (`pipewire`). Encoding itself
+# shells out to the system `ffmpeg` binary (src/record/encoder.rs) rather than linking libav.
+ashpd = { version = "0.13", default-features = false, features = [
+  "tokio",
+  "screencast",
+], optional = true }
+pipewire = { version = "0.10", optional = true }
 
 [build-dependencies]
 # Optional, enabled by `ui`: it pulls glib-sys, and a toolkit-free build must not

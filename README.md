@@ -35,8 +35,9 @@ existing shape to move it, resize it via drag handles, re-edit text, or delete i
 | ------------- | --------------------------------------------------------------------------------- |
 | `screenshot`  | Capture pipeline, all selection modes, file/clipboard sinks, `--per-output`, `--edit` opens the in-place annotation overlay before sinks |
 | `draw`        | Live overlay with pointer passthrough toggle, exclusive keyboard, shared tools; Ctrl+S saves via the zone selector |
-| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`, `PassthroughToggle`; tray (StatusNotifierItem) with `--systray` |
-| `doctor`      | Markdown diagnostic report covering version, environment, configuration and live capability probes (window-manager IPC, wlr-screencopy, daemon socket) |
+| `daemon`      | IPC server: `Ping`, `Screenshot`, `DrawToggle`, `PassthroughToggle`, `RecordToggle`; tray (StatusNotifierItem) with `--systray` |
+| `doctor`      | Markdown diagnostic report covering version, environment, configuration and live capability probes (window-manager IPC, wlr-screencopy, daemon socket, `ffmpeg`/portal when built with `screencast`) |
+| `record`      | Screen recording via the ScreenCast portal + PipeWire, encoded with `ffmpeg`. Optional (`screencast` cargo feature, not built by default) — see [Recording](#recording) for its v1 limitations |
 
 ## Build
 
@@ -61,6 +62,17 @@ Debian / Ubuntu:
 
 ```sh
 sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
+```
+
+Building with `--features screencast` (`snypr record`, not enabled by default) additionally
+needs PipeWire's development headers:
+
+```sh
+# Arch Linux
+sudo pacman -S --needed pipewire
+
+# Debian / Ubuntu
+sudo apt install libpipewire-0.3-dev
 ```
 
 ### Runtime dependencies
@@ -89,6 +101,11 @@ sudo apt install libgtk-4-dev libgtk4-layer-shell-dev libwayland-dev pkg-config
 - Optional, only when the `notify` feature surfaces errors as desktop
   toasts (default): a notification daemon implementing
   `org.freedesktop.Notifications`, e.g. `mako`, `dunst`, or `swaync`.
+- Optional, only for `snypr record` (the `screencast` feature, not built by default): a
+  running `xdg-desktop-portal` with a backend implementing
+  `org.freedesktop.portal.ScreenCast` (`xdg-desktop-portal-hyprland`, `-wlr`, `-gnome`,
+  `-kde`, ...) plus PipeWire, and the `ffmpeg` binary on `$PATH` to encode the captured
+  frames. `snypr doctor` checks for both.
 
 No external CLI helpers are invoked: `hyprctl`, `swaymsg`, `niri msg`, `grim`,
 `slurp`, and `wl-copy` are **not** required. Hyprland, Sway, and Niri IPC are
@@ -219,6 +236,18 @@ snypr daemon
 
 # Take a screenshot via the running daemon instead of spawning a fresh process.
 snypr screenshot --full --via-daemon
+
+# Record the screen to an MP4 (requires the `screencast` build feature). Opens the
+# ScreenCast portal's own monitor picker, records until Ctrl+C, then prints the path.
+snypr record --full
+
+# Record a fixed region: captures the picked monitor via the portal, then crops every
+# frame in software to the given rect before encoding.
+snypr record --region 100,100,1280x720 --to ~/Videos/demo.webm --format webm
+
+# Toggle a daemon-managed recording: the first call starts it in the background and
+# returns immediately, a second identical call stops it and prints the file path.
+snypr record --via-daemon --full
 ```
 
 ### Interactive selector
@@ -314,6 +343,31 @@ hl.window_rule({
 })
 ```
 
+### Recording
+
+`snypr record` (opt-in `screencast` cargo feature — not built by default; see [Build
+dependencies](#build-dependencies)) captures the screen via the desktop's own
+`org.freedesktop.portal.ScreenCast` + PipeWire, and encodes it with the system `ffmpeg`
+binary. This is a different model from `screenshot`'s direct `zwlr_screencopy_manager_v1`
+capture, with one fundamental consequence: **the portal, not Snypr, owns the picker UI** —
+there is no standard way to script past it or force a specific monitor/window. Concretely:
+
+| Flag | Behavior |
+| --- | --- |
+| `--full`, `--output NAME`, `--focused` | All three just open the portal's monitor picker; whichever monitor the user picks in that dialog is what gets recorded. `NAME` is not enforced. |
+| `--window` | Opens the portal's window picker. Needs a portal backend that supports it (`xdg-desktop-portal-hyprland` does; `xdg-desktop-portal-wlr` generally does not) — the backend's own rejection surfaces as the error. |
+| `--region X,Y,WxH` | Opens the monitor picker, then every frame is cropped in software to the rect (assumes the picked monitor is the one the rect belongs to). |
+| `--interactive` / `-i` | Uses the same in-app selector as `screenshot -i` to pick the rect first, then opens the monitor picker and crops as above. |
+| `--per-output` | Not implemented yet — recording one output at a time is the only supported mode. |
+
+`--format {mp4,webm,gif}`, `--fps`, and `--cursor` (baked into the frames by the compositor,
+not composited by Snypr) round out the flags; see `[record]` in [Configuration](#configuration)
+for their defaults and where recordings are saved. Explicit `--to PATH` filenames are
+used verbatim; choose an extension matching `--format`. The default filename's extension
+is adjusted automatically. `snypr record --via-daemon` needs a
+running `snypr daemon`; a killed daemon still finalizes any in-flight recording before
+exiting so the file stays playable.
+
 ### Hyprland keybindings
 
 Drop the following into your Hyprland Lua config (e.g.
@@ -349,6 +403,11 @@ hl.bind("SUPER + ALT + Print", hl.dsp.exec_cmd("snypr draw"))
 hl.bind("SUPER + ALT + P",
     hl.dsp.exec_cmd("snypr draw --via-daemon --toggle-passthrough"))
 
+-- Toggle a daemon-managed recording (requires the `screencast` build feature): first
+-- press starts it (opens the portal's picker), second press stops it.
+hl.bind("SUPER + ALT + R",
+    hl.dsp.exec_cmd("snypr record --via-daemon --full"))
+
 -- Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
 hl.on("hyprland.start", function()
     hl.exec_cmd("snypr daemon --systray")
@@ -376,6 +435,9 @@ bindsym $mod+Ctrl+Shift+Print exec snypr screenshot --window --to clipboard
 # Live draw-on-screen overlay — ideal for presentations / Google Meet.
 bindsym $mod+Alt+Print exec snypr draw
 
+# Toggle a daemon-managed recording (requires the `screencast` build feature).
+bindsym $mod+Alt+r exec snypr record --via-daemon --full
+
 # Autostart the daemon (enables `--via-daemon`; add `--systray` for a tray icon).
 exec snypr daemon --systray
 ```
@@ -393,6 +455,7 @@ binds {
     Mod+Ctrl+Print { spawn "snypr" "screenshot" "--focused" "--to" "clipboard"; }
     Mod+Ctrl+Shift+Print { spawn "snypr" "screenshot" "--window" "--to" "clipboard"; }
     Mod+Alt+Print { spawn "snypr" "draw"; }
+    Mod+Alt+R { spawn "snypr" "record" "--via-daemon" "--full"; }
 }
 
 spawn-at-startup "snypr" "daemon" "--systray"
@@ -489,6 +552,16 @@ dim_light    = "#00000040"  # full mode + hovered/selected screen
 countdown_fg = "#FFFFFFF2"  # pre-capture countdown numeral fill
 countdown_bg = "#0000008C"  # standalone countdown window background
 
+[record]
+# Only meaningful when built with the `screencast` cargo feature (not built by default).
+directory          = "/home/me/Videos/Screencasts"  # default: unset (uses $XDG_VIDEOS_DIR/Screencasts/)
+filename_template  = "snypr_{date}_{time}.mp4"  # default: "snypr_{ts}.mp4"
+use_utc            = false  # default
+fps                = 30     # default; frames-per-second fed to ffmpeg
+format             = "mp4"  # default; one of "mp4" (libx264), "webm" (libvpx-vp9), "gif"
+crf                = 23     # default; ffmpeg -crf quality knob (lower = better/larger), ignored for gif
+cursor             = false  # default; baked into the frames by the compositor, not composited by snypr
+
 [annotate.colors]
 # Default color picked by each annotation tool when the editor / draw overlay
 # opens. Hex RGBA strings: "#RRGGBB" (fully opaque) or "#RRGGBBAA". Every field
@@ -513,8 +586,9 @@ The crate is a single binary with internal modules:
 
 ```
 src/
-├── cli/         # clap subcommands (screenshot, draw, daemon, doctor)
+├── cli/         # clap subcommands (screenshot, draw, daemon, doctor, record)
 ├── capture/     # wlr-screencopy backend (smithay-client-toolkit)
+├── record/      # ScreenCast portal (ashpd) + PipeWire capture, ffmpeg encoding (gated behind `screencast` feature)
 ├── annotate/    # document model, tool trait, GSK-free helpers
 ├── output/      # file + clipboard sinks
 ├── ui/          # GTK4 windows + AnnotationCanvas (gated behind `ui` feature)

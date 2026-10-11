@@ -61,7 +61,11 @@ selector-hint-window-pick = Cliquez sur une fenêtre — Entrée pour valider, �
 tray-screenshot-full = Capture d'écran (complète)
 tray-annotate-region = Annoter une région…
 tray-draw-on-screen = Dessiner à l'écran
+tray-toggle-recording = Basculer l'enregistrement
 tray-quit = Quitter
+
+## Enregistrement (`snypr record`)
+record-in-progress = Enregistrement vers { $path } — Ctrl+C pour arrêter.
 
 ## Notifications de bureau
 notify-copied = Capture copiée dans le presse-papiers
@@ -71,6 +75,8 @@ notify-saved-multi-body = { $first } ({ $count ->
         [one] { $count } fichier
        *[other] { $count } fichiers
     })
+notify-recording-started = Enregistrement démarré
+notify-recording-saved = Vidéo enregistrée
 
 ## Erreurs visibles par l'utilisateur
 error-edit-incompatible-per-output = `--edit` est incompatible avec `--per-output` (l'éditeur d'annotation ne traite qu'une seule image)
@@ -99,3 +105,8 @@ error-editor-busy = une session d'édition est déjà en cours
 error-malformed-request = requête invalide : { $reason }
 error-unknown-clipboard-kind = type de presse-papiers inconnu « { $kind } » (attendu `regular`, `primary` ou `both`)
 error-unknown-sink = destination inconnue « { $sink } » (attendu `file` ou `clipboard`)
+error-record-requires-screencast-feature = snypr a été compilé sans la fonctionnalité Cargo `screencast` ; `record` n'est pas disponible
+error-record-per-output-unsupported = `--per-output` n'est pas encore pris en charge pour l'enregistrement (nécessiterait un flux de portail ScreenCast et un processus ffmpeg par sortie) ; enregistrez une sortie à la fois
+error-record-no-portal-stream = le portail ScreenCast n'a renvoyé aucun flux (l'utilisateur a peut-être annulé le sélecteur)
+error-record-stopped-before-first-frame = l'enregistrement a été arrêté avant l'arrivée de la première image ; aucun fichier n'a été écrit
+error-record-stream-closed = le flux vidéo pipewire s'est fermé avant de fournir une image

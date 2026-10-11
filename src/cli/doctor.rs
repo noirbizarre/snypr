@@ -101,6 +101,11 @@ struct DoctorState {
     // Daemon
     daemon_socket: PathBuf,
     daemon_ping: Result<(), String>,
+
+    // Recording (`snypr record`), only populated in `screencast` builds — `None` in every
+    // other build so `render`/`sample_state` stay unconditional.
+    ffmpeg: Option<Result<String, String>>,
+    screencast_portal: Option<Result<(), String>>,
 }
 
 /// Build the doctor report and write it to stdout.
@@ -124,6 +129,9 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
     }
     if cfg!(feature = "notify") {
         features.push("notify");
+    }
+    if cfg!(feature = "screencast") {
+        features.push("screencast");
     }
 
     // ---- Environment ---------------------------------------------------------
@@ -258,6 +266,15 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
     let daemon_socket = crate::daemon::default_socket_path();
     let daemon_ping = daemon_ping(&daemon_socket).await;
 
+    // ---- Recording (screencast) -----------------------------------------------
+    #[cfg(feature = "screencast")]
+    let (ffmpeg, screencast_portal) = (
+        Some(probe_ffmpeg().await),
+        Some(probe_screencast_portal().await),
+    );
+    #[cfg(not(feature = "screencast"))]
+    let (ffmpeg, screencast_portal) = (None, None);
+
     DoctorState {
         version,
         git_hash,
@@ -284,7 +301,38 @@ async fn collect(config_override: Option<PathBuf>) -> DoctorState {
         wlr_formats,
         daemon_socket,
         daemon_ping,
+        ffmpeg,
+        screencast_portal,
     }
+}
+
+/// Best-effort `ffmpeg` presence/version probe: `snypr record`'s encoder shells out to the
+/// system binary rather than linking libav (see `src/record/encoder.rs`), so this is the
+/// only way to catch a missing install before a recording session fails midway through.
+#[cfg(feature = "screencast")]
+async fn probe_ffmpeg() -> Result<String, String> {
+    let output = tokio::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .await
+        .map_err(|e| format!("{e}"))?;
+    if !output.status.success() {
+        return Err(format!("exited with {}", output.status));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().next().unwrap_or("ffmpeg").trim().to_owned())
+}
+
+/// Best-effort `org.freedesktop.portal.ScreenCast` reachability probe. Only constructs the
+/// D-Bus proxy — it does not create a session or pop the picker dialog, so this succeeds
+/// whenever *some* portal backend implementing the ScreenCast interface is registered, even
+/// if the user would go on to cancel an actual recording's picker.
+#[cfg(feature = "screencast")]
+async fn probe_screencast_portal() -> Result<(), String> {
+    ashpd::desktop::screencast::Screencast::new()
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
 }
 
 /// Best-effort daemon liveness probe. Connects to the IPC socket, sends a `Ping` request,
@@ -568,6 +616,37 @@ fn render(state: &DoctorState) -> String {
     }
     out.push('\n');
 
+    // ---- Recording (screencast) -----------------------------------------------
+    // Only rendered in `screencast` builds — `ffmpeg`/`screencast_portal` are `None`
+    // otherwise, and there is nothing meaningful to report for a command that doesn't exist.
+    if let (Some(ffmpeg), Some(portal)) = (&state.ffmpeg, &state.screencast_portal) {
+        let _ = writeln!(out, "### Recording (screencast)");
+        match ffmpeg {
+            Ok(version) => {
+                bump(Status::Ok);
+                let _ = writeln!(out, "- ffmpeg: {version} [OK]");
+            }
+            Err(e) => {
+                bump(Status::Fail);
+                let _ = writeln!(out, "- ffmpeg: FAIL: {e} [FAIL]");
+            }
+        }
+        match portal {
+            Ok(()) => {
+                bump(Status::Ok);
+                let _ = writeln!(out, "- ScreenCast portal: reachable [OK]");
+            }
+            Err(e) => {
+                // Not running / no compositor portal backend is a normal state on a
+                // headless or non-portal-aware setup — WARN, not FAIL, mirroring the
+                // daemon-not-running probe below.
+                bump(Status::Warn);
+                let _ = writeln!(out, "- ScreenCast portal: FAIL: {e} [WARN]");
+            }
+        }
+        out.push('\n');
+    }
+
     // ---- Daemon --------------------------------------------------------------
     let _ = writeln!(out, "### Daemon");
     let _ = writeln!(out, "- Socket path: {}", tilde(&state.daemon_socket));
@@ -657,6 +736,8 @@ mod tests {
             wlr_formats: Some(vec![("DP-1".to_owned(), wl_shm::Format::Xrgb8888 as u32)]),
             daemon_socket: PathBuf::from("/run/user/1000/snypr.sock"),
             daemon_ping: Err("socket does not exist".to_owned()),
+            ffmpeg: None,
+            screencast_portal: None,
         }
     }
 
@@ -770,6 +851,79 @@ mod tests {
                 assert!(!line.contains("[FAIL]"), "unexpected FAIL line: {line:?}");
             }
         }
+    }
+
+    /// Without the `screencast` feature (`ffmpeg`/`screencast_portal` both `None`, as in
+    /// `sample_state`), the whole section must be omitted rather than rendered empty.
+    #[test]
+    fn recording_section_is_omitted_when_screencast_data_is_absent() {
+        let report = render(&sample_state());
+        assert!(!report.contains("### Recording (screencast)"), "{report}");
+    }
+
+    #[test]
+    fn recording_section_reports_a_healthy_screencast_state() {
+        let mut state = sample_state();
+        state.ffmpeg = Some(Ok("ffmpeg version 6.1.1".to_owned()));
+        state.screencast_portal = Some(Ok(()));
+        let report = render(&state);
+        assert!(report.contains("### Recording (screencast)"), "{report}");
+        assert!(
+            report.contains("- ffmpeg: ffmpeg version 6.1.1 [OK]"),
+            "{report}"
+        );
+        assert!(
+            report.contains("- ScreenCast portal: reachable [OK]"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn recording_section_reports_a_missing_ffmpeg_as_a_failure() {
+        let mut state = sample_state();
+        state.ffmpeg = Some(Err("No such file or directory".to_owned()));
+        state.screencast_portal = Some(Ok(()));
+        let report = render(&state);
+        assert!(
+            report.contains("- ffmpeg: FAIL: No such file or directory [FAIL]"),
+            "{report}"
+        );
+    }
+
+    /// No portal backend registered is the common case on a headless box or a compositor
+    /// without ScreenCast support — WARN, not FAIL, mirroring the daemon-not-running probe.
+    #[test]
+    fn recording_section_reports_a_missing_portal_as_a_warning_not_a_failure() {
+        let mut state = sample_state();
+        state.ffmpeg = Some(Ok("ffmpeg version 6.1.1".to_owned()));
+        state.screencast_portal = Some(Err("no such interface".to_owned()));
+        let report = render(&state);
+        for line in report.lines() {
+            if line.contains("ScreenCast portal") {
+                assert!(line.contains("[WARN]"), "unexpected line: {line:?}");
+                assert!(!line.contains("[FAIL]"), "unexpected line: {line:?}");
+            }
+        }
+    }
+
+    /// Exercises the real async probes (not just `render`'s formatting) so a regression in
+    /// the `screencast` feature wiring itself would fail this test too. Doesn't assert
+    /// success/failure of either probe — this sandbox may or may not have `ffmpeg`/a portal
+    /// available — only that `collect()` actually populates both fields in this build.
+    #[cfg(feature = "screencast")]
+    #[tokio::test]
+    async fn collect_populates_the_recording_probes_in_screencast_builds() {
+        let state = collect(None).await;
+        assert!(state.ffmpeg.is_some());
+        assert!(state.screencast_portal.is_some());
+    }
+
+    #[cfg(not(feature = "screencast"))]
+    #[tokio::test]
+    async fn collect_leaves_the_recording_probes_empty_without_the_screencast_feature() {
+        let state = collect(None).await;
+        assert!(state.ffmpeg.is_none());
+        assert!(state.screencast_portal.is_none());
     }
 
     #[test]
