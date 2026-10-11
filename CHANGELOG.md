@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2](https://github.com/noirbizarre/snypr/compare/0.4.1..0.4.2) - 2026-10-11
+
+### 🏗️ Build
+
+- **deps** Bump gtk4 from 0.11.4 to 0.11.5 ([#54](https://github.com/noirbizarre/snypr/issues/54)) - ([17955e3](https://github.com/noirbizarre/snypr/commit/17955e3553819e241b9aa7a679df13cb50c32ad3))
+- **deps** Bump gdk4-wayland from 0.11.4 to 0.11.5 ([#53](https://github.com/noirbizarre/snypr/issues/53)) - ([615d6f0](https://github.com/noirbizarre/snypr/commit/615d6f0cf28533445d736a56b5016b3b11eae1c7))
+- **deps** Bump rstest from 0.26.1 to 0.27.0 ([#56](https://github.com/noirbizarre/snypr/issues/56)) - ([bfa03e7](https://github.com/noirbizarre/snypr/commit/bfa03e74adc9ae33c3527f80e0a75009af1c518d))
+- **deps** Bump anyhow from 1.0.102 to 1.0.104 ([#55](https://github.com/noirbizarre/snypr/issues/55)) - ([fd26694](https://github.com/noirbizarre/snypr/commit/fd26694eacdb519ba342fdc75a1bdb0798be01b8))
+- **deps** Bump clap from 4.6.6 to 4.6.7 ([#52](https://github.com/noirbizarre/snypr/issues/52)) - ([f707a62](https://github.com/noirbizarre/snypr/commit/f707a624ecf26d32be5d2585c5ade61793ccea99))
+
 ## [0.4.1](https://github.com/noirbizarre/snypr/compare/0.4.0..0.4.1) - 2026-09-22
 
 ### 🐛 Bug Fixes
