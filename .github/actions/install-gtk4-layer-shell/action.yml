@@ -15,6 +15,7 @@ runs:
         sudo apt-get install -y \
           libgtk-4-dev \
           libwayland-dev \
+          libpipewire-0.3-dev \
           libxkbcommon-dev \
           wayland-protocols \
           meson \

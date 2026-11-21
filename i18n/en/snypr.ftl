@@ -61,7 +61,11 @@ selector-hint-window-pick = Click a window — Enter to confirm, Esc to cancel
 tray-screenshot-full = Screenshot (full)
 tray-annotate-region = Annotate region…
 tray-draw-on-screen = Draw on screen
+tray-toggle-recording = Toggle recording
 tray-quit = Quit
+
+## Recording (`snypr record`)
+record-in-progress = Recording to { $path } — press Ctrl+C to stop.
 
 ## Desktop notifications
 notify-copied = Screenshot copied to clipboard
@@ -71,6 +75,8 @@ notify-saved-multi-body = { $first } ({ $count ->
         [one] { $count } file
        *[other] { $count } files
     })
+notify-recording-started = Recording started
+notify-recording-saved = Recording saved
 
 ## User-visible errors
 error-edit-incompatible-per-output = `--edit` is incompatible with `--per-output` (the annotation editor operates on a single image)
@@ -99,3 +105,8 @@ error-editor-busy = another editor session is already in progress
 error-malformed-request = malformed request: { $reason }
 error-unknown-clipboard-kind = unknown clipboard kind `{ $kind }` (expected `regular`, `primary`, or `both`)
 error-unknown-sink = unknown sink `{ $sink }` (expected `file` or `clipboard`)
+error-record-requires-screencast-feature = snypr was built without the `screencast` cargo feature; `record` is unavailable
+error-record-per-output-unsupported = `--per-output` is not yet supported for recording (would require one ScreenCast portal stream and one ffmpeg process per output); record one output at a time instead
+error-record-no-portal-stream = the ScreenCast portal returned no stream (the user may have cancelled the picker)
+error-record-stopped-before-first-frame = recording was stopped before the first frame arrived; no file was written
+error-record-stream-closed = the pipewire video stream closed before delivering a frame

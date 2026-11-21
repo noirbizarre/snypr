@@ -10,7 +10,10 @@ is a GTK4-based screenshot, annotation, and live-drawing tool targeting
 .BR Hyprland (1)
 and other wlroots-based compositors. It captures pixels via the
 \fIzwlr_screencopy_manager_v1\fR Wayland protocol, renders selectors and overlays through
-\fIgtk4-layer-shell\fR, and draws annotations on a GTK4 canvas.
+\fIgtk4-layer-shell\fR, and draws annotations on a GTK4 canvas. Builds with the optional
+\fBscreencast\fR Cargo feature also add \fBsnypr record\fR, a screen recorder built on the
+\fIorg.freedesktop.portal.ScreenCast\fR portal, PipeWire, and the system \fBffmpeg\fR
+binary.
 .SH GLOBAL OPTIONS
 .TP
 .BR \-\-config " " \fIPATH\fR
@@ -125,6 +128,43 @@ Toggle a daemon-managed overlay instead of spawning a new process.
 .BR \-\-toggle-passthrough
 Flip pointer passthrough on the running overlay from a global keybind. Requires
 \fB\-\-via-daemon\fR.
+.SS record
+Record the screen to a video file via the \fIorg.freedesktop.portal.ScreenCast\fR portal
+and PipeWire, encoded by the system \fBffmpeg\fR binary. Only available in builds with the
+\fBscreencast\fR Cargo feature (not built by default). Runs in the foreground until
+\fBCtrl+C\fR, then prints the written file's path.
+.PP
+Unlike \fBscreenshot\fR, the portal itself \(em not \fBsnypr\fR \(em owns the
+monitor/window picker dialog; there is no way to script past it or force a specific
+target. \fB\-\-full\fR, \fB\-\-output\fR, and \fB\-\-focused\fR all just open the portal's
+monitor picker. \fB\-\-region\fR and \fB\-\-interactive\fR open the same picker and then
+crop every frame in software to the resolved rect. \fB\-\-window\fR opens the portal's
+window picker, which not every portal backend supports. \fB\-\-per\-output\fR is rejected:
+multi-stream recording is not implemented.
+.TP
+.BR \-\-full ", " \-\-output " " \fINAME\fR ", " \-\-focused ", " \-\-window ", " \-\-region " " \fIX,Y,WxH\fR ", " \-i ", " \-\-interactive
+Same selection flags as \fBscreenshot\fR (see above), reinterpreted for the portal model
+described above.
+.TP
+.BR \-\-to " " \fIPATH\fR
+Write the recording to \fIPATH\fR instead of the configured \fB[record]\fR
+directory/filename template. The explicit path is used verbatim, so choose an extension
+that matches \fB\-\-format\fR. The default filename's extension is adjusted automatically.
+.TP
+.BR \-\-format " " \fI{mp4,webm,gif}\fR
+Output container/codec. Defaults to \fB[record].format\fR (\fBmp4\fR).
+.TP
+.BR \-\-fps " " \fIFPS\fR
+Frames per second fed to the encoder. Defaults to \fB[record].fps\fR (\fB30\fR).
+.TP
+.BR \-\-cursor
+Include the mouse cursor, baked into the frames by the compositor itself (not composited
+by \fBsnypr\fR).
+.TP
+.BR \-\-via-daemon
+Toggle a daemon-managed recording instead of running in the foreground: the first
+invocation starts it and returns immediately, a second invocation stops it and prints the
+resulting file's path.
 .SS daemon
 Run the IPC server on \fI$XDG_RUNTIME_DIR/snypr.sock\fR (falls back to the OS temp
 directory if \fI$XDG_RUNTIME_DIR\fR is unset).
@@ -133,13 +173,15 @@ directory if \fI$XDG_RUNTIME_DIR\fR is unset).
 Listen on \fIPATH\fR instead of \fI$XDG_RUNTIME_DIR/snypr.sock\fR.
 .TP
 .BR \-\-systray
-Also register a StatusNotifierItem with Screenshot / Annotate / Draw / Quit menu items.
+Also register a StatusNotifierItem with Screenshot / Annotate / Draw / Toggle Recording
+(builds with the \fBscreencast\fR feature only) / Quit menu items.
 .SS doctor
 Print a copy-pasteable Markdown diagnostic report covering version, runtime
 environment, parsed configuration, and live capability probes (Hyprland/Sway/Niri
-IPC, wlr-screencopy outputs, daemon socket \fBPing\fR). All headings are level 3 so the
-output drops cleanly under a user-supplied level-2 heading. Always exits with status
-\fB0\fR; failed probes surface as \fBWARN\fR / \fBFAIL\fR lines in the report.
+IPC, wlr-screencopy outputs, daemon socket \fBPing\fR, and \(em in \fBscreencast\fR
+builds \(em \fBffmpeg\fR presence and ScreenCast portal reachability). All headings are
+level 3 so the output drops cleanly under a user-supplied level-2 heading. Always exits
+with status \fB0\fR; failed probes surface as \fBWARN\fR / \fBFAIL\fR lines in the report.
 .SH MODES
 The \fBscreenshot\fR subcommand surfaces two interactive UI modes, neither of which is a
 top-level subcommand.
@@ -198,7 +240,12 @@ overrides the selector chrome colors (\fIoutline\fR, \fIoutline_hover\fR,
 \fB[annotate.colors]\fR table sets the default color of each annotation tool
 (\fIrect\fR, \fIellipse\fR, \fIarrow\fR, \fIline\fR, \fIfreehand\fR, \fIhighlight\fR,
 \fInumber\fR, \fItext\fR) as \fB#RRGGBB\fR or \fB#RRGGBBAA\fR hex strings; the
-toolbar color picker still lets the user change colors at runtime.
+toolbar color picker still lets the user change colors at runtime. The \fB[record]\fR
+table (meaningful only in \fBscreencast\fR builds) accepts \fIdirectory\fR (default
+\fI$XDG_VIDEOS_DIR/Screencasts\fR), \fIfilename_template\fR (default
+\fBsnypr_{ts}.mp4\fR), \fIuse_utc\fR, \fIfps\fR (default \fB30\fR), \fIformat\fR
+(\fBmp4\fR / \fBwebm\fR / \fBgif\fR, default \fBmp4\fR), \fIcrf\fR (default \fB23\fR),
+and \fIcursor\fR (default \fBfalse\fR).
 .SH ENVIRONMENT
 .TP
 .B SNYPR_CONFIG
@@ -221,6 +268,9 @@ User configuration.
 .TP
 .I $XDG_PICTURES_DIR/Screenshots/
 Default save directory.
+.TP
+.I $XDG_VIDEOS_DIR/Screencasts/
+Default recording save directory (\fBscreencast\fR builds only).
 .TP
 .I $XDG_RUNTIME_DIR/snypr.sock
 Daemon control socket.

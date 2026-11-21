@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 pub mod daemon;
 pub mod doctor;
 pub mod draw;
+pub mod record;
 pub mod screenshot;
+pub mod selection;
 
 /// Snypr — capture, annotate, and draw on the screen for Hyprland.
 #[derive(Debug, Parser)]
@@ -41,6 +43,9 @@ pub enum Command {
     Screenshot(screenshot::Args),
     /// Open a transparent overlay to draw on top of the screen.
     Draw(draw::Args),
+    /// Record the screen to a video file via the ScreenCast portal + PipeWire (requires the
+    /// `screencast` cargo feature and `ffmpeg` on `$PATH`).
+    Record(record::Args),
     /// Run a long-lived daemon listening on the IPC socket.
     Daemon(daemon::Args),
     /// Print a copy-pasteable Markdown diagnostic report (config, environment,
@@ -143,8 +148,12 @@ pub async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             dispatch_via_daemon(Command::Screenshot(args)).await
         }
         Command::Draw(args) if args.via_daemon => dispatch_via_daemon(Command::Draw(args)).await,
+        Command::Record(args) if args.via_daemon => {
+            dispatch_via_daemon(Command::Record(args)).await
+        }
         Command::Screenshot(args) => screenshot::run(args, config_override.as_deref()).await,
         Command::Draw(args) => draw::run(args, config_override.as_deref()).await,
+        Command::Record(args) => record::run(args, config_override.as_deref()).await,
         Command::Daemon(args) => daemon::run(args, config_override.as_deref()).await,
         Command::Doctor(args) => doctor::run(args, config_override).await,
     }
@@ -197,7 +206,7 @@ async fn dispatch_via_daemon(command: Command) -> anyhow::Result<()> {
 fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
     match command {
         Command::Screenshot(args) => {
-            let selection = screenshot::parse_selection(&args)?;
+            let selection = selection::parse(&args.selection)?;
             // Pre-apply `--clipboard-type` to any `--to clipboard` entries that didn't pin a
             // kind via `=KIND` syntax. Entries that did pin one are left untouched. Entries
             // that still carry `None` after this (because neither `--to clipboard=KIND` nor
@@ -232,6 +241,26 @@ fn build_request(command: Command) -> anyhow::Result<crate::ipc::Request> {
             } else {
                 Ok(crate::ipc::Request::DrawToggle)
             }
+        }
+        #[cfg(feature = "screencast")]
+        Command::Record(args) => {
+            let selection = selection::parse(&args.selection)?;
+            Ok(crate::ipc::Request::RecordToggle(
+                crate::ipc::RecordRequest {
+                    selection: crate::daemon::selection_to_spec(&selection),
+                    cursor: args.cursor,
+                    fps: args.fps,
+                    format: args.format.map(crate::daemon::video_format_to_spec),
+                    path: args.to,
+                },
+            ))
+        }
+        #[cfg(not(feature = "screencast"))]
+        Command::Record(_) => {
+            anyhow::bail!(
+                "{}",
+                crate::i18n::fl!("error-record-requires-screencast-feature")
+            )
         }
         Command::Daemon(_) => {
             unreachable!(

@@ -16,9 +16,13 @@ license=('MIT')
 # ships no .install file.
 depends=('gtk4' 'gtk4-layer-shell' 'wayland' 'hicolor-icon-theme' 'desktop-file-utils')
 makedepends=('git' 'rust' 'pkgconf')
+# See the `snypr` PKGBUILD for why `--features screencast` (`snypr record`) is not enabled
+# here by default.
 optdepends=(
   'libnotify: desktop notifications (any notification daemon, e.g. mako, dunst, swaync)'
   'waybar: StatusNotifierItem host for `snypr daemon --systray` (any SNI host works)'
+  'ffmpeg: `snypr record` (requires building with --features screencast)'
+  'pipewire: `snypr record` (requires building with --features screencast)'
 )
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname")

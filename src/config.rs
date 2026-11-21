@@ -22,6 +22,10 @@ pub struct Config {
     pub notify: NotifyConfig,
     pub ui: UiConfig,
     pub annotate: AnnotateConfig,
+    /// Video-recording (`snypr record`) defaults. Only meaningful when built with the
+    /// `screencast` cargo feature; harmless to keep populated otherwise (`doctor` and the
+    /// config round-trip tests exercise it regardless of feature flags).
+    pub record: RecordConfig,
 }
 
 /// Desktop-notification preferences. Notifications are best-effort: failures to talk to the
@@ -125,6 +129,79 @@ pub enum InitialMode {
     Window,
     /// Drag-to-pick a rectangle.
     Region,
+}
+
+/// `snypr record` defaults. Mirrors [`OutputConfig`]/[`CaptureConfig`]'s shape: every field
+/// optional/defaulted, [`impl Default`](RecordConfig::default) is the single source of
+/// truth. Only consulted when built with the `screencast` cargo feature.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RecordConfig {
+    /// Directory to save recordings into. Defaults to `$XDG_VIDEOS_DIR/Screencasts`.
+    pub directory: Option<PathBuf>,
+    /// Filename template. Supports the same tokens as `[output].filename_template`
+    /// (`{ts}`, `{date}`, `{time}`); `{output}`/`{selection}` are accepted but rarely
+    /// useful since a recording session has a single destination file.
+    pub filename_template: String,
+    /// Use UTC instead of the local timezone in `{ts}`, `{date}`, `{time}`.
+    pub use_utc: bool,
+    /// Frames per second fed to the encoder. The portal delivers frames on damage, not on a
+    /// fixed clock, so the driving loop duplicates the last frame to hit this nominal rate.
+    pub fps: u32,
+    /// Output container/codec.
+    pub format: VideoFormat,
+    /// Encoder quality knob passed to ffmpeg's `-crf` (x264/vp9). Lower is higher quality
+    /// and larger files. Ignored for `Gif`.
+    pub crf: u8,
+    /// Include the mouse cursor. Mirrors [`CaptureConfig::cursor`].
+    pub cursor: bool,
+}
+
+impl Default for RecordConfig {
+    fn default() -> Self {
+        Self {
+            directory: None,
+            filename_template: "snypr_{ts}.mp4".to_owned(),
+            use_utc: false,
+            fps: 30,
+            format: VideoFormat::default(),
+            crf: 23,
+            cursor: false,
+        }
+    }
+}
+
+/// Output container/codec for `snypr record`. Determines both the file extension and the
+/// ffmpeg encoder arguments built in [`crate::record::encoder::build_ffmpeg_args`].
+///
+/// Also derives `clap::ValueEnum` (mirroring [`crate::cli::ClipboardKind`]'s pattern of a
+/// config-facing enum doubling as a `--flag value_enum`) so `record --format` and
+/// `[record].format` in the config file accept and round-trip the exact same lowercase
+/// tokens.
+#[derive(Debug, Default, Copy, Clone, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+#[value(rename_all = "lowercase")]
+pub enum VideoFormat {
+    /// H.264 in an MP4 container (`libx264`, `+faststart`). Widest playback compatibility.
+    #[default]
+    Mp4,
+    /// VP9 in a WebM container (`libvpx-vp9`). Royalty-free, smaller files at the same
+    /// quality, slower to encode.
+    WebM,
+    /// Animated GIF. Single-pass in v1 (no palette optimization) — large files, capped
+    /// colors, but no external player required.
+    Gif,
+}
+
+impl VideoFormat {
+    /// File extension (without the leading dot) matching this format.
+    pub fn extension(self) -> &'static str {
+        match self {
+            VideoFormat::Mp4 => "mp4",
+            VideoFormat::WebM => "webm",
+            VideoFormat::Gif => "gif",
+        }
+    }
 }
 
 /// Serde adapter that collapses `Some(0)` to `None` on the way in so a zero-second
@@ -468,6 +545,25 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    /// Resolved default recording save directory, mirroring [`Self::save_directory`] for
+    /// video: `[record].directory` if set, otherwise `<XDG_VIDEOS_DIR>/Screencasts`, falling
+    /// back to the current directory as a last resort.
+    pub fn record_save_directory(&self) -> PathBuf {
+        if let Some(dir) = &self.record.directory {
+            return dir.clone();
+        }
+        directories::UserDirs::new()
+            .and_then(|d| d.video_dir().map(Path::to_path_buf))
+            .map(|p| p.join("Screencasts"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Expand `[record].filename_template` using the supplied context. Mirrors
+    /// [`Self::expand_filename`] but reads the `record` config section.
+    pub fn expand_record_filename(&self, ctx: &FilenameContext<'_>) -> String {
+        expand_template(&self.record.filename_template, ctx, self.record.use_utc)
+    }
+
     /// Parse the configured default sinks. Clipboard entries inherit
     /// the configured [`ClipboardConfig::default_kind`] so callers see
     /// a fully-resolved kind.
@@ -716,6 +812,79 @@ mod tests {
         assert!(!cfg.notify.success);
         assert!(cfg.notify.error);
         assert_eq!(cfg.notify.timeout_ms, 2500);
+    }
+
+    #[test]
+    fn record_defaults_match_documented_literals() {
+        let cfg = Config::default();
+        assert_eq!(cfg.record.directory, None);
+        assert_eq!(cfg.record.filename_template, "snypr_{ts}.mp4");
+        assert!(!cfg.record.use_utc);
+        assert_eq!(cfg.record.fps, 30);
+        assert_eq!(cfg.record.format, VideoFormat::Mp4);
+        assert_eq!(cfg.record.crf, 23);
+        assert!(!cfg.record.cursor);
+    }
+
+    #[test]
+    fn record_section_round_trips() {
+        let toml = r#"
+            [record]
+            directory = "/tmp/recordings"
+            filename_template = "cast_{date}.webm"
+            use_utc = true
+            fps = 60
+            format = "webm"
+            crf = 30
+            cursor = true
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.record.directory, Some(PathBuf::from("/tmp/recordings")));
+        assert_eq!(cfg.record.filename_template, "cast_{date}.webm");
+        assert!(cfg.record.use_utc);
+        assert_eq!(cfg.record.fps, 60);
+        assert_eq!(cfg.record.format, VideoFormat::WebM);
+        assert_eq!(cfg.record.crf, 30);
+        assert!(cfg.record.cursor);
+
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.record, cfg.record);
+    }
+
+    #[test]
+    fn video_format_extension_matches_container() {
+        assert_eq!(VideoFormat::Mp4.extension(), "mp4");
+        assert_eq!(VideoFormat::WebM.extension(), "webm");
+        assert_eq!(VideoFormat::Gif.extension(), "gif");
+    }
+
+    #[test]
+    fn record_save_directory_defaults_to_output_directory_when_set() {
+        let cfg = Config {
+            record: RecordConfig {
+                directory: Some(PathBuf::from("/tmp/casts")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(cfg.record_save_directory(), PathBuf::from("/tmp/casts"));
+    }
+
+    #[test]
+    fn expand_record_filename_substitutes_tokens() {
+        let cfg = Config {
+            record: RecordConfig {
+                filename_template: "{output}_{selection}.mp4".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = cfg.expand_record_filename(&FilenameContext {
+            output: Some("DP-1"),
+            selection: Some("region"),
+        });
+        assert_eq!(out, "DP-1_region.mp4");
     }
 
     #[test]
